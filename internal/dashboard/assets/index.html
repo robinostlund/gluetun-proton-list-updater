@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gluetun · ProtonVPN server selector</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">🛡️</span>
+      <div>
+        <h1>ProtonVPN server selector</h1>
+        <p class="subtitle">Lowest-utilisation server picker for Gluetun</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="activity" class="activity" hidden><span class="spinner"></span><span id="activity-text"></span></span>
+      <span id="stream-state" class="pill pill-muted" title="Live update stream">connecting…</span>
+      <span id="version" class="pill pill-muted"></span>
+    </div>
+  </header>
+
+  <main>
+    <div id="alerts" class="alerts"></div>
+
+    <section class="cards">
+      <article class="card card-current">
+        <h2>Current server</h2>
+        <p id="current-name" class="card-headline">unknown</p>
+        <p id="current-where" class="card-sub"></p>
+        <dl class="kv">
+          <div><dt>Load</dt><dd id="current-load">–</dd></div>
+          <div><dt>Latency</dt><dd id="current-rtt">–</dd></div>
+          <div><dt>Score</dt><dd id="current-score">–</dd></div>
+          <div><dt>Rank</dt><dd id="current-rank">–</dd></div>
+          <div><dt>Public IP</dt><dd id="current-ip">–</dd></div>
+          <div><dt>Forwarded port</dt><dd id="current-port">–</dd></div>
+        </dl>
+        <p id="current-source" class="card-note"></p>
+      </article>
+
+      <article class="card">
+        <h2>Best candidate</h2>
+        <p id="best-name" class="card-headline">–</p>
+        <p id="best-where" class="card-sub"></p>
+        <dl class="kv">
+          <div><dt>Load</dt><dd id="best-load">–</dd></div>
+          <div><dt>Latency</dt><dd id="best-rtt">–</dd></div>
+          <div><dt>Score</dt><dd id="best-score">–</dd></div>
+          <div><dt>Improvement</dt><dd id="improvement">–</dd></div>
+        </dl>
+        <p id="switch-note" class="card-note"></p>
+      </article>
+
+      <article class="card">
+        <h2>Gluetun</h2>
+        <p id="gluetun-status" class="card-headline">–</p>
+        <dl class="kv">
+          <div><dt>Reachable</dt><dd id="gluetun-reachable">–</dd></div>
+          <div><dt>Version</dt><dd id="gluetun-version">–</dd></div>
+          <div><dt>Protocol</dt><dd id="gluetun-vpn">–</dd></div>
+          <div><dt>Provider</dt><dd id="gluetun-provider">–</dd></div>
+          <div><dt>Last check</dt><dd id="gluetun-check">–</dd></div>
+        </dl>
+        <p id="gluetun-error" class="card-note error"></p>
+      </article>
+
+      <article class="card">
+        <h2>Proton list</h2>
+        <p id="proton-count" class="card-headline">–</p>
+        <dl class="kv">
+          <div><dt>Signed in</dt><dd id="proton-login">–</dd></div>
+          <div><dt>Last fetch</dt><dd id="proton-fetch">–</dd></div>
+          <div><dt>Loads refreshed</dt><dd id="proton-loads">–</dd></div>
+          <div><dt>Next fetch</dt><dd id="proton-next">–</dd></div>
+          <div><dt>Candidates</dt><dd id="candidate-count">–</dd></div>
+        </dl>
+        <p id="proton-error" class="card-note error"></p>
+      </article>
+
+      <article class="card">
+        <h2>servers.json</h2>
+        <p id="servers-count" class="card-headline">–</p>
+        <dl class="kv">
+          <div><dt>Path</dt><dd id="servers-path">–</dd></div>
+          <div><dt>Mode</dt><dd id="servers-mode">–</dd></div>
+          <div><dt>Schema version</dt><dd id="servers-schema">–</dd></div>
+          <div><dt>Last write</dt><dd id="servers-write">–</dd></div>
+          <div><dt>Preserved</dt><dd id="servers-preserved">–</dd></div>
+        </dl>
+        <p id="servers-error" class="card-note error"></p>
+      </article>
+
+      <article class="card">
+        <h2>Latency</h2>
+        <p id="latency-median" class="card-headline">–</p>
+        <dl class="kv">
+          <div><dt>Measured</dt><dd id="latency-measured">–</dd></div>
+          <div><dt>Failed</dt><dd id="latency-failed">–</dd></div>
+          <div><dt>Best</dt><dd id="latency-best">–</dd></div>
+          <div><dt>Worst</dt><dd id="latency-worst">–</dd></div>
+          <div><dt>Next sweep</dt><dd id="latency-next">–</dd></div>
+        </dl>
+      </article>
+    </section>
+
+    <section class="toolbar">
+      <button data-action="/api/reconnect" class="primary">Reconnect to best</button>
+      <button data-action="/api/refresh">Refresh server list</button>
+      <button data-action="/api/loads">Refresh loads</button>
+      <button data-action="/api/probe">Probe latency</button>
+      <button data-action="/api/evaluate">Re-evaluate</button>
+      <button data-action="/api/servers/write">Rewrite servers.json</button>
+      <label class="toggle">
+        <input type="checkbox" id="auto-switch">
+        <span>Automatic switching</span>
+      </label>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Candidates <span id="candidates-shown" class="muted"></span></h2>
+        <input type="search" id="filter" placeholder="Filter by server, country or city…" autocomplete="off">
+      </div>
+      <div class="table-scroll">
+        <table id="candidates">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Server</th>
+              <th>Location</th>
+              <th class="num">Load</th>
+              <th class="num">Latency</th>
+              <th class="num">Score</th>
+              <th>Features</th>
+              <th class="right">Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="split">
+      <section class="panel">
+        <div class="panel-head"><h2>Switch history</h2></div>
+        <div class="table-scroll short">
+          <table id="history">
+            <thead>
+              <tr><th>When</th><th>From → to</th><th>Reason</th><th class="num">Score</th><th>Result</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Recent activity</h2></div>
+        <ol id="logs" class="logs"></ol>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Effective settings</h2></div>
+      <dl id="settings" class="settings"></dl>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Filtering</h2></div>
+      <dl id="stats" class="settings"></dl>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Keep the build context small and free of anything secret.
+.git
+.github
+bin
+data
+coverage.out
+.env
+*.md
+!README.md
+docker-compose.yml
+.DS_Store

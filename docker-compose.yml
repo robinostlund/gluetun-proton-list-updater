@@ -1,0 +1,127 @@
+services:
+  gluetun:
+    # v3.31.0 is the minimum (it introduced PUT /v1/vpn/settings); v3.39.0+ is
+    # recommended, since that is when Gluetun's server model gained the
+    # secure_core and tor fields.
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      # Gluetun's control server. Keep it on the internal network in production
+      # rather than published to the host.
+      - "8000:8000"
+    volumes:
+      # The same volume the updater writes servers.json into.
+      - gluetun-config:/gluetun
+    environment:
+      VPN_SERVICE_PROVIDER: protonvpn
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
+
+      # Countries here are only a safety net for the very first connection and
+      # for restarts: the updater pins an exact server, sending that server's own
+      # country along with it.
+      #
+      # Do not set SERVER_CITIES or SERVER_NAMES here. Gluetun combines every
+      # selection filter with AND, and a filter the updater cannot overwrite can
+      # leave no server matching, which crashes Gluetun's VPN loop. Use the
+      # updater's own COUNTRIES/CITIES instead.
+      SERVER_COUNTRIES: ${COUNTRIES:-Sweden}
+
+      HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+
+      # REQUIRED. Gluetun's built-in "public" role does not include
+      # /v1/vpn/settings, so hostname pinning answers 401 without this. The value
+      # is a JSON role and grants every route not otherwise assigned.
+      #
+      # Using an API key (rather than "auth":"none") keeps the control server
+      # closed even though it is reachable on the Docker network. Set the same
+      # value in GLUETUN_API_KEY below.
+      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: >-
+        {"name":"updater","auth":"apikey","apikey":"${GLUETUN_API_KEY:?set GLUETUN_API_KEY in .env}"}
+
+      # Gluetun's own periodic updater would overwrite servers.json; the sidecar
+      # owns that file.
+      UPDATER_PERIOD: "0"
+
+      # Optional but recommended. Gluetun only reads servers.json at startup, so
+      # a server Proton added since then cannot be selected. With these set, the
+      # updater can ask Gluetun to refresh its in-memory list instead of needing
+      # a container restart. They are the same Proton credentials as below.
+      UPDATER_PROTONVPN_EMAIL: ${PROTON_USERNAME}
+      UPDATER_PROTONVPN_PASSWORD: ${PROTON_PASSWORD}
+
+      PORT_FORWARD_ONLY: "on"
+      VPN_PORT_FORWARDING: "on"
+      TZ: ${TZ:-Europe/Stockholm}
+    restart: unless-stopped
+
+  proton-updater:
+    image: ghcr.io/robinostlund/gluetun-proton-list-updater:latest
+    # build: .
+    container_name: proton-updater
+    # Deliberately NOT network_mode: service:gluetun. The updater must reach the
+    # Proton API and measure latency to Proton entry nodes from outside the
+    # tunnel; inside it, every measurement would be taken through the existing
+    # VPN connection and would be meaningless.
+    ports:
+      - "8080:8080"
+    volumes:
+      - gluetun-config:/gluetun
+      - proton-updater-data:/data
+    environment:
+      PROTON_USERNAME: ${PROTON_USERNAME}
+      PROTON_PASSWORD: ${PROTON_PASSWORD}
+      # Optional: makes two-factor login fully unattended. Without it, a code
+      # can be submitted from the dashboard when Proton asks for one.
+      PROTON_TOTP_SECRET: ${PROTON_TOTP_SECRET:-}
+
+      GLUETUN_URL: http://gluetun:8000
+      GLUETUN_API_KEY: ${GLUETUN_API_KEY}
+
+      SERVERS_FILE: /gluetun/servers.json
+      SERVERS_WRITE_MODE: update
+
+      # Which countries the tunnel may use.
+      COUNTRIES: ${COUNTRIES:-Sweden,Netherlands,Germany}
+      MAX_LOAD: "85"
+
+      # Scoring: utilisation first, latency as a strong secondary signal.
+      SCORE_LOAD_WEIGHT: "1.0"
+      SCORE_LATENCY_WEIGHT: "0.7"
+      SCORE_LATENCY_CEILING: 150ms
+
+      LATENCY_ENABLED: "true"
+      LATENCY_INTERVAL: 30m
+      LATENCY_TOP_N: "60"
+
+      # Reconnect pacing. Every switch drops the tunnel and with it every
+      # connection through it, so these bound how often that can happen:
+      # at most one automatic switch per SWITCH_MIN_INTERVAL, normally spaced by
+      # SWITCH_COOLDOWN, and only when the gain is worth it.
+      AUTO_SWITCH: "true"
+      RECONNECT_MODE: settings
+      SWITCH_MIN_IMPROVEMENT: "0.10"
+      SWITCH_COOLDOWN: 15m
+      SWITCH_MIN_INTERVAL: 5m
+      SWITCH_LOAD_TRIGGER: "85"
+      SWITCH_EVALUATION_INTERVAL: 5m
+
+      PROTON_REFRESH_INTERVAL: 12h
+      PROTON_LOAD_REFRESH_INTERVAL: 15m
+
+      # DASHBOARD_USERNAME: admin
+      # DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+
+      LOG_LEVEL: info
+      TZ: ${TZ:-Europe/Stockholm}
+    depends_on:
+      - gluetun
+    restart: unless-stopped
+
+volumes:
+  gluetun-config:
+  proton-updater-data:
