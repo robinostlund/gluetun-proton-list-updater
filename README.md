@@ -378,7 +378,7 @@ threshold means nothing happens unless a server is meaningfully better.
 | `SWITCH_MIN_INTERVAL` | `5m` | **Hard floor. Nothing bypasses it**, not even an overloaded server. This is the guarantee on how often the tunnel can drop. |
 | `SWITCH_COOLDOWN` | `15m` | Normal spacing between automatic switches. Only the load trigger may skip it. |
 | `SWITCH_MIN_IMPROVEMENT` | `0.10` | The score gap the challenger must win by. With the default weights, 0.10 is roughly "10 % less loaded" or "15 ms closer". The main defence against flapping. |
-| `SWITCH_EVALUATION_INTERVAL` | `5m` | How often the decision is *considered*. Considering is free; only the guards above allow acting. |
+| `SWITCH_EVALUATION_INTERVAL` | `5m` | How often the decision is *considered*. Considering is free; only the guards above allow acting. An evaluation also runs immediately whenever Gluetun becomes usable, so a slow-starting Gluetun does not leave the tunnel unmanaged until the next tick. |
 | `SWITCH_LOAD_TRIGGER` | `85` | Skips the cooldown and the improvement threshold when the current server exceeds this load — but only if the best candidate is actually below it, so a night where everything is busy cannot turn into a reconnect loop. |
 
 Every switch is also **verified**, and verification failure does not retry: the attempt is
@@ -390,6 +390,21 @@ To make it calmer still: raise `SWITCH_COOLDOWN` and `SWITCH_MIN_INTERVAL`, rais
 `SWITCH_MIN_IMPROVEMENT` (e.g. `0.25`), or set `SWITCH_LOAD_TRIGGER=0` to disable load-based
 switching. For a fully manual setup use `AUTO_SWITCH=false` and reconnect from the dashboard;
 `RECONNECT_MODE=none` never touches the tunnel at all and only maintains `servers.json`.
+
+### It reacts to Gluetun starting, without waiting for the next tick
+
+Gluetun normally takes longer to come up than this container, so the first health
+checks find it unreachable and there is nothing to evaluate. As soon as it becomes
+usable — reachable, and either running or crashed — an evaluation runs immediately
+rather than waiting out `SWITCH_EVALUATION_INTERVAL`:
+
+```
+INFO gluetun became usable, evaluating now rather than waiting for the next round
+```
+
+The same applies after a Gluetun restart, or after the tunnel is started again
+having been stopped. Pressing *Re-evaluate* on the dashboard should not be
+necessary for this.
 
 ### When it switches
 

@@ -270,6 +270,10 @@ func (e *Engine) allEntryIPs() (addresses []netip.Addr) {
 // Every failure here is non-fatal: Gluetun restarting is a normal event, and
 // the tool must simply mark itself degraded and carry on.
 func (e *Engine) checkGluetun(ctx context.Context) {
+	// Remembered so a transition can be spotted: Gluetun coming up is worth acting
+	// on at once rather than at the next evaluation, which may be minutes away.
+	was := e.Snapshot().Gluetun
+
 	status, err := e.gluetun.Status(ctx)
 	if err != nil {
 		e.mutateSnapshot(func(snapshot *Snapshot) {
@@ -361,6 +365,27 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 		e.logger.Warn("gluetun is not configured for protonvpn; this tool cannot affect it",
 			"provider", e.Snapshot().Gluetun.Provider)
 	}
+
+	// Gluetun usually takes longer to start than this container does, so the first
+	// few health checks find it unreachable. Waiting for the evaluation ticker
+	// after that would leave the tunnel on whatever server Gluetun picked for
+	// itself for up to SWITCH_EVALUATION_INTERVAL - long enough that the obvious
+	// reaction is to go and press the button by hand.
+	if becameUsable(was, e.Snapshot().Gluetun) && len(e.ranked) > 0 {
+		e.logger.Info("gluetun became usable, evaluating now rather than waiting for the next round",
+			"status", status)
+		e.evaluate(ctx, "gluetun became usable", false)
+	}
+}
+
+// becameUsable reports whether Gluetun just reached a state the tunnel can be
+// moved in. A crashed tunnel counts: moving it elsewhere is usually the fix.
+func becameUsable(was, now GluetunStatus) bool {
+	usable := func(state GluetunStatus) bool {
+		return state.Reachable &&
+			(state.Status == gluetunapi.StatusRunning || state.Status == gluetunapi.StatusCrashed)
+	}
+	return usable(now) && !usable(was)
 }
 
 // checkServerDataIsRead warns when the server data this tool writes cannot

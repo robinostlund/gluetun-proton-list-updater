@@ -1454,3 +1454,63 @@ func TestServerDataIsWrittenFromTheCacheWhenProtonIsDown(t *testing.T) {
 		t.Errorf("the servers file was not written: %v", err)
 	}
 }
+
+// Gluetun usually takes longer to start than this container, so the first health
+// checks find it unreachable. Waiting for the evaluation ticker after that leaves
+// the tunnel wherever Gluetun put it for up to SWITCH_EVALUATION_INTERVAL - which
+// is why reaching for the dashboard button felt necessary.
+func TestEvaluationHappensAsSoonAsGluetunBecomesUsable(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		// Long enough that the ticker cannot be what triggers the switch.
+		cfg.Switch.Interval = time.Hour
+	})
+	// Gluetun is up but the tunnel is deliberately down, so nothing may move yet.
+	harness.gluetun.mu.Lock()
+	harness.gluetun.status = gluetunapi.StatusStopped
+	harness.gluetun.mu.Unlock()
+
+	harness.run(t, func() bool { return harness.engine.Snapshot().CandidatesTotal > 0 })
+
+	if pinned := harness.gluetun.pinnedHostnames(); len(pinned) != 0 {
+		t.Fatalf("a stopped tunnel must be left alone, but pinned %v", pinned)
+	}
+
+	// The tunnel comes up. The next health check must act on it immediately.
+	harness.gluetun.mu.Lock()
+	harness.gluetun.status = gluetunapi.StatusRunning
+	harness.gluetun.mu.Unlock()
+
+	harness.engine.checkGluetun(context.Background())
+
+	if pinned := harness.gluetun.pinnedHostnames(); len(pinned) == 0 {
+		t.Error("the tunnel became usable, so it should have been evaluated at once")
+	}
+}
+
+func TestBecameUsable(t *testing.T) {
+	t.Parallel()
+
+	down := GluetunStatus{Reachable: false}
+	stopped := GluetunStatus{Reachable: true, Status: gluetunapi.StatusStopped}
+	running := GluetunStatus{Reachable: true, Status: gluetunapi.StatusRunning}
+	crashed := GluetunStatus{Reachable: true, Status: gluetunapi.StatusCrashed}
+
+	for name, test := range map[string]struct {
+		was, now GluetunStatus
+		want     bool
+	}{
+		"unreachable to running": {down, running, true},
+		"stopped to running":     {stopped, running, true},
+		"unreachable to crashed": {down, crashed, true},
+		"running stays running":  {running, running, false},
+		"running to unreachable": {running, down, false},
+		"running to stopped":     {running, stopped, false},
+		"unreachable to stopped": {down, stopped, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := becameUsable(test.was, test.now); got != test.want {
+				t.Errorf("becameUsable = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
