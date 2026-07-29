@@ -501,26 +501,35 @@ func (e *Engine) updateVPNType(vpnType string) {
 func (e *Engine) currentHostname() (hostname, source string) {
 	snapshot := e.Snapshot()
 
+	// Gluetun's own reported selection comes first, because it is exact. When it
+	// is restricted to a single hostname, that is where the tunnel is - Gluetun
+	// validated the name and its selection is what decides the connection.
+	if pinned := snapshot.Gluetun.Selection["hostnames"]; len(pinned) == 1 {
+		return pinned[0], "pinned"
+	}
+
+	// Failing that, match Gluetun's exit address against Proton's. This is a
+	// weaker signal than it looks: Proton publishes the server address, which is
+	// often not the address the internet sees, so a miss here means nothing.
 	if snapshot.Gluetun.Exit.IP != "" {
 		if address, err := netip.ParseAddr(snapshot.Gluetun.Exit.IP); err == nil {
 			// Search the wide set, not just the allowed one: a tunnel sitting on
 			// an over-loaded or out-of-country server is exactly the case worth
 			// reporting accurately, and it is what triggers a switch.
-			for _, candidate := range e.fileCandidates {
-				if candidate.ExitIP.IsValid() && candidate.ExitIP == address {
-					return candidate.Hostname, "public-ip"
-				}
-			}
-			for _, candidate := range e.candidates {
-				if candidate.ExitIP.IsValid() && candidate.ExitIP == address {
-					return candidate.Hostname, "public-ip"
+			for _, set := range [][]catalog.Candidate{e.fileCandidates, e.candidates} {
+				for _, candidate := range set {
+					if candidate.ExitIP.IsValid() && candidate.ExitIP == address {
+						return candidate.Hostname, "public-ip"
+					}
 				}
 			}
 		}
 	}
 
-	if pinned := e.state.snapshot().PinnedHostname; pinned != "" {
-		return pinned, "pinned"
+	// Last resort: what this tool last asked for. Used when Gluetun's settings
+	// cannot be read at all.
+	if remembered := e.state.snapshot().PinnedHostname; remembered != "" {
+		return remembered, "remembered"
 	}
 	return "", "unknown"
 }

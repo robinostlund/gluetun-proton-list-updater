@@ -52,6 +52,9 @@ type fakeGluetun struct {
 	// portForwardOnly mirrors Gluetun's PORT_FORWARD_ONLY, which it ANDs with any
 	// pinned hostname.
 	portForwardOnly bool
+	// statusAfterPin is the status reported once a hostname has been pinned, so a
+	// test can model Gluetun failing to connect with the new selection.
+	statusAfterPin string
 	// applyOutcome overrides the answer to PUT /v1/vpn/settings. Gluetun answers
 	// "already crashed" when its VPN loop was not running, meaning it stored the
 	// selection without restarting.
@@ -90,7 +93,11 @@ func (f *fakeGluetun) handler() http.Handler {
 	mux.HandleFunc("GET /v1/vpn/status", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": f.status})
+		status := f.status
+		if f.statusAfterPin != "" && len(f.pinned) > 0 {
+			status = f.statusAfterPin
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
 	})
 	mux.HandleFunc("PUT /v1/vpn/status", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -115,10 +122,16 @@ func (f *fakeGluetun) handler() http.Handler {
 	mux.HandleFunc("GET /v1/vpn/settings", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		portForwardOnly := f.portForwardOnly
+		// Real Gluetun reports back the selection it is enforcing, including any
+		// pinned hostname. Verification depends on that, so the fake has to do it.
+		hostnames := ""
+		if len(f.pinned) > 0 {
+			hostnames = fmt.Sprintf(`"hostnames":[%q],`, f.pinned[len(f.pinned)-1])
+		}
 		f.mu.Unlock()
 		fmt.Fprintf(w, `{"type":"wireguard","provider":{"name":"protonvpn",`+
-			`"server_selection":{"vpn":"wireguard","port_forward_only":%t},`+
-			`"port_forwarding":{"enabled":%t}}}`, portForwardOnly, portForwardOnly)
+			`"server_selection":{"vpn":"wireguard",%s"port_forward_only":%t},`+
+			`"port_forwarding":{"enabled":%t}}}`, hostnames, portForwardOnly, portForwardOnly)
 	})
 	mux.HandleFunc("PUT /v1/vpn/settings", func(w http.ResponseWriter, r *http.Request) {
 		var patch gluetunapi.Settings
@@ -1286,17 +1299,17 @@ func TestTransientTunnelStateDoesNotEraseTheForwardedPort(t *testing.T) {
 	}
 }
 
-// Proton's exit address for a hostname is not always what the internet observes:
-// a hostname can have several machines, and Proton reports the server address
-// rather than the NATed egress. Insisting on a match recorded good switches as
+// Proton publishes the server address, not the address the internet sees: a
+// server listed at 62.93.166.123 can egress from 159.26.108.2. Verification must
+// not depend on them matching - it did, and reported perfectly good switches as
 // failures.
-func TestSwitchIsVerifiedByAChangedPublicIP(t *testing.T) {
+func TestSwitchIsVerifiedWhenTheObservedAddressDiffersFromProtons(t *testing.T) {
 	harness := newHarness(t, false, nil)
-	// Gluetun reports an address that is not among Proton's exit addresses.
+	// Gluetun reports an address that appears nowhere in Proton's data.
 	harness.gluetun.exitIPByHostname = map[string]string{
 		"se-01.protonvpn.net": "81.0.0.1",
-		"se-02.protonvpn.net": "203.0.113.77", // not 81.0.0.2 as Proton claims
-		"no-01.protonvpn.net": "203.0.113.78",
+		"se-02.protonvpn.net": "159.26.108.2", // Proton claims 81.0.0.2
+		"no-01.protonvpn.net": "159.26.108.3",
 	}
 
 	harness.run(t, func() bool {
@@ -1306,10 +1319,41 @@ func TestSwitchIsVerifiedByAChangedPublicIP(t *testing.T) {
 
 	record := harness.engine.Snapshot().History[0]
 	if !record.Succeeded {
-		t.Fatalf("the switch should be verified by the changed address: %+v", record)
+		t.Fatalf("the switch should verify from Gluetun's selection: %+v", record)
 	}
-	if record.PublicIP != "203.0.113.77" {
-		t.Errorf("PublicIP = %q, want the observed address", record.PublicIP)
+	if record.To != "se-02.protonvpn.net" {
+		t.Errorf("switched to %q, want se-02", record.To)
+	}
+	// The address is still recorded, just not used as the gate.
+	if record.PublicIP != "159.26.108.2" {
+		t.Errorf("PublicIP = %q, want the observed address recorded", record.PublicIP)
+	}
+}
+
+// A crashed VPN loop will keep failing with the same selection, so waiting out the
+// verification timeout achieves nothing.
+func TestVerificationFailsFastOnACrashedTunnel(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Switch.VerifyTimeout = 60 * time.Second // would be a long wait
+	})
+	harness.gluetun.statusAfterPin = gluetunapi.StatusCrashed
+
+	started := time.Now()
+	harness.run(t, func() bool {
+		history := harness.engine.Snapshot().History
+		return len(history) > 0 && !history[0].Succeeded
+	})
+	elapsed := time.Since(started)
+
+	record := harness.engine.Snapshot().History[0]
+	if record.Succeeded {
+		t.Fatal("a crashed tunnel is not a successful switch")
+	}
+	if !strings.Contains(record.Error, "crashed") {
+		t.Errorf("error = %q, want the crash named", record.Error)
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("took %s: a crash should be reported without waiting out the timeout", elapsed)
 	}
 }
 

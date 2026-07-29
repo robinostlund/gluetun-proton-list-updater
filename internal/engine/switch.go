@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -408,44 +407,36 @@ func outcomeMeansNotRestarted(outcome string) bool {
 	}
 }
 
-// verifyTunnel waits for the tunnel to come back up and reports the public IP.
+// verifyTunnel confirms the tunnel really moved to the requested server.
 //
-// Verification is what turns "we sent a request" into "the switch worked", but it
-// has to accept the two ways a good switch can look:
+// It verifies Gluetun's own reported selection rather than the observed public IP,
+// because Proton's exit addresses are not the addresses the internet sees. A
+// server Proton lists at 62.93.166.123 can egress from 159.26.108.2, so requiring
+// a match either failed outright or forced a weak "the address changed at least"
+// fallback that proved nothing about *which* server was chosen.
 //
-//   - The public IP matches an exit address Proton lists for the pinned hostname.
-//     This is conclusive.
-//   - The public IP simply changed. This is accepted too, because Proton's exit
-//     addresses are not always what the internet observes: a hostname can have
-//     several physical machines with different exit addresses, and Proton reports
-//     the server address rather than the NATed egress. Insisting on a match made
-//     perfectly good switches record as failures, with the tunnel actually up and
-//     running on the requested server.
+// What Gluetun reports is authoritative and exact:
+//
+//   - the tunnel is running (not crashed, not mid-transition), and
+//   - its server selection is still restricted to the hostname we asked for.
+//
+// Gluetun validated that hostname when it accepted the request, and its selection
+// is the only thing that decides where the tunnel connects - so those two facts
+// together mean it is on the requested server. The public IP is recorded for
+// display, and never gates the result.
 func (e *Engine) verifyTunnel(ctx context.Context, target scoring.Scored, previousIP string) (publicIP string, err error) {
 	deadline := time.Now().Add(e.cfg.Switch.VerifyTimeout)
-	const pollInterval = 3 * time.Second
+	const pollInterval = 2 * time.Second
 
-	// Every exit address Proton lists for this hostname, since a hostname can be
-	// backed by more than one machine.
-	expected := make(map[string]struct{})
-	for _, candidate := range e.candidates {
-		if candidate.Hostname == target.Candidate.Hostname && candidate.ExitIP.IsValid() {
-			expected[candidate.ExitIP.String()] = struct{}{}
-		}
-	}
+	// Only a pinned selection can be confirmed. In status mode Gluetun chooses the
+	// server itself, so there is nothing to compare against and a changed address
+	// is the best available signal.
+	pinned := e.cfg.Switch.Mode == config.ReconnectSettings
 
-	// Once a changed address is seen, polling continues only briefly in case the
-	// expected one appears - Gluetun caches the public IP for a moment, so the
-	// first reading after a reconnect can still be the old one. Waiting out the
-	// whole timeout for a match that may never come would leave every switch
-	// looking unfinished for a minute and a half.
-	const graceAfterChange = 9 * time.Second
-	var changedAt time.Time
-
-	var lastStatus, changedIP string
+	var lastStatus string
 	var lastErr error
 
-	for time.Now().Before(deadline) {
+	for {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -455,59 +446,63 @@ func (e *Engine) verifyTunnel(ctx context.Context, target scoring.Scored, previo
 		status, statusErr := e.gluetun.Status(ctx)
 		if statusErr != nil {
 			lastErr = statusErr
-			continue
-		}
-		lastStatus = status
-		if status != gluetunapi.StatusRunning {
-			continue
-		}
+		} else {
+			lastStatus = status
+			switch status {
+			case gluetunapi.StatusCrashed:
+				// No point waiting out the timeout: Gluetun cannot connect with
+				// this selection and will keep retrying the same thing.
+				return e.bestEffortPublicIP(ctx), fmt.Errorf(
+					"gluetun could not connect to %s: its VPN loop crashed",
+					target.Candidate.Hostname)
 
-		ip, ipErr := e.gluetun.GetPublicIP(ctx)
-		if ipErr != nil || ip.IP == "" {
-			lastErr = ipErr
-			continue
-		}
+			case gluetunapi.StatusRunning:
+				if !pinned {
+					// Nothing to compare against, so fall back to the address
+					// having changed.
+					observed := e.bestEffortPublicIP(ctx)
+					if observed != "" && observed != previousIP {
+						return observed, nil
+					}
+					break
+				}
 
-		if _, matches := expected[ip.IP]; matches {
-			return ip.IP, nil
-		}
-		if ip.IP != previousIP {
-			if changedIP == "" {
-				changedIP, changedAt = ip.IP, time.Now()
+				settings, settingsErr := e.gluetun.GetSettings(ctx)
+				if settingsErr != nil {
+					lastErr = settingsErr
+					break
+				}
+				hostnames := settings.PinnedHostnames()
+				if len(hostnames) == 1 && hostnames[0] == target.Candidate.Hostname {
+					// Running, and restricted to exactly the server requested.
+					return e.bestEffortPublicIP(ctx), nil
+				}
+				lastErr = fmt.Errorf("gluetun is running but its selection is %v, not %s",
+					hostnames, target.Candidate.Hostname)
 			}
-			changedIP = ip.IP
-			if time.Since(changedAt) >= graceAfterChange {
-				break
-			}
 		}
-	}
 
-	if changedIP != "" {
-		// The tunnel is up on a different address than before. Accept it, and say
-		// that Proton's data did not line up so a mismatch is not mistaken for a
-		// silent failure.
-		e.logger.Info("tunnel verified by a changed public IP; it does not match Proton's exit address for this server",
-			"hostname", target.Candidate.Hostname,
-			"observed", changedIP,
-			"proton_exit_addresses", expectedList(expected))
-		return changedIP, nil
+		if !time.Now().Before(deadline) {
+			break
+		}
 	}
 
 	if lastErr != nil {
 		return "", fmt.Errorf("tunnel not confirmed within %s (last status %q): %w",
 			e.cfg.Switch.VerifyTimeout, lastStatus, lastErr)
 	}
-	return "", fmt.Errorf("tunnel not confirmed within %s (last status %q): the public IP never changed",
+	return "", fmt.Errorf("tunnel not confirmed within %s: it never reached the running state (last status %q)",
 		e.cfg.Switch.VerifyTimeout, lastStatus)
 }
 
-func expectedList(expected map[string]struct{}) []string {
-	list := make([]string, 0, len(expected))
-	for address := range expected {
-		list = append(list, address)
+// bestEffortPublicIP reads the exit address for display. A failure is not worth
+// reporting: the address is informational, never a verification gate.
+func (e *Engine) bestEffortPublicIP(ctx context.Context) (publicIP string) {
+	ip, err := e.gluetun.GetPublicIP(ctx)
+	if err != nil {
+		return ""
 	}
-	sort.Strings(list)
-	return list
+	return ip.IP
 }
 
 // recordSwitch appends to the persisted history.

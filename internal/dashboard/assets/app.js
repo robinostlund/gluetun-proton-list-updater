@@ -187,8 +187,10 @@ function renderCurrent() {
     : requested === false ? 'not requested' : 'none');
 
   const sources = {
-    'pinned': 'Identified by the hostname this tool pinned in Gluetun.',
-    'public-ip': "Identified by matching Gluetun's public IP to a Proton exit address.",
+    'pinned': "Identified from Gluetun's own server selection, which is exact.",
+    'remembered': 'Identified from the hostname this tool last pinned; Gluetun could not be asked.',
+    'public-ip': "Identified by matching Gluetun's public IP to a Proton exit address — " +
+      'a weak signal, since Proton publishes the server address rather than the observed one.',
     'unknown': 'Could not identify the server: the tunnel may be down, or the server is not in Proton’s current list.',
   };
   let note = sources[snapshot.selection.current_source] || '';
