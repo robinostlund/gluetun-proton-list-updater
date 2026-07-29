@@ -340,6 +340,9 @@ td.right, th.right { text-align: right; }
 .toast.bad { border-color: var(--bad); color: var(--bad); }
 .toast.good { border-color: var(--good); }
 
+.card-tags { margin: 0 0 10px; }
+.tag-p2p { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.tag-excluded { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
 .tag-free { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--border)); }
 .tag-paid { color: var(--text-muted); }
 

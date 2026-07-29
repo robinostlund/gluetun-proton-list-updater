@@ -55,6 +55,23 @@ function loadCell(load) {
   return `${load}%<span class="bar ${severity}"><span style="width:${Math.min(load, 100)}%"></span></span>`;
 }
 
+// Feature badges for a server. Shared by the table and the summary cards so the
+// same server never appears to have different properties in two places.
+function featureTags(candidate, options = {}) {
+  const tags = [];
+  if (options.current) tags.push('<span class="tag">current</span>');
+  if (candidate.p2p) tags.push('<span class="tag tag-p2p">p2p</span>');
+  if (candidate.stream) tags.push('<span class="tag">stream</span>');
+  if (candidate.secure_core) tags.push('<span class="tag">secure core</span>');
+  if (candidate.tor) tags.push('<span class="tag">tor</span>');
+  tags.push(candidate.free
+    ? '<span class="tag tag-free">free</span>'
+    : '<span class="tag tag-paid">paid</span>');
+  if (candidate.wireguard) tags.push('<span class="tag">wg</span>');
+  if (candidate.excluded) tags.push('<span class="tag tag-excluded">outside filters</span>');
+  return tags.join('');
+}
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -179,6 +196,7 @@ function renderCurrent() {
     ? `${current.country}${current.city ? ' · ' + current.city : ''}`
     : 'No server identified yet');
   text('current-host', current ? current.hostname : '');
+  el('current-tags').innerHTML = current ? featureTags(current) : '';
   el('current-load').innerHTML = current ? loadCell(current.load) : '–';
   text('current-rtt', current && current.rtt_known ? `${current.rtt_ms} ms` : 'unmeasured');
   text('current-score', current && !current.excluded ? current.score.toFixed(3) : '–');
@@ -214,12 +232,17 @@ function renderBest() {
   text('best-name', best ? best.server_name : '–');
   text('best-where', best ? `${best.country}${best.city ? ' · ' + best.city : ''}` : '');
   text('best-host', best ? best.hostname : '');
+  el('best-tags').innerHTML = best ? featureTags(best) : '';
   el('best-load').innerHTML = best ? loadCell(best.load) : '–';
   text('best-rtt', best && best.rtt_known ? `${best.rtt_ms} ms` : 'unmeasured');
   text('best-score', best ? best.score.toFixed(3) : '–');
   text('improvement', selection.improvement ? selection.improvement.toFixed(3) : '0.000');
 
   const parts = [];
+  if ((snapshot.gluetun.requirements_adopted || []).includes('port_forward_only')) {
+    parts.push('Only port-forwarding (P2P) servers are considered, because Gluetun requires one — ' +
+      'so a busier server can legitimately win here.');
+  }
   parts.push(`Needs ${selection.min_improvement.toFixed(3)} improvement to switch automatically.`);
   if (selection.cooldown_remaining) parts.push(`Cooldown: ${selection.cooldown_remaining} left.`);
   if (!selection.auto_switch) parts.push('Automatic switching is off.');
@@ -235,6 +258,22 @@ function renderGluetun() {
   text('gluetun-vpn', gluetun.vpn_type || '–');
   text('gluetun-provider', gluetun.provider || '–');
   text('gluetun-dns', gluetun.dns_status || '–');
+
+  // Port forwarding is worth stating outright: it decides whether selection is
+  // restricted to P2P servers, which is otherwise invisible.
+  const requested = gluetun.port_forwarding_enabled;
+  const p2pRequired = (gluetun.requirements_adopted || []).includes('port_forward_only');
+  const ports = gluetun.forwarded_ports || [];
+  let pf;
+  if (requested === undefined || requested === null) {
+    pf = 'unknown';
+  } else if (!requested) {
+    pf = 'off';
+  } else {
+    pf = ports.length ? `on, port ${ports.join(', ')}` : 'on, no port yet';
+  }
+  if (p2pRequired) pf += ' · P2P servers only';
+  text('gluetun-pf', pf);
   text('gluetun-check', timeAgo(gluetun.last_check));
   text('gluetun-error', gluetun.reachable ? (gluetun.last_error || '') : '');
 
@@ -372,19 +411,6 @@ function renderCandidates() {
   text('candidates-shown', `showing ${rows.length} of ${snapshot.candidates_total}`);
 
   el('candidates').tBodies[0].innerHTML = rows.map((candidate) => {
-    const tags = [];
-    if (candidate.is_current) tags.push('<span class="tag">current</span>');
-    if (candidate.p2p) tags.push('<span class="tag">p2p</span>');
-    if (candidate.stream) tags.push('<span class="tag">stream</span>');
-    if (candidate.secure_core) tags.push('<span class="tag">secure core</span>');
-    if (candidate.tor) tags.push('<span class="tag">tor</span>');
-    // "free" means the server is available on the free tier; everything else in
-    // the list needs a paid plan, which is worth showing rather than implying.
-    tags.push(candidate.free
-      ? '<span class="tag tag-free">free</span>'
-      : '<span class="tag tag-paid">paid</span>');
-    if (candidate.wireguard) tags.push('<span class="tag">wg</span>');
-
     const scoreTitle = candidate.rtt_known
       ? `load ${candidate.score_load} + latency ${candidate.score_latency} + proton ${candidate.score_proton}`
       : `load ${candidate.score_load} + assumed latency ${candidate.score_latency} (not probed yet) ` +
@@ -401,7 +427,7 @@ function renderCandidates() {
       <td class="num" title="${escapeHTML(scoreTitle)}">${candidate.rtt_known
         ? candidate.score.toFixed(3)
         : '~' + candidate.score.toFixed(3)}</td>
-      <td><div class="tags">${tags.join('')}</div></td>
+      <td><div class="tags">${featureTags(candidate, { current: candidate.is_current })}</div></td>
       <td class="right">
         <button class="small" data-switch="${escapeHTML(candidate.hostname)}"
           ${candidate.is_current ? 'disabled' : ''}>Use</button>

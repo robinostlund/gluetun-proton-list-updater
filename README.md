@@ -37,7 +37,7 @@ the best server.
 │                        │                          └──────────────────────┘
 │                        │        Gluetun control server
 │                        │ ──── PUT /v1/vpn/settings ─────────▶ pin hostname + reconnect
-│                        │ ──── GET /v1/publicip/ip ──────────▶ verify the switch worked
+│                        │ ──── GET /v1/vpn/settings+status ──▶ verify the switch worked
 └────────────────────────┘
 ```
 
@@ -53,8 +53,13 @@ list. Two details decide whether your data is actually used, and both are easy t
 
 **Switching servers.** `PUT /v1/vpn/settings` with a one-hostname server selection makes Gluetun
 stop the tunnel, apply the selection and start again — a targeted reconnect with no container
-restart. The switch is then *verified*: the tool polls Gluetun's public IP until it matches the
-chosen server's Proton exit address. "We sent the request" is not the same as "it worked".
+restart. The switch is then *verified* against **Gluetun's own reported selection and tunnel
+status**: the hostname it says it is using must be the one we asked for, and the tunnel must reach
+`running`. "We sent the request" is not the same as "it worked".
+
+Verification deliberately does *not* rely on the public IP matching Proton's published exit
+address — with Proton those frequently differ, so that check produced false alarms on switches
+that had in fact succeeded. The exit IP is still shown on the dashboard, as information.
 
 The pin carries the chosen server's **country and city as well as its hostname**. That is not
 cosmetic: Gluetun ANDs every selection filter, so a hostname alone would still be intersected with
@@ -264,16 +269,22 @@ to evaluate, and the tool would lose contact whenever the tunnel drops.
 ## The dashboard
 
 - **Current server** — name, country, load, latency, score, rank, public IP, forwarded port,
-  and how the server was identified.
+  how the server was identified, and **feature tags** (`p2p`, `secure core`, `tor`, `stream`,
+  `free`) so you can see at a glance what kind of server you are on.
 - **Public IP (from Gluetun)** — the exit address Gluetun reports, with country, region, city,
   organisation, timezone and reverse DNS, and a note when it matches the selected server's Proton
   exit address (which is how the current server is identified).
-- **Forwarded port** — the port Proton forwarded, plus whether Gluetun is even *requesting* one, so
-  "no port" is never ambiguous.
 - **Gluetun's own view** — everything its control server reports: tunnel status, version, commit,
   build date, protocol, provider, DNS state, its own updater state, and **the server filters
   Gluetun is currently enforcing** (usually the reason a specific server was refused).
-- **Best candidate** — with the score gap and the reason a switch has or has not happened.
+  Its **Port forwarding** row is explicit about all four states — `unknown`, `off`,
+  `on, no port yet`, `on, port 55019` — and appends `· P2P servers only` when
+  `PORT_FORWARD_ONLY` has been adopted, so the reason selection is narrowed is visible next to
+  the setting that caused it.
+- **Best candidate** — with the score gap, its feature tags, and the reason a switch has or has
+  not happened. When Gluetun requires port forwarding, this card carries a note saying only P2P
+  servers are considered — which is why a *busier* server can legitimately be the best one, and
+  why "Reconnect to best" will go there.
 - **Actions** — reconnect to best, refresh the server list, refresh loads, probe latency,
   re-evaluate, rewrite `servers.json`, toggle automatic switching.
 - **Candidate table** — every allowed server ranked, with a load bar, latency, score breakdown
@@ -304,8 +315,6 @@ unauthenticated so Docker's health check works.
 | `POST` | `/api/auto-switch` | `{"enabled":true}` |
 | `POST` | `/api/totp` | `{"code":"123456"}` |
 | `GET` | `/healthz` | Health check |
-
----
 
 ## Servers your account cannot use
 
@@ -534,7 +543,30 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `STREAM` | `include` | `include` / `exclude` / `only` |
 | `FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
 
-### Servers your account cannot use
+#### P2P servers are only required when Gluetun asks
+
+Whether selection is restricted to P2P (port-forwarding-capable) servers comes from
+Gluetun's `PORT_FORWARD_ONLY`, and from nothing else. Verified against a real
+Gluetun in both configurations, with a deliberately quieter non-P2P server so the
+choice is unambiguous:
+
+| Gluetun | Requirement adopted | Candidates | Chooses |
+|---|---|---|---|
+| `PORT_FORWARD_ONLY=on` | `port_forward_only` | P2P only | the P2P server at 40 % load, over a non-P2P one at 5 % |
+| `PORT_FORWARD_ONLY=off` | none | both | the quieter non-P2P server at 5 % |
+
+So the constraint wins over the load preference when it applies, and nothing is
+narrowed when it does not. `P2P` here is a separate, independent preference
+(`include` by default) if you want to require or avoid P2P servers regardless of
+what Gluetun asks for.
+
+One caveat worth knowing: an adopted requirement is **kept until this container
+restarts**. Pinning a server clears the filter inside Gluetun by design, so a later
+reading of "off" cannot be distinguished from our own doing — the tool assumes the
+operator still means it. If you turn `PORT_FORWARD_ONLY` off on Gluetun, restart the
+updater too, or it will go on preferring P2P servers.
+
+## Servers your account cannot use
 
 Proton's server list is the same whoever asks: it includes servers **above your
 plan's tier**, which look entirely ordinary and simply refuse the connection. A

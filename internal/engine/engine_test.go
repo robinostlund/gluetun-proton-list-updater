@@ -1562,3 +1562,80 @@ func TestAccountTierIsAppliedAndRemembered(t *testing.T) {
 		t.Errorf("a restarted engine should remember the tier, got %v", tier)
 	}
 }
+
+// The restriction to P2P servers must come from Gluetun asking for it, and only
+// from that. Restricting when Gluetun has PORT_FORWARD_ONLY off would silently
+// throw away most of the server list for no reason.
+func TestNoP2PRestrictionUnlessGluetunAsksForIt(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	// Gluetun does not enforce port forwarding.
+	harness.gluetun.portForwardOnly = false
+
+	harness.run(t, func() bool { return harness.engine.Snapshot().CandidatesTotal > 0 })
+
+	if adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted; len(adopted) != 0 {
+		t.Errorf("no requirement should be adopted, got %v", adopted)
+	}
+	if harness.engine.requirements.PortForward {
+		t.Error("P2P must not be required when Gluetun does not ask for it")
+	}
+	if harness.engine.catalogOptions().Require.PortForward {
+		t.Error("the catalog must not filter on P2P either")
+	}
+}
+
+// "Reconnect to best" bypasses the cooldown and the improvement threshold, but it
+// must not bypass what Gluetun can actually use: forcing a switch onto a non-P2P
+// server while Gluetun requires port forwarding would connect without the port
+// the operator asked for.
+func TestForcedReconnectStillRespectsThePortForwardRequirement(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwardOnly = true
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+	engine := harness.engine
+
+	// A mixed list where the non-P2P server is much quieter, so it would win on
+	// merit alone.
+	p2pBusy := proton.LogicalServer{
+		ID: "p2p", Name: "SE#P2P", ExitCountry: "SE", Load: 40, Status: 1,
+		Tier: tierPtr(2), Features: proton.FeatureP2P,
+		Servers: []proton.PhysicalServer{{
+			EntryIP: netip.MustParseAddr("10.7.0.1"), ExitIP: netip.MustParseAddr("81.7.0.1"),
+			Domain: "node-se-p2p.protonvpn.net", Status: 1, X25519PublicKey: "k1",
+		}},
+	}
+	plainQuiet := proton.LogicalServer{
+		ID: "plain", Name: "SE#PLAIN", ExitCountry: "SE", Load: 2, Status: 1,
+		Tier: tierPtr(2), Features: 0,
+		Servers: []proton.PhysicalServer{{
+			EntryIP: netip.MustParseAddr("10.7.0.2"), ExitIP: netip.MustParseAddr("81.7.0.2"),
+			Domain: "node-se-plain.protonvpn.net", Status: 1, X25519PublicKey: "k2",
+		}},
+	}
+	engine.applyLogicals([]proton.LogicalServer{p2pBusy, plainQuiet}, false)
+
+	// The non-P2P server must not even be a candidate, so nothing - forced or not -
+	// can select it.
+	for _, candidate := range engine.candidates {
+		if !candidate.P2P {
+			t.Errorf("non-P2P server %s should not be a candidate", candidate.ServerName)
+		}
+	}
+	if len(engine.ranked) == 0 {
+		t.Fatal("no candidates left")
+	}
+	if best := engine.ranked[0]; best.Candidate.ServerName != "SE#P2P" {
+		t.Errorf("best = %s, want the P2P server despite being busier", best.Candidate.ServerName)
+	}
+
+	// And the forced decision picks exactly that.
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], true)
+	if !verdict.shouldSwitch || verdict.reason != "manual" {
+		t.Errorf("a forced reconnect should proceed: %+v", verdict)
+	}
+}
+
+func tierPtr(value uint8) *uint8 { return &value }

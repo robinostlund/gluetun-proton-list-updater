@@ -473,3 +473,36 @@ func TestBuildKeepsServersWithAnUnknownTier(t *testing.T) {
 		t.Errorf("got %d candidates, want the server kept", len(candidates))
 	}
 }
+
+// The complete matrix: a P2P requirement narrows the list only when it is set,
+// and the separate P2P preference is what an operator controls independently.
+func TestP2PIsOnlyRequiredWhenGluetunAsks(t *testing.T) {
+	t.Parallel()
+
+	p2p := logical("SE#P2P", "SE", 40, proton.FeatureP2P)
+	plain := logical("SE#PLAIN", "SE", 5, 0, withEntryIP("10.0.0.2"))
+	logicals := []proton.LogicalServer{p2p, plain}
+
+	// Gluetun asks for port forwarding: only the P2P server is usable, even though
+	// it is the busier of the two.
+	candidates, _ := Build(logicals, Options{Require: Requirements{PortForward: true}})
+	if len(candidates) != 1 || candidates[0].ServerName != "SE#P2P" {
+		t.Fatalf("got %+v, want only the P2P server", candidates)
+	}
+
+	// Gluetun does not ask: both are usable and nothing is narrowed.
+	candidates, _ = Build(logicals, Options{})
+	if len(candidates) != 2 {
+		t.Fatalf("got %d candidates, want both when nothing requires P2P", len(candidates))
+	}
+
+	// The operator's own P2P preference is separate and still honoured.
+	candidates, _ = Build(logicals, Options{P2P: config.FilterOnly})
+	if len(candidates) != 1 || candidates[0].ServerName != "SE#P2P" {
+		t.Errorf("P2P=only should narrow to P2P servers, got %+v", candidates)
+	}
+	candidates, _ = Build(logicals, Options{P2P: config.FilterExclude})
+	if len(candidates) != 1 || candidates[0].ServerName != "SE#PLAIN" {
+		t.Errorf("P2P=exclude should drop P2P servers, got %+v", candidates)
+	}
+}
