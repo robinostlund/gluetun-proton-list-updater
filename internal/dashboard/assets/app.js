@@ -291,6 +291,25 @@ function renderBest() {
   if (!selection.auto_switch) parts.push('Automatic switching is off.');
   if (selection.mode === 'none') parts.push('Reconnect mode is "none": the tunnel is never touched.');
   text('switch-note', parts.join(' '));
+
+  // The engine's own words for why it stayed put. "Nothing is happening" is the state
+  // that most needs explaining, and it used to be visible only at debug level.
+  text('switch-reasoning', selection.explanation
+    ? `Staying put: ${selection.explanation}.`
+    : '');
+}
+
+// parseDuration reads Go's duration format ("5m0s", "1h30m", "90s") into seconds.
+// The snapshot carries intervals as Go strings, and comparing against one is what
+// makes "overdue" mean a missed refresh rather than an arbitrary age.
+function parseDuration(value) {
+  if (!value) return 0;
+  let seconds = 0;
+  for (const [, amount, unit] of String(value).matchAll(/([\d.]+)(ms|h|m|s|us|ns)/g)) {
+    const scale = { h: 3600, m: 60, s: 1, ms: 1e-3, us: 1e-6, ns: 1e-9 }[unit] ?? 0;
+    seconds += parseFloat(amount) * scale;
+  }
+  return seconds;
 }
 
 function renderGluetun() {
@@ -375,16 +394,39 @@ function renderGluetunDetail() {
   if (adopted.length) {
     entries.push(['Requirements adopted', adopted.join(', ')]);
   }
+  // How much of the list written here Gluetun can actually reach. It only knows this
+  // once Gluetun has refused a hostname, since that is the only time Gluetun
+  // enumerates its own list.
+  if (gluetun.known_hostnames) {
+    entries.push(['Servers Gluetun knows',
+      `${gluetun.known_hostnames} (of ${snapshot.candidates_total} offered here)`]);
+  }
 
-  // Gluetun's active server filters, which are ANDed with anything we pin.
+  // Gluetun's *live* server selection - not the operator's configured filters.
+  //
+  // Deliberately not labelled "Filter": pinning a server replaces Gluetun's
+  // countries and cities with the chosen server's own, so after the first switch
+  // these describe the server currently selected rather than SERVER_COUNTRIES as it
+  // was set. Calling them filters made that look like lost configuration.
   const selection = gluetun.selection || {};
   for (const [key, values] of Object.entries(selection)) {
-    entries.push([`Filter: ${key}`, values.join(', ')]);
+    entries.push([`Selected ${key}`, values.join(', ')]);
   }
 
   el('gluetun-detail').innerHTML = entries
     .map(([key, value]) => `<div><dt>${escapeHTML(key)}</dt><dd>${escapeHTML(value)}</dd></div>`)
     .join('');
+
+  // Explain the "Selected …" rows, because they are the single most surprising thing
+  // on this page: an operator who set SERVER_COUNTRIES to three countries sees one.
+  const pinnedByUs = (selection.hostnames || []).length > 0;
+  text('gluetun-detail-note', pinnedByUs
+    ? 'The "Selected …" rows are the selection Gluetun is applying right now, not the '
+      + 'filters you configured. Pinning a server replaces Gluetun\'s countries and '
+      + 'cities with that server\'s own — otherwise Gluetun would AND them together and '
+      + 'a server outside SERVER_COUNTRIES would match nothing, crashing its VPN loop. '
+      + 'Your original SERVER_COUNTRIES is restored when the Gluetun container restarts.'
+    : '');
 }
 
 function renderProton() {
@@ -439,6 +481,28 @@ function renderCandidates() {
     || candidate.country.toLowerCase().includes(term)
     || (candidate.city || '').toLowerCase().includes(term)
     || candidate.hostname.toLowerCase().includes(term));
+
+  // Ranking is only as good as the load figures behind it, and nothing on the page
+  // said how old those were. Overdue is measured against LOAD_REFRESH_INTERVAL, so it
+  // means "a refresh was missed", not merely "some time has passed".
+  const refreshed = snapshot.proton.last_load_refresh;
+  const overdueAfter = parseDuration(snapshot.settings.load_refresh_interval);
+  const ageSeconds = refreshed && !refreshed.startsWith('0001-01-01')
+    ? (Date.now() - new Date(refreshed).getTime()) / 1000
+    : null;
+  const freshness = el('candidates-freshness');
+  if (ageSeconds === null) {
+    freshness.textContent = '· loads not fetched yet';
+    freshness.classList.add('stale');
+  } else {
+    const stale = overdueAfter > 0 && ageSeconds > overdueAfter * 2;
+    freshness.textContent = `· loads ${timeAgo(refreshed)}`;
+    freshness.classList.toggle('stale', stale);
+    freshness.title = stale
+      ? `Expected every ${snapshot.settings.load_refresh_interval}; this is overdue, so the `
+        + 'ranking may be based on out-of-date utilisation.'
+      : `Refreshed every ${snapshot.settings.load_refresh_interval}.`;
+  }
 
   const selectable = rows.filter((candidate) => !candidate.blocked).length;
   const blockedShown = rows.length - selectable;

@@ -296,14 +296,21 @@ to evaluate, and the tool would lose contact whenever the tunnel drops.
   exit address (which is how the current server is identified).
 - **Gluetun's own view** — everything its control server reports: tunnel status, version, commit,
   build date, protocol, provider, DNS state, its own updater state, whether **port forwarding**
-  is on or off, the forwarded ports, and **the server filters Gluetun is currently enforcing**
-  (usually the reason a specific server was refused).
+  is on or off, the forwarded ports, how many **servers Gluetun knows** (see below), and the
+  **live server selection** it is applying — which is usually the reason a specific server was
+  refused.
 - **Best candidate** — with the score gap, its feature tags, and the reason a switch has or has
   not happened. When Gluetun requires port forwarding, this card carries a note saying only P2P
   servers are considered — which is why a *busier* server can legitimately be the best one, and
   why "Reconnect to best" will go there.
 - **Actions** — reconnect to best, refresh the server list, refresh loads, probe latency,
   re-evaluate, rewrite `servers.json`, toggle automatic switching.
+- **Load freshness** — the Candidates heading carries `loads 2m ago`, turning amber once a
+  refresh has been missed. Ranking is only as good as the utilisation behind it, and nothing
+  previously said how old that was.
+- **Why nothing is happening** — the Best candidate card shows the engine's own reasoning when it
+  stays put: *"Staying put: best server only 0.021 better than current, need 0.050"*, or the
+  cooldown, or the minimum interval. Previously visible only at debug level in the log.
 - **Candidate table** — every allowed server ranked, with separate **Country** and **City**
   columns, a load bar, latency, score breakdown (hover the score) and a per-row **Use** button to
   switch to a specific server. Servers Gluetun's own filters rule out appear at the end in
@@ -323,6 +330,46 @@ no build step, works on an air-gapped network, and follows your light/dark prefe
 
 Optional HTTP basic auth via `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`. `/healthz` stays
 unauthenticated so Docker's health check works.
+
+### Gluetun's "Selected …" rows are not your filters
+
+This is the most surprising thing on the page, so it is worth stating plainly. Set
+`SERVER_COUNTRIES: "Sweden,Germany,Netherlands"` on Gluetun and, once this tool has pinned a
+server, *Gluetun's own view* will show a single country and a single city:
+
+```
+Selected hostnames : node-se-11.protonvpn.net
+Selected countries : Sweden
+Selected cities    : Stockholm
+```
+
+Nothing has been lost. Those rows are the selection **Gluetun is applying right now**, and pinning
+a server deliberately replaces its countries and cities with that server's own. It has to: Gluetun
+ANDs every selection filter, so a hostname left to intersect with the original three countries
+would match nothing the moment the chosen server sat outside them — and an empty match crashes
+Gluetun's VPN loop rather than being ignored.
+
+Verified against a real `v3.41.2`:
+
+| Moment | `countries` | `cities` | `hostnames` |
+|---|---|---|---|
+| before any pin | `sweden, germany, netherlands` | – | – |
+| after this tool pins a server | `Sweden` | `Stockholm` | `node-se-11.protonvpn.net` |
+| after restarting the Gluetun container | `sweden, germany, netherlands` | – | – |
+
+So your configuration is intact — Gluetun re-reads `SERVER_COUNTRIES` on every container start.
+The one consequence worth knowing: while this tool is running, Gluetun's *own* fallback choice is
+narrowed to the pinned server's country. If this container stops, Gluetun keeps the last selection
+until it restarts. The dashboard explains this in a note under the panel, and the rows are labelled
+**Selected** rather than *Filter* for exactly this reason.
+
+### `Servers Gluetun knows`
+
+When Gluetun refuses a hostname it enumerates every hostname it *would* accept — the only moment it
+discloses the list it is actually running. That count appears here, next to how many this tool is
+offering. A few hundred against a few thousand means Gluetun is on its built-in list and needs
+restarting; the two numbers being close means its list is current. It reads `0` until Gluetun has
+refused something, which is not the same as knowing nothing.
 
 ### HTTP API
 

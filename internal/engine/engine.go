@@ -83,6 +83,16 @@ type Engine struct {
 	// Gluetun rather than configured here, because a candidate that fails one of
 	// them cannot be connected to at all.
 	requirements catalog.Requirements
+	// portForwardInferenceAbandoned records that requiring P2P purely because a
+	// forwarded port was requested has been given up, because it left no candidates.
+	//
+	// It has to be remembered, not just undone. The requirement is re-derived from
+	// Gluetun's settings on every health check, and VPN_PORT_FORWARDING is still on -
+	// so without this the requirement would be re-adopted, empty the catalog, be
+	// dropped again, and rebuild the whole catalog on every tick, for ever. An
+	// explicit PORT_FORWARD_ONLY is unaffected: that is Gluetun's own filter and is
+	// always honoured.
+	portForwardInferenceAbandoned bool
 	// gluetunKnownHosts is the server list Gluetun disclosed the last time it
 	// refused a hostname, empty when it has not refused one.
 	//
@@ -438,10 +448,7 @@ func (e *Engine) applyCachedLoads(listFetchedAt time.Time) {
 	}
 
 	e.latestLoads = cached.Loads
-	updated, disabled := catalog.ApplyLoads(e.candidates, cached.Loads)
-	if len(disabled) > 0 {
-		e.dropDisabled(disabled)
-	}
+	updated := e.applyLoads(cached.Loads)
 	e.rerank()
 
 	e.mutateSnapshot(func(snapshot *Snapshot) {
@@ -466,6 +473,7 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 			"consequence", "the tunnel will connect, but Proton will not forward a port")
 		e.requirements.PortForward = false
 		e.portForwardReason = ""
+		e.portForwardInferenceAbandoned = true
 		candidates, stats = catalog.Build(logicals, e.catalogOptions())
 	}
 
@@ -477,10 +485,7 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 	// Re-apply the newest utilisation figures over the freshly built candidates:
 	// the list they came from can be hours older than the last loads refresh.
 	if len(e.latestLoads) > 0 {
-		updated, disabled := catalog.ApplyLoads(e.candidates, e.latestLoads)
-		if len(disabled) > 0 {
-			e.dropDisabled(disabled)
-		}
+		updated := e.applyLoads(e.latestLoads)
 		e.logger.Debug("re-applied the latest loads after rebuilding", "updated", updated)
 	}
 	e.rerank()

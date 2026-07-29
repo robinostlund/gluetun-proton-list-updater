@@ -84,8 +84,12 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 	if !verdict.shouldSwitch {
 		e.logger.Debug("staying on current server",
 			"trigger", trigger, "reason", verdict.explanation, "current", currentHostname)
+		e.mutateSnapshot(func(snapshot *Snapshot) {
+			snapshot.Selection.Explanation = verdict.explanation
+		})
 		return
 	}
+	e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Selection.Explanation = "" })
 
 	e.logger.Info("switching server",
 		"trigger", trigger,
@@ -219,6 +223,7 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 
 	previousIP := e.Snapshot().Gluetun.Exit.IP
 	rejections := 0
+	skipped := 0
 
 	for attempt, target := range candidates {
 		if ctx.Err() != nil {
@@ -228,6 +233,7 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 			continue
 		}
 		if !e.gluetunMightKnow(target.Candidate.Hostname) {
+			skipped++
 			e.logger.Debug("skipping a server gluetun has said it does not know",
 				"hostname", target.Candidate.Hostname)
 			continue
@@ -305,9 +311,20 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 		return true
 	}
 
-	// Nothing was applied. Only a run that ended in rejections is worth
-	// retrying after a server-list refresh.
-	return rejections == 0
+	// Nothing was applied. Report that as handled only when retrying could not
+	// possibly help - otherwise the caller must go on to refresh Gluetun's list and,
+	// failing that, tell the operator.
+	//
+	// Skips count here as much as rejections do. A learned hostname set that excludes
+	// every candidate would otherwise end this loop with no attempts, no rejections
+	// and no error, which the caller would read as success: the switch would silently
+	// never happen, for as long as the process lived.
+	if skipped > 0 {
+		e.logger.Warn("every candidate is outside the server list gluetun disclosed",
+			"skipped", skipped,
+			"gluetun_knows", len(e.gluetunKnownHosts))
+	}
+	return rejections == 0 && skipped == 0
 }
 
 // refreshGluetunServerList asks Gluetun to reload its own server list and
@@ -336,6 +353,10 @@ func (e *Engine) refreshGluetunServerList(ctx context.Context) (retryWorthwhile 
 		e.logger.Warn("gluetun's updater did not finish in time", "error", err)
 		return false
 	}
+	// Gluetun has replaced its in-memory list, so anything it disclosed before is out
+	// of date. Keeping it would make the retry skip the very candidates the refresh
+	// was meant to unlock.
+	e.forgetGluetunHostnames()
 	return true
 }
 
@@ -745,7 +766,18 @@ const stableTunnelWait = 45 * time.Second
 // state first turns that into either a clean switch or a fast, accurate error.
 func (e *Engine) waitForStableTunnel(ctx context.Context) (err error) {
 	const pollInterval = 2 * time.Second
-	deadline := time.Now().Add(stableTunnelWait)
+	started := time.Now()
+	deadline := started.Add(stableTunnelWait)
+
+	// The caller has already published what it is doing ("switching server"), so
+	// restore that rather than leaving the page describing a wait that has ended.
+	callerActivity := e.Snapshot().Activity
+	waited := false
+	defer func() {
+		if waited {
+			e.setActivity(callerActivity)
+		}
+	}()
 
 	var status string
 	for {
@@ -765,6 +797,11 @@ func (e *Engine) waitForStableTunnel(ctx context.Context) (err error) {
 
 		e.logger.Debug("waiting for gluetun's vpn loop to settle before switching",
 			"status", status)
+		// Publish progress: without it the page simply looks idle for 45 seconds,
+		// which is indistinguishable from the hang this is detecting.
+		waited = true
+		e.setActivity(fmt.Sprintf("waiting for gluetun's vpn loop to settle (%s for %s)",
+			status, time.Since(started).Truncate(time.Second)))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

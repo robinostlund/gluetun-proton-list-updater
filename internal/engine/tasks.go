@@ -165,10 +165,9 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 	}
 
 	e.latestLoads = loads
-	updated, disabled := catalog.ApplyLoads(e.candidates, loads)
-	if len(disabled) > 0 {
-		e.dropDisabled(disabled)
-	}
+	before := len(e.candidates)
+	updated := e.applyLoads(loads)
+	dropped := before - len(e.candidates)
 	e.rerank()
 
 	// Persisted separately from the server list: a few kilobytes rewritten every
@@ -184,7 +183,33 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 		snapshot.Proton.CacheStale = false
 	})
 	e.logger.Debug("refreshed server loads",
-		"trigger", trigger, "updated", updated, "disabled", len(disabled))
+		"trigger", trigger, "updated", updated, "disabled", dropped)
+}
+
+// applyLoads refreshes utilisation across every set the dashboard shows.
+//
+// The blocked set matters as much as the selectable one here. Its whole purpose is
+// comparison - "this quieter server exists but Gluetun cannot use it" - and that
+// comparison is meaningless if one side is refreshed every few minutes while the
+// other is frozen at whatever the last full list fetch said, hours ago.
+func (e *Engine) applyLoads(loads []proton.ServerLoad) (updated int) {
+	updated, disabled := catalog.ApplyLoads(e.candidates, loads)
+	if len(disabled) > 0 {
+		e.dropDisabled(disabled)
+	}
+
+	blockedUpdated, blockedDisabled := catalog.ApplyLoads(e.blocked, loads)
+	if len(blockedDisabled) > 0 {
+		kept := make([]catalog.Candidate, 0, len(e.blocked))
+		for _, candidate := range e.blocked {
+			if _, gone := blockedDisabled[candidate.Hostname]; gone {
+				continue
+			}
+			kept = append(kept, candidate)
+		}
+		e.blocked = kept
+	}
+	return updated + blockedUpdated
 }
 
 // dropDisabled removes candidates Proton has taken out of service.
@@ -510,6 +535,7 @@ func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
 	//
 	// So an observed "off" is assumed to be our own doing. A genuine change to off
 	// is picked up when this container restarts.
+	//
 	// Asking Proton for a forwarded port counts as requiring P2P, even when Gluetun
 	// is not enforcing PORT_FORWARD_ONLY itself.
 	//
@@ -518,7 +544,11 @@ func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
 	// produces a port. Picking the quietest server would therefore quietly break the
 	// feature the operator switched on. Gluetun tolerates that combination; there is
 	// no reason for this tool to walk into it.
-	wantsPortForward := from.PortForward || from.PortForwardingRequested
+	// Once the inferred requirement has been given up for lack of any P2P candidate,
+	// it must not come straight back: Gluetun still reports port forwarding as on, so
+	// re-deriving it here would restart the empty-then-drop cycle on every tick.
+	inferred := from.PortForwardingRequested && !e.portForwardInferenceAbandoned
+	wantsPortForward := from.PortForward || inferred
 	requirements := catalog.Requirements{
 		PortForward: wantsPortForward || e.requirements.PortForward,
 		SecureCore:  from.SecureCore || e.requirements.SecureCore,
@@ -533,7 +563,7 @@ func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
 	switch {
 	case from.PortForward:
 		e.portForwardReason = "PORT_FORWARD_ONLY"
-	case from.PortForwardingRequested && e.portForwardReason == "":
+	case inferred && e.portForwardReason == "":
 		e.portForwardReason = "VPN_PORT_FORWARDING"
 	}
 

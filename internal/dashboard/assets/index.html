@@ -57,6 +57,7 @@
           <div><dt>Improvement</dt><dd id="improvement">–</dd></div>
         </dl>
         <p id="switch-note" class="card-note"></p>
+        <p id="switch-reasoning" class="reasoning"></p>
       </article>
 
       <article class="card">
@@ -144,7 +145,8 @@
 
     <section class="panel">
       <div class="panel-head">
-        <h2>Candidates <span id="candidates-shown" class="muted"></span></h2>
+        <h2>Candidates <span id="candidates-shown" class="muted"></span>
+          <span id="candidates-freshness" class="freshness"></span></h2>
         <input type="search" id="filter" placeholder="Filter by server, country or city…" autocomplete="off">
       </div>
       <div class="table-scroll">
@@ -197,6 +199,7 @@
         <h2>Gluetun's own view <span class="muted">what its control server reports</span></h2>
       </div>
       <dl id="gluetun-detail" class="settings"></dl>
+      <p id="gluetun-detail-note" class="panel-note"></p>
     </section>
 
     <section class="panel">

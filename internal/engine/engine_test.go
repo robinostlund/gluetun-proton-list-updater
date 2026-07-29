@@ -2037,3 +2037,246 @@ func TestASwitchProceedsOnceTheTunnelSettles(t *testing.T) {
 		t.Errorf("pinned since the wait = %v, want just the target once the loop settled", pinned)
 	}
 }
+
+// Skipping every candidate is not success. A learned hostname set that excludes all
+// of them would end tryCandidates with no attempts, no rejections and no error, which
+// the caller reads as "handled" - so the switch silently never happens and nothing
+// ever says why. Found by review, not by a failing deployment.
+func TestSkippingEveryCandidateIsNotReportedAsSuccess(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	// Gluetun has disclosed a list containing none of our candidates.
+	engine.learnGluetunHostnames(&gluetunapi.RejectionError{
+		KnownHostnames: []string{"somewhere-else.protonvpn.net"},
+	})
+	// Refreshing Gluetun's own list is what the caller falls back to, so disable it
+	// here to isolate the reporting decision.
+	engine.cfg.Gluetun.RefreshServersOnReject = false
+
+	switched := engine.tryCandidates(context.Background(),
+		engine.ranked, "", scoring.Scored{}, false, "manual")
+	if switched {
+		t.Error("tryCandidates reported success having attempted nothing at all")
+	}
+}
+
+// End to end: the operator must be told, rather than left with a button that appears
+// to work and does nothing.
+func TestEveryCandidateSkippedFlagsGluetunRestart(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	engine.learnGluetunHostnames(&gluetunapi.RejectionError{
+		KnownHostnames: []string{"somewhere-else.protonvpn.net"},
+	})
+	engine.cfg.Gluetun.RefreshServersOnReject = false
+
+	engine.performSwitch(context.Background(), "", scoring.Scored{}, false, "manual")
+
+	if !engine.Snapshot().Selection.NeedsGluetunRestart {
+		t.Error("nothing was attempted and nothing was flagged; the failure is invisible")
+	}
+}
+
+// Refreshing Gluetun's own server list replaces its in-memory set, so anything it
+// disclosed beforehand is stale. Keeping it would make the retry skip exactly the
+// candidates the refresh was meant to unlock.
+func TestRefreshingGluetunsListForgetsWhatItDisclosed(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	engine.learnGluetunHostnames(&gluetunapi.RejectionError{
+		KnownHostnames: []string{"stale.protonvpn.net"},
+	})
+	if len(engine.gluetunKnownHosts) == 0 {
+		t.Fatal("nothing was learned, so the test proves nothing")
+	}
+
+	if !engine.refreshGluetunServerList(context.Background()) {
+		t.Fatal("the fake should accept an updater refresh")
+	}
+	if len(engine.gluetunKnownHosts) != 0 {
+		t.Errorf("still holding %d disclosed hostnames after gluetun refreshed its list",
+			len(engine.gluetunKnownHosts))
+	}
+}
+
+// Giving up the inferred P2P requirement must be remembered. It is re-derived from
+// Gluetun's settings on every health check and VPN_PORT_FORWARDING is still on, so
+// without a latch it would be re-adopted, empty the catalog, be dropped again, and
+// rebuild the whole catalog on every tick for ever.
+func TestTheAbandonedPortForwardInferenceIsNotReadopted(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwarding = true
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+	engine := harness.engine
+
+	// Only non-P2P servers exist, so the inference has to be given up.
+	engine.applyLogicals(mixedP2PLogicals()[1:], false)
+	if engine.requirements.PortForward {
+		t.Fatal("the inferred requirement should have been given up")
+	}
+	if !engine.portForwardInferenceAbandoned {
+		t.Fatal("giving it up was not recorded")
+	}
+
+	// Now the next health check re-reads Gluetun's settings, which still say port
+	// forwarding is on. That must not bring the requirement back.
+	for tick := range 3 {
+		engine.updateRequirements(gluetunapi.Requirements{PortForwardingRequested: true})
+		if engine.requirements.PortForward {
+			t.Fatalf("tick %d re-adopted the requirement, restarting the oscillation", tick+1)
+		}
+	}
+
+	// An explicit PORT_FORWARD_ONLY is Gluetun's own filter, not our inference, and
+	// must still be honoured even after the inference was abandoned.
+	engine.updateRequirements(gluetunapi.Requirements{
+		PortForward: true, PortForwardingRequested: true,
+	})
+	if !engine.requirements.PortForward {
+		t.Error("an explicit PORT_FORWARD_ONLY must always be adopted")
+	}
+	if engine.portForwardReason != "PORT_FORWARD_ONLY" {
+		t.Errorf("reason = %q, want PORT_FORWARD_ONLY", engine.portForwardReason)
+	}
+}
+
+// Blocked rows exist to be compared against selectable ones, so their load must be as
+// fresh. Loads were only ever applied to the candidate set, leaving blocked rows
+// frozen at whatever the last full list fetch said - potentially hours stale next to
+// figures refreshed every few minutes.
+func TestBlockedServersGetLoadUpdatesToo(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwardOnly = true
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+	engine := harness.engine
+
+	engine.applyLogicals(mixedP2PLogicals(), false)
+	if len(engine.blocked) != 1 {
+		t.Fatalf("blocked = %d, want the one non-P2P server", len(engine.blocked))
+	}
+	if load := engine.blocked[0].Load; load != 2 {
+		t.Fatalf("blocked load = %d, want the value from the list (2)", load)
+	}
+
+	// A loads refresh moves the blocked server from 2% to 77%.
+	engine.applyLoads([]proton.ServerLoad{
+		{ID: "plain", Load: 77, Status: 1},
+		{ID: "p2p", Load: 41, Status: 1},
+	})
+
+	if load := engine.blocked[0].Load; load != 77 {
+		t.Errorf("blocked load = %d after a refresh, want 77: the row is stale", load)
+	}
+	engine.publish()
+	for _, view := range engine.Snapshot().Candidates {
+		if view.Blocked && view.Load != 77 {
+			t.Errorf("the published blocked row shows %d%%, want 77%%", view.Load)
+		}
+	}
+}
+
+// A disabled blocked server must leave the list, exactly as a disabled candidate does.
+func TestDisabledBlockedServersAreDropped(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwardOnly = true
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+	engine := harness.engine
+
+	engine.applyLogicals(mixedP2PLogicals(), false)
+	engine.applyLoads([]proton.ServerLoad{{ID: "plain", Load: 5, Status: 0}})
+	if len(engine.blocked) != 0 {
+		t.Errorf("blocked = %d, want 0: Proton took that server out of service", len(engine.blocked))
+	}
+}
+
+// "Nothing is happening" is the state an operator most often needs explained, and the
+// reasoning existed only as a debug log line. Publishing it is what lets the dashboard
+// say why it stayed put.
+func TestWhyNoSwitchHappenedIsPublished(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		// A threshold nothing can beat, so the decision is always "stay".
+		cfg.Switch.MinImprovement = 99
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	engine.applyLogicals(mixedP2PLogicals(), false)
+	// Put the tunnel on the busier server so a better one exists but is not better
+	// enough - the case the improvement threshold is for.
+	engine.state.update(func(state *persistedState) {
+		state.PinnedHostname = "node-se-p2p.protonvpn.net"
+	})
+	engine.evaluate(context.Background(), "manual", false)
+
+	explanation := engine.Snapshot().Selection.Explanation
+	if explanation == "" {
+		t.Fatal("no explanation was published, so the dashboard cannot say why nothing happened")
+	}
+	if !strings.Contains(explanation, "99.000") {
+		t.Errorf("explanation = %q, want it to name the threshold that blocked the switch", explanation)
+	}
+
+	// And it must be cleared once a switch does happen, or the page keeps explaining
+	// a decision that has been superseded.
+	engine.evaluate(context.Background(), "manual", true)
+	if got := engine.Snapshot().Selection.Explanation; got != "" {
+		t.Errorf("explanation = %q after a forced switch, want it cleared", got)
+	}
+}
+
+// The 45-second settle wait is invisible otherwise, and an idle-looking page during it
+// is indistinguishable from the Gluetun hang it exists to detect.
+func TestWaitingForTheTunnelToSettleIsVisible(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	harness.gluetun.mu.Lock()
+	harness.gluetun.status = gluetunapi.StatusStopping
+	harness.gluetun.mu.Unlock()
+
+	engine.setActivity("switching server")
+
+	observed := make(chan string, 1)
+	go func() {
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if activity := engine.Snapshot().Activity; strings.Contains(activity, "settle") {
+				observed <- activity
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		observed <- ""
+	}()
+
+	_, _ = engine.applyTarget(context.Background(), engine.ranked[0])
+
+	activity := <-observed
+	if activity == "" {
+		t.Fatal("the settle wait was never published, so the page looks idle for 45s")
+	}
+	if !strings.Contains(activity, "stopping") {
+		t.Errorf("activity = %q, want it to name the state being waited on", activity)
+	}
+
+	// The caller's own activity has to come back, not be left describing a finished wait.
+	if got := engine.Snapshot().Activity; got != "switching server" {
+		t.Errorf("activity = %q after the wait, want the caller's own restored", got)
+	}
+}

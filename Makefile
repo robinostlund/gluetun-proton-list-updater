@@ -77,6 +77,7 @@ integration-up: ## Start a throwaway Gluetun container for integration tests
 		-e PORT_FORWARD_ONLY=on \
 		-e VPN_PORT_FORWARDING=on \
 		-e HEALTH_VPN_DURATION_INITIAL=6h \
+		-e HEALTH_RESTART_VPN=off \
 		qmcgaw/gluetun:$(GLUETUN_VERSION)
 	@echo "waiting for the control server..."
 	@for i in $$(seq 1 30); do \

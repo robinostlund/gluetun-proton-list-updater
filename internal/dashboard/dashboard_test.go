@@ -915,3 +915,97 @@ func TestSwitchHistoryRowFitsTheNarrowestPanel(t *testing.T) {
 			total, panelWidth, detail)
 	}
 }
+
+// The four additions are rendered by JavaScript, so this asserts statically on the
+// assets: the snapshot fields the engine publishes must be exactly the ones the script
+// reads, and each needs somewhere to render into.
+func TestTheDashboardRendersTheNewDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, addition := range []struct {
+		name     string
+		element  string
+		fields   []string
+		selector string
+	}{
+		{
+			name:     "load freshness",
+			element:  `id="candidates-freshness"`,
+			fields:   []string{"snapshot.proton.last_load_refresh", "settings.load_refresh_interval"},
+			selector: ".freshness",
+		},
+		{
+			name:    "servers gluetun knows",
+			element: "", // rendered into the existing gluetun-detail list
+			fields:  []string{"gluetun.known_hostnames"},
+		},
+		{
+			name:     "why nothing is happening",
+			element:  `id="switch-reasoning"`,
+			fields:   []string{"selection.explanation"},
+			selector: ".reasoning",
+		},
+		{
+			name:     "selection explanation note",
+			element:  `id="gluetun-detail-note"`,
+			fields:   []string{"selection.hostnames"},
+			selector: ".panel-note",
+		},
+	} {
+		t.Run(addition.name, func(t *testing.T) {
+			if addition.element != "" && !bytes.Contains(page, []byte(addition.element)) {
+				t.Errorf("index.html has no %s to render into", addition.element)
+			}
+			for _, field := range addition.fields {
+				if !bytes.Contains(script, []byte(field)) {
+					t.Errorf("app.js never reads %q", field)
+				}
+			}
+			if addition.selector != "" && !bytes.Contains(styles, []byte(addition.selector)) {
+				t.Errorf("style.css has no %q rule", addition.selector)
+			}
+		})
+	}
+}
+
+// Gluetun's live selection is not the operator's configured filter: pinning a server
+// replaces its countries and cities with that server's own, so an operator who set
+// three countries sees one. Labelling those rows "Filter:" made correct behaviour look
+// like lost configuration, which is what prompted the rename.
+func TestGluetunsLiveSelectionIsNotLabelledAsAFilter(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(script, []byte("`Filter: ${key}`")) {
+		t.Error(`the rows are labelled "Filter: …" again; they are Gluetun's live selection, ` +
+			"not the configured filters")
+	}
+	if !bytes.Contains(script, []byte("`Selected ${key}`")) {
+		t.Error("the live-selection rows are not labelled")
+	}
+	// And the surprise has to be explained, not merely relabelled.
+	if !bytes.Contains(script, []byte("gluetun-detail-note")) {
+		t.Error("nothing explains why the selection is narrower than SERVER_COUNTRIES")
+	}
+	for _, phrase := range []string{"SERVER_COUNTRIES", "restarts"} {
+		if !bytes.Contains(script, []byte(phrase)) {
+			t.Errorf("the explanation does not mention %q", phrase)
+		}
+	}
+}

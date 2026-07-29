@@ -22,6 +22,14 @@
 //
 // The WireGuard key is deliberately random: the tunnel never comes up, which is
 // irrelevant here. What is being tested is the control-server contract.
+//
+// HEALTH_RESTART_VPN=off matters for exactly that reason. A tunnel that cannot come
+// up fails Gluetun's startup check, and with auto-healing on Gluetun restarts its VPN
+// loop over and over - seventeen times in under a minute, observed. Every restart
+// takes loopMu for a full stop-and-start, which starves any external state change:
+// pins that normally answer instantly were blocking for the full two-minute mutation
+// timeout. Turning auto-healing off removes that contention and makes these tests
+// deterministic, without weakening what they check.
 package gluetunapi
 
 import (

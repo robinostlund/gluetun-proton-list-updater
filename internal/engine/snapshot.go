@@ -196,7 +196,15 @@ type SelectionStatus struct {
 	LastEvaluation    time.Time `json:"last_evaluation"`
 	LastSwitchAt      time.Time `json:"last_switch_at"`
 	CooldownRemaining string    `json:"cooldown_remaining,omitempty"`
-	LastError         string    `json:"last_error,omitempty"`
+	// Explanation is why the last evaluation did *not* switch, in the same words the
+	// decision was made in - "cooldown active for another 4m", "best server only
+	// 0.021 better than current, need 0.050".
+	//
+	// It is published because "nothing is happening" is the state an operator most
+	// often needs explained, and it was previously only visible at debug level in the
+	// log. Empty when a switch did happen, or when none has been evaluated yet.
+	Explanation string `json:"explanation,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
 	// NeedsGluetunRestart is set when Gluetun refused every hostname we offered,
 	// which means it is running with an older server list than the one now in
 	// servers.json and must be restarted to pick it up.
