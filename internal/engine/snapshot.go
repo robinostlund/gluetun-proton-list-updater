@@ -77,6 +77,13 @@ type GluetunStatus struct {
 	Exit ExitInfo `json:"exit"`
 	// ForwardedPorts is what Proton forwarded, from GET /v1/portforward.
 	ForwardedPorts []uint16 `json:"forwarded_ports,omitempty"`
+	// ExitCurrent is false when Exit and ForwardedPorts are the last values seen
+	// rather than current ones, because the tunnel is not running right now. They
+	// are deliberately kept: a poll landing mid-reconnect must not make a working
+	// port forward read as "none".
+	ExitCurrent bool `json:"exit_current"`
+	// ExitObservedAt is when those values were last confirmed.
+	ExitObservedAt time.Time `json:"exit_observed_at"`
 	// PortForwardingEnabled distinguishes "no port yet" from "not requested".
 	PortForwardingEnabled *bool `json:"port_forwarding_enabled,omitempty"`
 	// DNSStatus is Gluetun's DNS-over-TLS resolver state, from
@@ -88,8 +95,13 @@ type GluetunStatus struct {
 	// Selection is the filter set Gluetun is currently applying, which is often
 	// the reason a particular server was refused.
 	Selection map[string][]string `json:"selection,omitempty"`
-	LastCheck time.Time           `json:"last_check"`
-	LastError string              `json:"last_error,omitempty"`
+	// RequirementsAdopted lists the "only" filters this tool has taken on from
+	// Gluetun, so it only ever picks servers Gluetun can actually use. They are
+	// kept once seen: pinning a server clears them in Gluetun by design, so a
+	// later "off" reading is our own doing rather than a change of intent.
+	RequirementsAdopted []string  `json:"requirements_adopted,omitempty"`
+	LastCheck           time.Time `json:"last_check"`
+	LastError           string    `json:"last_error,omitempty"`
 	// ProviderMismatch warns that Gluetun is not configured for ProtonVPN, in
 	// which case none of this tool's work can take effect.
 	ProviderMismatch bool `json:"provider_mismatch"`

@@ -115,7 +115,10 @@ main {
 /* Cards */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  /* Wide enough that a hostname or an organisation name has room on one line.
+     At 260px the two value columns were ~120px each, which forced hostnames to
+     wrap across three or four lines. */
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 14px;
 }
 .card {
@@ -135,15 +138,55 @@ main {
 .card-current { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .card-exit { border-color: color-mix(in srgb, var(--good) 35%, var(--border)); }
 code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; }
-.card-headline { margin: 0 0 2px; font-size: 20px; font-weight: 650; font-family: var(--mono); }
-.card-sub { margin: 0 0 10px; color: var(--text-muted); font-size: 13px; }
+.card-headline {
+  margin: 0 0 2px;
+  font-size: 20px;
+  font-weight: 650;
+  font-family: var(--mono);
+  /* Never split an address or a server name across lines: truncate instead, and
+     the full value stays available as a tooltip. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-sub { margin: 0 0 2px; color: var(--text-muted); font-size: 13px; }
+/* A hostname on its own line, in mono, truncated rather than broken up. */
+.card-host {
+  margin: 0 0 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-host:empty, .card-sub:empty { margin-bottom: 0; }
 .card-note { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); }
 .card-note.error:not(:empty) { color: var(--bad); }
 
-.kv { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin: 0; }
+.kv { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin: 0; }
 .kv > div { min-width: 0; }
-.kv dt { font-size: 11px; color: var(--text-muted); }
-.kv dd { margin: 0; font-size: 13px; font-family: var(--mono); overflow-wrap: anywhere; }
+/* Long values take the full width rather than being squeezed into half a card. */
+.kv > div.wide { grid-column: 1 / -1; }
+.kv dt { font-size: 11px; color: var(--text-muted); margin-bottom: 1px; }
+.kv dd {
+  margin: 0;
+  font-size: 13px;
+  font-family: var(--mono);
+  /* Truncate rather than wrap. "anywhere" used to break mid-token, turning
+     149.50.216.213 into "149.50.216.21" + "3" and Europe/Stockholm into
+     "Europe/Stockh" + "olm", which is harder to read than a clipped value. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Prose-like values (an organisation name) read better in the body font and may
+   wrap at word boundaries, since there is no token to mangle. */
+.kv dd.prose {
+  font-family: inherit;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
 
 /* Toolbar */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -246,13 +289,23 @@ td.right, th.right { text-align: right; }
 .logs .level-warn { color: var(--warn); }
 .logs .level-error { color: var(--bad); }
 .logs .level-info { color: var(--text-muted); }
-.logs .msg { overflow-wrap: anywhere; white-space: normal; }
+.logs .msg { overflow-wrap: break-word; white-space: normal; }
 
 /* Settings and stats grids */
 .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px 18px; margin: 0; padding: 14px 16px; }
 .settings > div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px dashed color-mix(in srgb, var(--border) 70%, transparent); padding-bottom: 5px; }
 .settings dt { color: var(--text-muted); font-size: 12px; }
-.settings dd { margin: 0; font-family: var(--mono); font-size: 12px; text-align: right; overflow-wrap: anywhere; }
+.settings dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+  overflow-wrap: break-word;
+}
+/* Give the label and value their own space rather than letting a long value
+   crush the label to one word per line. */
+.settings > div { align-items: baseline; }
+.settings dt { flex: 0 0 auto; padding-right: 12px; }
 
 /* Toast */
 .toast {
@@ -273,3 +326,14 @@ td.right, th.right { text-align: right; }
 
 .ok { color: var(--good); }
 .no { color: var(--bad); }
+
+/* Server lookup results */
+.explain { padding: 12px 16px; border-top: 1px solid var(--border); }
+.explain p { margin: 0 0 6px; }
+.explain-reasons, .explain-physical { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+.explain-reasons li { color: var(--bad); }
+.explain-notes li { color: var(--good); margin-top: 2px; }
+.explain-physical li { color: var(--text-muted); margin-top: 2px; }
+.explain-note { padding: 12px 16px; margin: 0; color: var(--text-muted); font-size: 13px; }
+.explain-note.error { color: var(--bad); }
+#explain-form { display: flex; gap: 8px; }

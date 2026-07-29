@@ -153,6 +153,22 @@ func New(opts Options) (engine *Engine, err error) {
 	return engine, nil
 }
 
+// Explain reports what happened to every Proton server matching query, between
+// Proton's response and the candidate list.
+//
+// It reads the cached raw server list rather than the candidates, because the
+// whole point is to explain servers that are *not* candidates.
+func (e *Engine) Explain(query string) (explanations []catalog.Explanation, err error) {
+	cached, found, err := e.logicals.load()
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errors.New("no cached Proton server list yet: wait for the first fetch to succeed")
+	}
+	return catalog.Explain(cached.Servers, e.catalogOptions(), query), nil
+}
+
 // SessionPath returns where the Proton session is stored, so main can wire the
 // session store without duplicating path logic.
 func SessionPath(stateDir string) string { return filepath.Join(stateDir, sessionFileName) }
@@ -368,6 +384,14 @@ func (e *Engine) loadCachedLogicals() {
 	// Utilisation is cached separately and refreshed far more often, so applying
 	// it here recovers most of what a restart would otherwise lose.
 	e.applyCachedLoads(cached.FetchedAt)
+
+	// Write the server data from the cache as well.
+	//
+	// Otherwise a restart while Proton is unreachable leaves Gluetun with whatever
+	// it had - possibly nothing, on a fresh volume - even though a perfectly usable
+	// list is sitting right here. Writing cached data is strictly better than
+	// writing none, and it is corrected as soon as Proton answers again.
+	e.writeServersFile()
 }
 
 // applyCachedLoads overlays utilisation figures newer than the cached list.
@@ -585,6 +609,7 @@ func (e *Engine) publish() {
 		snapshot.Proton.LoggedIn = e.proton.LoggedIn()
 		snapshot.Proton.Session = e.proton.SessionUID()
 		snapshot.Proton.NeedsTOTP = e.manual != nil && e.manual.Waiting()
+		snapshot.Gluetun.RequirementsAdopted = requirementLabels(e.requirements)
 		snapshot.Selection.AutoSwitch = e.autoSwitchEnabled()
 		snapshot.Selection.Mode = e.cfg.Switch.Mode
 		snapshot.Selection.Current = current
@@ -828,6 +853,26 @@ func (s *subscriberSet) notify() {
 		default: // already pending
 		}
 	}
+}
+
+// requirementLabels names the adopted requirements for display.
+func requirementLabels(requirements catalog.Requirements) (labels []string) {
+	for _, pair := range []struct {
+		name     string
+		required bool
+	}{
+		{"port_forward_only", requirements.PortForward},
+		{"secure_core_only", requirements.SecureCore},
+		{"tor_only", requirements.Tor},
+		{"stream_only", requirements.Stream},
+		{"free_only", requirements.Free},
+		{"premium_only", requirements.Premium},
+	} {
+		if pair.required {
+			labels = append(labels, pair.name)
+		}
+	}
+	return labels
 }
 
 // errorText renders an error for the snapshot, where the zero value must be an

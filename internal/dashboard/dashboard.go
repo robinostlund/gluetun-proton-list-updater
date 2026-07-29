@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/robinostlund/gluetun-proton-list-updater/internal/catalog"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/engine"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/logbuf"
 )
@@ -32,6 +33,7 @@ var assetsFS embed.FS
 // about what it can do and makes it trivial to test.
 type Controller interface {
 	Snapshot() engine.Snapshot
+	Explain(query string) ([]catalog.Explanation, error)
 	Subscribe() (updates <-chan struct{}, cancel func())
 	RefreshList(ctx context.Context) error
 	RefreshLoads(ctx context.Context) error
@@ -119,6 +121,7 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("GET /api/state", s.handleState)
 	protected.HandleFunc("GET /api/events", s.handleEvents)
 	protected.HandleFunc("GET /api/logs", s.handleLogs)
+	protected.HandleFunc("GET /api/explain", s.handleExplain)
 	protected.HandleFunc("POST /api/refresh", s.command("refresh", s.controller.RefreshList))
 	protected.HandleFunc("POST /api/loads", s.command("loads", s.controller.RefreshLoads))
 	protected.HandleFunc("POST /api/probe", s.command("probe", s.controller.ProbeLatency))
@@ -180,6 +183,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.controller.Snapshot())
+}
+
+// handleExplain answers "why is this server not in the list?" - a question the
+// aggregate filtering statistics cannot.
+func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":    false,
+			"error": "pass a server name or hostname as ?q=, for example ?q=SE%23444",
+		})
+		return
+	}
+
+	explanations, err := s.controller.Explain(query)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"query":   query,
+		"matches": explanations,
+	})
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

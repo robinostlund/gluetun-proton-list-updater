@@ -31,6 +31,7 @@
         <h2>Current server</h2>
         <p id="current-name" class="card-headline">unknown</p>
         <p id="current-where" class="card-sub"></p>
+        <p id="current-host" class="card-host"></p>
         <dl class="kv">
           <div><dt>Load</dt><dd id="current-load">–</dd></div>
           <div><dt>Latency</dt><dd id="current-rtt">–</dd></div>
@@ -46,6 +47,7 @@
         <h2>Best candidate</h2>
         <p id="best-name" class="card-headline">–</p>
         <p id="best-where" class="card-sub"></p>
+        <p id="best-host" class="card-host"></p>
         <dl class="kv">
           <div><dt>Load</dt><dd id="best-load">–</dd></div>
           <div><dt>Latency</dt><dd id="best-rtt">–</dd></div>
@@ -74,12 +76,40 @@
         <p id="exit-ip" class="card-headline">–</p>
         <p id="exit-where" class="card-sub"></p>
         <dl class="kv">
-          <div><dt>Organisation</dt><dd id="exit-org">–</dd></div>
+          <div class="wide"><dt>Organisation</dt><dd id="exit-org" class="prose">–</dd></div>
+          <div class="wide"><dt>Reverse DNS</dt><dd id="exit-hostname">–</dd></div>
           <div><dt>Timezone</dt><dd id="exit-tz">–</dd></div>
-          <div><dt>Reverse DNS</dt><dd id="exit-hostname">–</dd></div>
           <div><dt>Coordinates</dt><dd id="exit-location">–</dd></div>
         </dl>
         <p id="exit-note" class="card-note"></p>
+      </article>
+
+      <article class="card">
+        <h2>Proton list</h2>
+        <p id="proton-count" class="card-headline">–</p>
+        <dl class="kv">
+          <div><dt>Signed in</dt><dd id="proton-login">–</dd></div>
+          <div><dt>Last fetch</dt><dd id="proton-fetch">–</dd></div>
+          <div><dt>Loads refreshed</dt><dd id="proton-loads">–</dd></div>
+          <div><dt>Next fetch</dt><dd id="proton-next">–</dd></div>
+          <div><dt>Candidates</dt><dd id="candidate-count">–</dd></div>
+        </dl>
+        <p id="proton-error" class="card-note error"></p>
+      </article>
+
+      <article class="card">
+        <h2>Server data for Gluetun</h2>
+        <p id="servers-count" class="card-headline">–</p>
+        <dl class="kv">
+          <div><dt>Layout</dt><dd id="servers-layout">–</dd></div>
+          <div class="wide"><dt>Paths</dt><dd id="servers-path">–</dd></div>
+          <div><dt>Mode</dt><dd id="servers-mode">–</dd></div>
+          <div><dt>Preferred</dt><dd id="servers-preferred-flag">–</dd></div>
+          <div><dt>Schema version</dt><dd id="servers-schema">–</dd></div>
+          <div><dt>Last write</dt><dd id="servers-write">–</dd></div>
+          <div><dt>Preserved</dt><dd id="servers-preserved">–</dd></div>
+        </dl>
+        <p id="servers-error" class="card-note error"></p>
       </article>
 
       <article class="card">
@@ -165,8 +195,15 @@
     </section>
 
     <section class="panel">
-      <div class="panel-head"><h2>Filtering</h2></div>
+      <div class="panel-head">
+        <h2>Filtering</h2>
+        <form id="explain-form">
+          <input type="search" id="explain-query" placeholder="Why is SE#444 missing?" autocomplete="off">
+          <button type="submit" class="small">Explain</button>
+        </form>
+      </div>
       <dl id="stats" class="settings"></dl>
+      <div id="explain-result"></div>
     </section>
   </main>
 

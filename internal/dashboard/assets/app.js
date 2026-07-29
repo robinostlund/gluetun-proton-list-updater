@@ -6,7 +6,20 @@
 'use strict';
 
 const el = (id) => document.getElementById(id);
-const text = (id, value) => { const node = el(id); if (node) node.textContent = value; };
+
+// Values are truncated with an ellipsis rather than wrapped, so the full text is
+// always attached as a tooltip - nothing becomes unreadable, and nothing is lost.
+const text = (id, value) => {
+  const node = el(id);
+  if (!node) return;
+  const string = value === undefined || value === null ? '' : String(value);
+  node.textContent = string;
+  if (string && string !== '–' && string !== '—') {
+    node.title = string;
+  } else {
+    node.removeAttribute('title');
+  }
+};
 
 let snapshot = null;
 let filterTerm = '';
@@ -156,8 +169,9 @@ function renderCurrent() {
 
   text('current-name', current ? current.server_name : 'unknown');
   text('current-where', current
-    ? `${current.country}${current.city ? ' · ' + current.city : ''} · ${current.hostname}`
+    ? `${current.country}${current.city ? ' · ' + current.city : ''}`
     : 'No server identified yet');
+  text('current-host', current ? current.hostname : '');
   el('current-load').innerHTML = current ? loadCell(current.load) : '–';
   text('current-rtt', current && current.rtt_known ? `${current.rtt_ms} ms` : 'unmeasured');
   text('current-score', current && !current.excluded ? current.score.toFixed(3) : '–');
@@ -169,7 +183,7 @@ function renderCurrent() {
   const ports = gluetun.forwarded_ports || [];
   const requested = gluetun.port_forwarding_enabled;
   text('current-port', ports.length
-    ? ports.join(', ')
+    ? ports.join(', ') + (snapshot.gluetun.exit_current ? '' : ' (last seen)')
     : requested === false ? 'not requested' : 'none');
 
   const sources = {
@@ -189,7 +203,8 @@ function renderBest() {
   const selection = snapshot.selection;
 
   text('best-name', best ? best.server_name : '–');
-  text('best-where', best ? `${best.country}${best.city ? ' · ' + best.city : ''} · ${best.hostname}` : '');
+  text('best-where', best ? `${best.country}${best.city ? ' · ' + best.city : ''}` : '');
+  text('best-host', best ? best.hostname : '');
   el('best-load').innerHTML = best ? loadCell(best.load) : '–';
   text('best-rtt', best && best.rtt_known ? `${best.rtt_ms} ms` : 'unmeasured');
   text('best-score', best ? best.score.toFixed(3) : '–');
@@ -225,7 +240,10 @@ function renderExit() {
   const running = snapshot.gluetun.status === 'running';
 
   text('exit-ip', exit.ip || (running ? 'not reported yet' : '—'));
-  const place = [exit.city, exit.region, exit.country].filter(Boolean).join(', ');
+  const current = snapshot.gluetun.exit_current;
+  // Proton's region is frequently the same word as the city ("Stockholm,
+  // Stockholm, Sweden"), so duplicates are collapsed.
+  const place = [...new Set([exit.city, exit.region, exit.country].filter(Boolean))].join(', ');
   text('exit-where', place || (running ? '' : 'Tunnel is not running'));
   text('exit-org', exit.organization || '–');
   text('exit-tz', exit.timezone || '–');
@@ -233,7 +251,11 @@ function renderExit() {
   text('exit-location', exit.location || '–');
 
   let note = '';
-  if (!running) {
+  if (exit.ip && !current) {
+    note = `Last seen ${timeAgo(snapshot.gluetun.exit_observed_at)}, while the tunnel was up — ` +
+      'not a current reading. It is kept rather than blanked so a poll landing mid-reconnect ' +
+      'does not hide a working connection.';
+  } else if (!running) {
     note = 'Only queried while the tunnel is running: with it down, Gluetun would report your real address.';
   } else if (!exit.ip) {
     note = 'Gluetun has not resolved the public IP yet.';
@@ -268,6 +290,11 @@ function renderGluetunDetail() {
     ['Preferred flag', snapshot.servers_file.preferred ? 'yes' : 'no'],
     ['Schema version', String(snapshot.servers_file.schema_version || '–')],
   ];
+
+  const adopted = gluetun.requirements_adopted || [];
+  if (adopted.length) {
+    entries.push(['Requirements adopted', adopted.join(', ')]);
+  }
 
   // Gluetun's active server filters, which are ANDed with anything we pin.
   const selection = gluetun.selection || {};
@@ -523,6 +550,64 @@ el('auto-switch').addEventListener('change', (event) => {
     .then(() => toast(`Automatic switching ${checkbox.checked ? 'enabled' : 'disabled'}.`, 'good'))
     .catch((error) => { toast(error.message, 'bad'); checkbox.checked = !checkbox.checked; });
 });
+
+// "Why is this server not in the list?" - answered against the raw Proton
+// response, so it can explain servers that are not candidates.
+el('explain-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const query = el('explain-query').value.trim();
+  const out = el('explain-result');
+  if (!query) { out.innerHTML = ''; return; }
+
+  out.innerHTML = '<p class="explain-note">Looking…</p>';
+  try {
+    const response = await fetch(`/api/explain?q=${encodeURIComponent(query)}`);
+    const payload = await response.json();
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || 'lookup failed');
+    out.innerHTML = renderExplanations(query, payload.matches || []);
+  } catch (error) {
+    out.innerHTML = `<p class="explain-note error">${escapeHTML(error.message)}</p>`;
+  }
+});
+
+function renderExplanations(query, matches) {
+  if (!matches.length) {
+    return `<p class="explain-note">No server matching <code>${escapeHTML(query)}</code> in Proton's
+      response. It may be new since the last fetch — try "Refresh server list".</p>`;
+  }
+
+  return matches.map((match) => {
+    const tags = [
+      match.p2p ? 'p2p' : null, match.stream ? 'stream' : null,
+      match.secure_core ? 'secure core' : null, match.tor ? 'tor' : null,
+      match.free ? 'free' : null, match.enabled ? null : 'disabled by Proton',
+    ].filter(Boolean).map((t) => `<span class="tag">${escapeHTML(t)}</span>`).join('');
+
+    const physical = (match.physical || []).map((p) => `<li>
+      <span class="hostname">${escapeHTML(p.hostname)}</span> · ${escapeHTML(p.entry_ip)}
+      ${p.included
+        ? '<span class="ok">used</span>'
+        : `<span class="no">not used</span> — ${escapeHTML(p.reason || '')}
+           ${p.deduplicated_by ? 'kept instead: ' + escapeHTML(p.deduplicated_by) : ''}`}
+    </li>`).join('');
+
+    return `<div class="explain">
+      <p><strong>${escapeHTML(match.server_name)}</strong> ·
+        ${escapeHTML(match.country)}${match.city ? ' · ' + escapeHTML(match.city) : ''} ·
+        load ${match.load}% ${match.included
+          ? '<span class="ok">is a candidate</span>'
+          : '<span class="no">is not a candidate</span>'}</p>
+      <div class="tags">${tags}</div>
+      ${match.reasons && match.reasons.length
+        ? '<ul class="explain-reasons">' + match.reasons.map((r) => `<li>${escapeHTML(r)}</li>`).join('') + '</ul>'
+        : ''}
+      ${match.notes && match.notes.length
+        ? '<ul class="explain-notes">' + match.notes.map((n) => `<li>${escapeHTML(n)}</li>`).join('') + '</ul>'
+        : ''}
+      <ul class="explain-physical">${physical}</ul>
+    </div>`;
+  }).join('');
+}
 
 el('filter').addEventListener('input', (event) => {
   filterTerm = event.target.value;

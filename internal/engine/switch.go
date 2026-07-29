@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -204,6 +204,20 @@ func (e *Engine) performSwitch(ctx context.Context, previousHostname string,
 func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 	previousHostname string, previous scoring.Scored, havePrevious bool, reason string,
 ) (switched bool) {
+	// Any rejection means Gluetun is working from a list older than ours, even if
+	// a later candidate succeeded. Left alone, that state persists: the best
+	// servers stay unknown to Gluetun and every switch quietly settles for a worse
+	// one. So a successful switch that had to skip a rejected candidate still
+	// prompts a list refresh, for the benefit of the next switch.
+	refreshAfter := false
+	defer func() {
+		if refreshAfter && switched {
+			e.logger.Info("a candidate was refused before this switch succeeded, " +
+				"refreshing gluetun's server list so the next one can use it")
+			e.refreshGluetunServerList(ctx)
+		}
+	}()
+
 	previousIP := e.Snapshot().Gluetun.Exit.IP
 	rejections := 0
 
@@ -219,6 +233,7 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 		switch {
 		case errors.Is(err, gluetunapi.ErrRejected):
 			rejections++
+			refreshAfter = true
 			e.logger.Warn("gluetun refused the server, trying the next candidate",
 				"hostname", target.Candidate.Hostname, "attempt", attempt+1, "error", err)
 			continue
@@ -393,16 +408,41 @@ func outcomeMeansNotRestarted(outcome string) bool {
 	}
 }
 
-// verifyTunnel waits for the tunnel to be up again and reports the public IP.
+// verifyTunnel waits for the tunnel to come back up and reports the public IP.
 //
-// Verification is what turns "we sent a request" into "the switch worked". In
-// settings mode, a match against the target's exit IP is conclusive proof.
+// Verification is what turns "we sent a request" into "the switch worked", but it
+// has to accept the two ways a good switch can look:
+//
+//   - The public IP matches an exit address Proton lists for the pinned hostname.
+//     This is conclusive.
+//   - The public IP simply changed. This is accepted too, because Proton's exit
+//     addresses are not always what the internet observes: a hostname can have
+//     several physical machines with different exit addresses, and Proton reports
+//     the server address rather than the NATed egress. Insisting on a match made
+//     perfectly good switches record as failures, with the tunnel actually up and
+//     running on the requested server.
 func (e *Engine) verifyTunnel(ctx context.Context, target scoring.Scored, previousIP string) (publicIP string, err error) {
 	deadline := time.Now().Add(e.cfg.Switch.VerifyTimeout)
 	const pollInterval = 3 * time.Second
 
-	expected := target.Candidate.ExitIP
-	var lastStatus string
+	// Every exit address Proton lists for this hostname, since a hostname can be
+	// backed by more than one machine.
+	expected := make(map[string]struct{})
+	for _, candidate := range e.candidates {
+		if candidate.Hostname == target.Candidate.Hostname && candidate.ExitIP.IsValid() {
+			expected[candidate.ExitIP.String()] = struct{}{}
+		}
+	}
+
+	// Once a changed address is seen, polling continues only briefly in case the
+	// expected one appears - Gluetun caches the public IP for a moment, so the
+	// first reading after a reconnect can still be the old one. Waiting out the
+	// whole timeout for a match that may never come would leave every switch
+	// looking unfinished for a minute and a half.
+	const graceAfterChange = 9 * time.Second
+	var changedAt time.Time
+
+	var lastStatus, changedIP string
 	var lastErr error
 
 	for time.Now().Before(deadline) {
@@ -428,26 +468,46 @@ func (e *Engine) verifyTunnel(ctx context.Context, target scoring.Scored, previo
 			continue
 		}
 
-		// Gluetun caches the public IP briefly, so an unchanged address right
-		// after a reconnect may just be stale. Only an address that matches the
-		// target, or any address once it has changed, counts as done.
-		if expected.IsValid() {
-			if address, parseErr := netip.ParseAddr(ip.IP); parseErr == nil && address == expected {
-				return ip.IP, nil
-			}
-			continue
-		}
-		if ip.IP != previousIP {
+		if _, matches := expected[ip.IP]; matches {
 			return ip.IP, nil
 		}
+		if ip.IP != previousIP {
+			if changedIP == "" {
+				changedIP, changedAt = ip.IP, time.Now()
+			}
+			changedIP = ip.IP
+			if time.Since(changedAt) >= graceAfterChange {
+				break
+			}
+		}
+	}
+
+	if changedIP != "" {
+		// The tunnel is up on a different address than before. Accept it, and say
+		// that Proton's data did not line up so a mismatch is not mistaken for a
+		// silent failure.
+		e.logger.Info("tunnel verified by a changed public IP; it does not match Proton's exit address for this server",
+			"hostname", target.Candidate.Hostname,
+			"observed", changedIP,
+			"proton_exit_addresses", expectedList(expected))
+		return changedIP, nil
 	}
 
 	if lastErr != nil {
 		return "", fmt.Errorf("tunnel not confirmed within %s (last status %q): %w",
 			e.cfg.Switch.VerifyTimeout, lastStatus, lastErr)
 	}
-	return "", fmt.Errorf("tunnel not confirmed within %s (last status %q)",
+	return "", fmt.Errorf("tunnel not confirmed within %s (last status %q): the public IP never changed",
 		e.cfg.Switch.VerifyTimeout, lastStatus)
+}
+
+func expectedList(expected map[string]struct{}) []string {
+	list := make([]string, 0, len(expected))
+	for address := range expected {
+		list = append(list, address)
+	}
+	sort.Strings(list)
+	return list
 }
 
 // recordSwitch appends to the persisted history.

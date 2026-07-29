@@ -289,16 +289,28 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 		e.updateRequirements(settings.Requirements())
 	}
 
-	// The public IP is only meaningful while the tunnel is up, and asking for it
-	// while stopped reports the real address, which is confusing rather than
-	// useful.
-	var exit gluetunapi.PublicIP
-	var ports []uint16
+	// These are only queried while the tunnel is up: asking for the public IP
+	// while it is down reports the real address, which is misleading.
+	//
+	// What must not happen is erasing what is already known. A poll that lands
+	// while the tunnel is restarting - which, with switching enabled, is many of
+	// them - would otherwise blank the forwarded port and the exit address until
+	// the next poll, so the dashboard reads "none" for a port Gluetun is happily
+	// forwarding. The previous values are kept and marked as not current instead.
+	previous := e.Snapshot().Gluetun
+	exit, ports := previous.Exit, previous.ForwardedPorts
+	live := false
+
 	if status == gluetunapi.StatusRunning {
-		if ip, ipErr := e.gluetun.GetPublicIP(ctx); ipErr == nil {
-			exit = ip
+		if ip, ipErr := e.gluetun.GetPublicIP(ctx); ipErr == nil && ip.IP != "" {
+			exit = ExitInfo{
+				IP: ip.IP, Country: ip.Country, Region: ip.Region, City: ip.City,
+				Hostname: ip.Hostname, Location: ip.Location,
+				Organization: ip.Organization, PostalCode: ip.PostalCode, Timezone: ip.Timezone,
+			}
+			live = true
 		}
-		if forwarded, portErr := e.gluetun.GetForwardedPorts(ctx); portErr == nil {
+		if forwarded, portErr := e.gluetun.GetForwardedPorts(ctx); portErr == nil && len(forwarded) > 0 {
 			ports = forwarded
 		}
 	}
@@ -314,18 +326,14 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 		snapshot.Gluetun.Status = status
 		snapshot.Gluetun.LastCheck = time.Now()
 		snapshot.Gluetun.LastError = errorText(settingsErr)
-		snapshot.Gluetun.Exit = ExitInfo{
-			IP:           exit.IP,
-			Country:      exit.Country,
-			Region:       exit.Region,
-			City:         exit.City,
-			Hostname:     exit.Hostname,
-			Location:     exit.Location,
-			Organization: exit.Organization,
-			PostalCode:   exit.PostalCode,
-			Timezone:     exit.Timezone,
-		}
+		snapshot.Gluetun.Exit = exit
 		snapshot.Gluetun.ForwardedPorts = ports
+		if live {
+			snapshot.Gluetun.ExitObservedAt = time.Now()
+		}
+		// Values shown while the tunnel is not running are the last ones seen, not
+		// current facts, and the dashboard says so.
+		snapshot.Gluetun.ExitCurrent = live
 		snapshot.Gluetun.DNSStatus = dnsStatus
 		snapshot.Gluetun.UpdaterStatus = updaterStatus
 		if build.Version != "" {
@@ -416,13 +424,24 @@ func (e *Engine) checkServerDataIsRead() {
 // connecting. Adopting the requirements means the operator's intent is satisfied
 // by the choice rather than fought over.
 func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
+	// Requirements are only ever added, never dropped, and that is deliberate.
+	//
+	// Pinning a server clears these filters in Gluetun on purpose - they are
+	// redundant next to an exact hostname, and Gluetun's built-in feature data can
+	// disagree with Proton's, which crashes its VPN loop. The consequence is that
+	// every pin makes Gluetun report them as off. Believing that would undo the
+	// operator's intent: the requirement would be dropped, a server that fails it
+	// would be chosen next time, and each flip would rebuild the whole catalog.
+	//
+	// So an observed "off" is assumed to be our own doing. A genuine change to off
+	// is picked up when this container restarts.
 	requirements := catalog.Requirements{
-		PortForward: from.PortForward,
-		SecureCore:  from.SecureCore,
-		Tor:         from.Tor,
-		Stream:      from.Stream,
-		Free:        from.Free,
-		Premium:     from.Premium,
+		PortForward: from.PortForward || e.requirements.PortForward,
+		SecureCore:  from.SecureCore || e.requirements.SecureCore,
+		Tor:         from.Tor || e.requirements.Tor,
+		Stream:      from.Stream || e.requirements.Stream,
+		Free:        from.Free || e.requirements.Free,
+		Premium:     from.Premium || e.requirements.Premium,
 	}
 	if requirements == e.requirements {
 		return
@@ -442,6 +461,7 @@ func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
 
 	e.requirements = requirements
 	e.rebuildFromCache("gluetun requirements changed")
+	e.publish()
 }
 
 // rebuildFromCache re-derives the catalog from the cached Proton list, used when

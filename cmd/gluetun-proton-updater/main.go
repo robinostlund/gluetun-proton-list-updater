@@ -166,13 +166,13 @@ func run() (err error) {
 	case <-time.After(6 * time.Second):
 	}
 
-	// Releasing the Proton session on the way out is polite and keeps the
-	// account's session list tidy. It must not block shutdown, hence the short,
-	// detached context.
-	logoutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	protonClient.Logout(logoutCtx)
-
+	// Deliberately no logout on the way out.
+	//
+	// Logging out invalidates the refresh token and deletes the stored session, so
+	// every restart would have to authenticate again - defeating the whole point of
+	// persisting it, and walking straight into Proton's login rate limits for
+	// anyone who restarts the container a few times in a row. Long-lived sessions
+	// are how Proton's own clients behave; a stale one costs nothing.
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}

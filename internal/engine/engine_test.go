@@ -34,6 +34,9 @@ type fakeGluetun struct {
 	pinned           []string
 	status           string
 	rejectHostnames  bool
+	// rejectHostname refuses just one hostname, modelling a Gluetun that knows
+	// most of our servers but not the newest one.
+	rejectHostname string
 	// updaterCalls counts PUT /v1/updater/status requests. Triggering Gluetun's
 	// own updater is the only in-place way to make it aware of new servers.
 	updaterCalls int
@@ -138,7 +141,7 @@ func (f *fakeGluetun) handler() http.Handler {
 
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if f.rejectHostnames {
+		if f.rejectHostnames || (f.rejectHostname != "" && hostnames[0] == f.rejectHostname) {
 			// This is how Gluetun answers for a hostname missing from the list
 			// it loaded at startup.
 			http.Error(w, "no server found for hostname", http.StatusBadRequest)
@@ -162,7 +165,8 @@ func (f *fakeGluetun) handler() http.Handler {
 		})
 	})
 	mux.HandleFunc("GET /v1/portforward", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"port":51820}`)
+		// The shape a real Gluetun returns, including the plural field.
+		_, _ = io.WriteString(w, `{"port":55019,"ports":[55019]}`)
 	})
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"version":"v3.41.1"}`)
@@ -285,7 +289,7 @@ func newHarness(t *testing.T, protonFailing bool, mutate func(cfg *config.Config
 		Gluetun: config.Gluetun{
 			BaseURL: gluetunServer.URL, RequestTimeout: 5 * time.Second,
 			HealthInterval: time.Hour, UpdaterTimeout: 20 * time.Second,
-			MutationTimeout: 30 * time.Second,
+			MutationTimeout: 30 * time.Second, RefreshServersOnReject: true,
 		},
 		Servers: config.Servers{
 			FilePath: filePath, DirPath: serversDir,
@@ -1241,5 +1245,168 @@ func TestRebuildKeepsTheLatestLoads(t *testing.T) {
 	// And the ranking must follow.
 	if best := engine.ranked[0].Candidate.ServerName; best != "SE#1" {
 		t.Errorf("best after rebuild = %s, want SE#1", best)
+	}
+}
+
+// A poll landing while the tunnel restarts must not erase what is known. Without
+// this, a working port forward reads as "none" on the dashboard for as long as the
+// tunnel is cycling - which, with switching enabled, is often.
+func TestTransientTunnelStateDoesNotEraseTheForwardedPort(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool {
+		return len(harness.engine.Snapshot().Gluetun.ForwardedPorts) > 0
+	})
+
+	snapshot := harness.engine.Snapshot()
+	if got := snapshot.Gluetun.ForwardedPorts; len(got) != 1 || got[0] != 55019 {
+		t.Fatalf("ForwardedPorts = %v, want [55019]", got)
+	}
+	if !snapshot.Gluetun.ExitCurrent {
+		t.Error("values read from a running tunnel should be marked current")
+	}
+	observedIP := snapshot.Gluetun.Exit.IP
+
+	// Now the tunnel goes into a transitional state, as it does on every reconnect.
+	harness.gluetun.mu.Lock()
+	harness.gluetun.status = gluetunapi.StatusStopping
+	harness.gluetun.mu.Unlock()
+
+	harness.engine.checkGluetun(context.Background())
+
+	snapshot = harness.engine.Snapshot()
+	if got := snapshot.Gluetun.ForwardedPorts; len(got) != 1 || got[0] != 55019 {
+		t.Errorf("ForwardedPorts = %v after a transient state, want the port to be retained", got)
+	}
+	if snapshot.Gluetun.Exit.IP != observedIP {
+		t.Errorf("exit IP = %q, want the last known %q retained", snapshot.Gluetun.Exit.IP, observedIP)
+	}
+	// But it must be honest that these are no longer current readings.
+	if snapshot.Gluetun.ExitCurrent {
+		t.Error("retained values must be marked as not current")
+	}
+}
+
+// Proton's exit address for a hostname is not always what the internet observes:
+// a hostname can have several machines, and Proton reports the server address
+// rather than the NATed egress. Insisting on a match recorded good switches as
+// failures.
+func TestSwitchIsVerifiedByAChangedPublicIP(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	// Gluetun reports an address that is not among Proton's exit addresses.
+	harness.gluetun.exitIPByHostname = map[string]string{
+		"se-01.protonvpn.net": "81.0.0.1",
+		"se-02.protonvpn.net": "203.0.113.77", // not 81.0.0.2 as Proton claims
+		"no-01.protonvpn.net": "203.0.113.78",
+	}
+
+	harness.run(t, func() bool {
+		history := harness.engine.Snapshot().History
+		return len(history) > 0 && history[0].Succeeded
+	})
+
+	record := harness.engine.Snapshot().History[0]
+	if !record.Succeeded {
+		t.Fatalf("the switch should be verified by the changed address: %+v", record)
+	}
+	if record.PublicIP != "203.0.113.77" {
+		t.Errorf("PublicIP = %q, want the observed address", record.PublicIP)
+	}
+}
+
+// A rejection means Gluetun's list is older than ours. Even when a later candidate
+// works, the list should be refreshed - otherwise the best servers stay unknown to
+// Gluetun and every switch settles for a worse one.
+func TestRejectionTriggersARefreshEvenWhenASwitchSucceeds(t *testing.T) {
+	// Norway is allowed too, so refusing the best candidate still leaves a
+	// different server to fall back to rather than only the current one.
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Filter.Countries = []string{"Sweden", "Norway"}
+	})
+	harness.gluetun.rejectHostname = "no-01.protonvpn.net"
+
+	harness.run(t, func() bool {
+		history := harness.engine.Snapshot().History
+		return len(history) > 0 && history[0].Succeeded
+	})
+
+	if calls := harness.gluetun.updaterTriggered(); calls == 0 {
+		t.Error("a rejection during a successful switch should still refresh gluetun's list")
+	}
+}
+
+// Pinning a server clears Gluetun's "only" filters by design, so Gluetun then
+// reports them as off. Believing that would drop the operator's requirement, let a
+// server that fails it be chosen next time, and rebuild the catalog on every flip.
+func TestRequirementsAreNotDroppedWhenOurOwnPinClearsThem(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwardOnly = true
+
+	// Waiting on the published snapshot rather than on engine internals: those are
+	// owned by the run loop, and reading them while it runs is a data race.
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+	engine := harness.engine
+
+	// Gluetun now reports the filter as off, because the pin cleared it.
+	harness.gluetun.mu.Lock()
+	harness.gluetun.portForwardOnly = false
+	harness.gluetun.mu.Unlock()
+
+	// A rebuild replaces the candidate slice, so its identity reveals whether one
+	// happened; Stats contains a slice and cannot be compared directly.
+	before := &engine.candidates[0]
+	engine.checkGluetun(context.Background())
+
+	if !engine.requirements.PortForward {
+		t.Error("the requirement must survive our own clearing of the filter")
+	}
+	// And no pointless rebuild: re-deriving the catalog reads a multi-megabyte
+	// cache and throws away the loads applied since the last full fetch.
+	if &engine.candidates[0] != before {
+		t.Error("nothing changed, so the catalog should not have been rebuilt")
+	}
+
+	// A newly appearing requirement is still adopted.
+	harness.gluetun.mu.Lock()
+	harness.gluetun.portForwardOnly = true
+	harness.gluetun.mu.Unlock()
+	engine.checkGluetun(context.Background())
+	if !engine.requirements.PortForward {
+		t.Error("requirements should still be adoptable")
+	}
+}
+
+// A restart while Proton is unreachable must still give Gluetun a server list.
+// Loading the cache without writing it left Gluetun with whatever it had - on a
+// fresh volume, nothing - while a perfectly usable list sat in the cache.
+func TestServerDataIsWrittenFromTheCacheWhenProtonIsDown(t *testing.T) {
+	warm := newHarness(t, false, nil)
+	warm.run(t, func() bool { return !warm.engine.Snapshot().Servers.LastWrite.IsZero() })
+
+	// Second run against a failing Proton, reusing the cached list but a fresh
+	// Gluetun volume so nothing is pre-written.
+	cold := newHarness(t, true, nil)
+	if err := os.Rename(filepath.Join(warm.stateDir, logicalsFileName),
+		filepath.Join(cold.stateDir, logicalsFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cold.filePath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	cold.run(t, func() bool { return !cold.engine.Snapshot().Servers.LastWrite.IsZero() })
+
+	snapshot := cold.engine.Snapshot()
+	if snapshot.Servers.ServerCount == 0 {
+		t.Error("server data should have been written from the cached list")
+	}
+	if !snapshot.Proton.FromCache {
+		t.Error("the run should be marked as using the cache")
+	}
+	// And the file really exists on disk.
+	if _, err := os.Stat(cold.filePath); err != nil {
+		t.Errorf("the servers file was not written: %v", err)
 	}
 }

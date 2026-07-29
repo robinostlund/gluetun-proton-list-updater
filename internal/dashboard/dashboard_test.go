@@ -2,17 +2,21 @@ package dashboard
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/robinostlund/gluetun-proton-list-updater/internal/catalog"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/engine"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/logbuf"
 )
@@ -47,6 +51,15 @@ func (s *stubController) recorded() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.calls...)
+}
+
+func (s *stubController) Explain(query string) ([]catalog.Explanation, error) {
+	_ = s.record("explain:" + query)
+	if s.failWith != nil {
+		return nil, s.failWith
+	}
+	return []catalog.Explanation{{ServerName: "SE#444", Country: "Sweden", Included: false,
+		Reasons: []string{"load 95% is above MAX_LOAD=80"}}}, nil
 }
 
 func (s *stubController) Snapshot() engine.Snapshot {
@@ -457,4 +470,149 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestExplainEndpoint(t *testing.T) {
+	t.Parallel()
+
+	stub := newStub()
+	server := newTestServer(t, stub, Options{})
+
+	response, err := server.Client().Get(server.URL + "/api/explain?q=SE%23444")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	var payload struct {
+		OK      bool                  `json:"ok"`
+		Query   string                `json:"query"`
+		Matches []catalog.Explanation `json:"matches"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.OK || payload.Query != "SE#444" || len(payload.Matches) != 1 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if len(payload.Matches[0].Reasons) == 0 {
+		t.Error("the explanation should carry a reason")
+	}
+	if !containsString(stub.recorded(), "explain:SE#444") {
+		t.Errorf("calls = %v", stub.recorded())
+	}
+}
+
+func TestExplainEndpointRequiresAQuery(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t, newStub(), Options{})
+	response, err := server.Client().Get(server.URL + "/api/explain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.StatusCode)
+	}
+}
+
+// Every element the front end writes to must exist in the page.
+//
+// This is a structural test rather than a behavioural one, and it exists because
+// a careless edit to index.html once removed two whole cards: the front end then
+// threw on the first missing element, and every render step after that point -
+// including the switch history - silently stopped working. Nothing else in this
+// suite noticed, because the server was serving a perfectly valid 200.
+func TestEveryElementTheFrontEndUsesExists(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// IDs present in the page.
+	declared := map[string]bool{}
+	for _, match := range regexp.MustCompile(`id="([a-zA-Z0-9_-]+)"`).FindAllSubmatch(page, -1) {
+		declared[string(match[1])] = true
+	}
+	// IDs the page creates at runtime, inside rendered markup rather than the
+	// static document.
+	for _, match := range regexp.MustCompile(`id="([a-zA-Z0-9_-]+)"`).FindAllSubmatch(script, -1) {
+		declared[string(match[1])] = true
+	}
+
+	// IDs the script looks up.
+	used := map[string]bool{}
+	for _, pattern := range []string{`el\('([a-zA-Z0-9_-]+)'\)`, `text\('([a-zA-Z0-9_-]+)'`} {
+		for _, match := range regexp.MustCompile(pattern).FindAllSubmatch(script, -1) {
+			used[string(match[1])] = true
+		}
+	}
+
+	if len(used) < 20 {
+		t.Fatalf("only found %d element lookups, the patterns are probably wrong", len(used))
+	}
+
+	var missing []string
+	for id := range used {
+		if !declared[id] {
+			missing = append(missing, id)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Errorf("app.js writes to elements that do not exist in index.html: %v\n"+
+			"the front end throws on the first one, so every later render step stops working",
+			missing)
+	}
+}
+
+// The reverse direction: a card left in the page that nothing fills would show
+// permanent placeholder dashes.
+func TestEveryPageElementIsFilled(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Containers and inputs are addressed in other ways (listeners, querySelector,
+	// tBodies), so only value placeholders are checked.
+	ignored := map[string]bool{
+		"alerts": true, "candidates": true, "history": true, "logs": true,
+		"settings": true, "stats": true, "toast": true, "filter": true,
+		"auto-switch": true, "explain-form": true, "explain-query": true,
+		"explain-result": true, "totp-form": true, "totp-code": true,
+		"activity": true, "gluetun-detail": true,
+	}
+
+	var unused []string
+	for _, match := range regexp.MustCompile(`id="([a-zA-Z0-9_-]+)"`).FindAllSubmatch(page, -1) {
+		id := string(match[1])
+		if ignored[id] {
+			continue
+		}
+		if !bytes.Contains(script, []byte("'"+id+"'")) {
+			unused = append(unused, id)
+		}
+	}
+	sort.Strings(unused)
+	if len(unused) > 0 {
+		t.Errorf("index.html declares elements nothing fills, so they show a permanent dash: %v", unused)
+	}
 }

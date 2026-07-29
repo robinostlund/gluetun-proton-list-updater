@@ -18,7 +18,9 @@ const (
 	loadsFileName    = "loads.json"
 )
 
-// maxHistory bounds the persisted switch history.
+// maxHistory bounds the persisted switch history. Every file in the state
+// directory is replaced in full rather than appended to, so this count cap is all
+// that is needed to keep the state bounded.
 const maxHistory = 100
 
 // SwitchRecord is one entry of the switch history shown on the dashboard.

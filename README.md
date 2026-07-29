@@ -294,6 +294,7 @@ unauthenticated so Docker's health check works.
 | `GET` | `/api/state` | Full state snapshot (JSON) |
 | `GET` | `/api/events` | Server-sent event stream of snapshots |
 | `GET` | `/api/logs?limit=n` | Recent log records |
+| `GET` | `/api/explain?q=SE%23444` | Why a given Proton server is, or is not, a candidate |
 | `POST` | `/api/refresh` | Refresh the Proton server list |
 | `POST` | `/api/loads` | Refresh utilisation only |
 | `POST` | `/api/probe` | Run a latency sweep |
@@ -305,6 +306,34 @@ unauthenticated so Docker's health check works.
 | `GET` | `/healthz` | Health check |
 
 ---
+
+## "Why is server X not in the list?"
+
+Ask the tool. It evaluates the question against the **raw Proton response** cached in `STATE_DIR`, so
+it can explain servers that are not candidates:
+
+```bash
+curl -s 'http://localhost:8080/api/explain?q=SE%23444' | jq
+```
+
+or type the name into the box in the dashboard's *Filtering* panel. It names every rule that
+rejected the server — `MAX_LOAD`, a country or city filter, a feature filter, a filter Gluetun itself
+enforces, a Proton `Status 0`, a missing WireGuard key — and lists each physical machine behind it.
+
+The most common answer is not an exclusion at all. **Proton groups one physical machine under several
+logical names**: `SE#148` and `SE#444` can be the same box, with the same hostname and entry IP but
+different reported loads. Gluetun connects by *hostname*, so that machine is usable either way — it
+simply appears in the candidate list under whichever name won deduplication (the quieter one). The
+diagnostic says so explicitly:
+
+```
+usable: SE#444 is the same machine as SE#148 (node-se-12.protonvpn.net),
+so it appears in the list under that name
+```
+
+So a name visible on Proton's portal but absent from the dashboard is usually present as a sibling,
+not missing. Deduplication is by entry IP, matching Gluetun's own updater, and keeps the
+least-loaded of the servers sharing a machine.
 
 ## Scoring
 
@@ -465,7 +494,35 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `STREAM` | `include` | `include` / `exclude` / `only` |
 | `FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
 
-### Scoring and latency
+### "Why is server X not in the list?"
+
+Ask the tool. It evaluates the question against the **raw Proton response** cached in `STATE_DIR`, so
+it can explain servers that are not candidates:
+
+```bash
+curl -s 'http://localhost:8080/api/explain?q=SE%23444' | jq
+```
+
+or type the name into the box in the dashboard's *Filtering* panel. It names every rule that
+rejected the server — `MAX_LOAD`, a country or city filter, a feature filter, a filter Gluetun itself
+enforces, a Proton `Status 0`, a missing WireGuard key — and lists each physical machine behind it.
+
+The most common answer is not an exclusion at all. **Proton groups one physical machine under several
+logical names**: `SE#148` and `SE#444` can be the same box, with the same hostname and entry IP but
+different reported loads. Gluetun connects by *hostname*, so that machine is usable either way — it
+simply appears in the candidate list under whichever name won deduplication (the quieter one). The
+diagnostic says so explicitly:
+
+```
+usable: SE#444 is the same machine as SE#148 (node-se-12.protonvpn.net),
+so it appears in the list under that name
+```
+
+So a name visible on Proton's portal but absent from the dashboard is usually present as a sibling,
+not missing. Deduplication is by entry IP, matching Gluetun's own updater, and keeps the
+least-loaded of the servers sharing a machine.
+
+## Scoring and latency
 
 | Variable | Default | Description |
 |---|---|---|

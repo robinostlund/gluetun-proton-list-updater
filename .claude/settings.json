@@ -9,7 +9,9 @@
       "Bash(curl -sL -o s3411.json \"https://raw.githubusercontent.com/qdm12/gluetun/v3.41.1/internal/storage/servers.json\")",
       "Bash(python3 -c ' *)",
       "Bash(curl -s -m 20 -o /private/tmp/claude-501/-Users-robin-Git-Private-gluetun-proton-list-updater/fe1f4492-8a0b-4911-b96c-34971d95a0ec/scratchpad/logicals.json -w \"%{http_code}\\\\n\" \"https://api.protonvpn.ch/vpn/logicals\")",
-      "Bash(curl -sL -o countries.go \"https://raw.githubusercontent.com/qdm12/gluetun/v3.41.1/internal/constants/countries.go\")"
+      "Bash(curl -sL -o countries.go \"https://raw.githubusercontent.com/qdm12/gluetun/v3.41.1/internal/constants/countries.go\")",
+      "Bash(grep -n \"continue$\" internal/catalog/catalog.go)",
+      "Bash(GOFLAGS=-mod=mod go test ./... -race -count=1 -timeout 900s)"
     ]
   }
 }
