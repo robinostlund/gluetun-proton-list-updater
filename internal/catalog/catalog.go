@@ -126,6 +126,37 @@ type Requirements struct {
 	Premium     bool
 }
 
+// None reports whether no requirement is in force.
+func (r Requirements) None() bool {
+	return r == Requirements{}
+}
+
+// Unmet names the requirements a candidate fails, in Gluetun's own setting names
+// so the answer points at the setting to change.
+//
+// It takes a Candidate rather than a logical server because the caller that needs
+// it - the dashboard, explaining why a listed server is not selectable - is working
+// with the flattened set.
+func (r Requirements) Unmet(candidate Candidate) (names []string) {
+	for _, check := range []struct {
+		required bool
+		has      bool
+		name     string
+	}{
+		{r.PortForward, candidate.P2P, "port_forward_only"},
+		{r.SecureCore, candidate.SecureCore, "secure_core_only"},
+		{r.Tor, candidate.Tor, "tor_only"},
+		{r.Stream, candidate.Stream, "stream_only"},
+		{r.Free, candidate.Free, "free_only"},
+		{r.Premium, !candidate.Free, "premium_only"},
+	} {
+		if check.required && !check.has {
+			names = append(names, check.name)
+		}
+	}
+	return names
+}
+
 // satisfied reports whether a logical server meets every requirement.
 func (r Requirements) satisfied(logical proton.LogicalServer) bool {
 	switch {

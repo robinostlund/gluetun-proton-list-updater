@@ -69,7 +69,32 @@ function featureTags(candidate, options = {}) {
     : '<span class="tag tag-paid">paid</span>');
   if (candidate.wireguard) tags.push('<span class="tag">wg</span>');
   if (candidate.excluded) tags.push('<span class="tag tag-excluded">outside filters</span>');
+  // A tag as well as the row colour, so the row does not depend on colour alone to
+  // read as unusable.
+  if (candidate.blocked) {
+    const by = (candidate.blocked_by || []).join(', ');
+    tags.push(`<span class="tag tag-blocked" title="Gluetun enforces ${escapeHTML(by)}">cannot use</span>`);
+  }
   return tags.join('');
+}
+
+// shortHost drops the domain every Proton hostname shares.
+//
+// In the history panel the cell has to fit two hostnames in half the page width, and
+// ".protonvpn.net" is 14 identical characters per name that distinguish nothing. Only
+// that exact suffix is removed, so anything unexpected is left alone, and the full
+// name stays in the cell's title.
+function shortHost(hostname) {
+  return String(hostname || '').replace(/\.protonvpn\.net$/, '');
+}
+
+// portForwardingState answers only "is Gluetun asking Proton for a port?".
+// "unknown" is kept distinct from "off": before Gluetun's settings have been read
+// once, claiming it is off would be a guess.
+function portForwardingState(gluetun) {
+  const requested = gluetun.port_forwarding_enabled;
+  if (requested === undefined || requested === null) return 'unknown';
+  return requested ? 'on' : 'off';
 }
 
 function escapeHTML(value) {
@@ -240,7 +265,13 @@ function renderBest() {
 
   const parts = [];
   if ((snapshot.gluetun.requirements_adopted || []).includes('port_forward_only')) {
-    parts.push('Only port-forwarding (P2P) servers are considered, because Gluetun requires one — ' +
+    // Name the setting. "Gluetun requires one" is bewildering to an operator who
+    // only ever set VPN_PORT_FORWARDING and never PORT_FORWARD_ONLY.
+    const because = snapshot.gluetun.port_forward_requirement_from === 'VPN_PORT_FORWARDING'
+      ? 'because Gluetun asks Proton for a forwarded port (VPN_PORT_FORWARDING), and Proton ' +
+        'forwards ports on P2P servers only'
+      : 'because Gluetun refuses anything else (PORT_FORWARD_ONLY)';
+    parts.push(`Only port-forwarding (P2P) servers are considered, ${because} — ` +
       'so a busier server can legitimately win here.');
   }
   parts.push(`Needs ${selection.min_improvement.toFixed(3)} improvement to switch automatically.`);
@@ -259,21 +290,6 @@ function renderGluetun() {
   text('gluetun-provider', gluetun.provider || '–');
   text('gluetun-dns', gluetun.dns_status || '–');
 
-  // Port forwarding is worth stating outright: it decides whether selection is
-  // restricted to P2P servers, which is otherwise invisible.
-  const requested = gluetun.port_forwarding_enabled;
-  const p2pRequired = (gluetun.requirements_adopted || []).includes('port_forward_only');
-  const ports = gluetun.forwarded_ports || [];
-  let pf;
-  if (requested === undefined || requested === null) {
-    pf = 'unknown';
-  } else if (!requested) {
-    pf = 'off';
-  } else {
-    pf = ports.length ? `on, port ${ports.join(', ')}` : 'on, no port yet';
-  }
-  if (p2pRequired) pf += ' · P2P servers only';
-  text('gluetun-pf', pf);
   text('gluetun-check', timeAgo(gluetun.last_check));
   text('gluetun-error', gluetun.reachable ? (gluetun.last_error || '') : '');
 
@@ -332,6 +348,10 @@ function renderGluetunDetail() {
     ["Gluetun's own updater", gluetun.updater_status || '–'],
     ['Settings readable', gluetun.settings_readable ? 'yes' : 'no — PUT /v1/vpn/settings will also be refused'],
     ['Public IP', (gluetun.exit && gluetun.exit.ip) || '–'],
+    // Whether Gluetun asks for a forwarded port at all. The port itself is on the
+    // Current server card, and the P2P consequence is on the Best candidate card,
+    // so this only needs to answer the plain question.
+    ['Port forwarding', portForwardingState(gluetun)],
     ['Forwarded ports', (gluetun.forwarded_ports || []).join(', ') || 'none'],
     ['Servers layout', snapshot.servers_file.layout || '–'],
     ['Servers written to', (snapshot.servers_file.paths || []).join(', ') || '–'],
@@ -408,7 +428,10 @@ function renderCandidates() {
     || (candidate.city || '').toLowerCase().includes(term)
     || candidate.hostname.toLowerCase().includes(term));
 
-  text('candidates-shown', `showing ${rows.length} of ${snapshot.candidates_total}`);
+  const selectable = rows.filter((candidate) => !candidate.blocked).length;
+  const blockedShown = rows.length - selectable;
+  text('candidates-shown', `showing ${selectable} of ${snapshot.candidates_total}`
+    + (blockedShown ? ` · ${blockedShown} unusable` : ''));
 
   el('candidates').tBodies[0].innerHTML = rows.map((candidate) => {
     const scoreTitle = candidate.rtt_known
@@ -416,10 +439,17 @@ function renderCandidates() {
       : `load ${candidate.score_load} + assumed latency ${candidate.score_latency} (not probed yet) ` +
         `+ proton ${candidate.score_proton}`;
 
-    return `<tr class="${candidate.is_current ? 'is-current' : ''}">
-      <td class="num">${candidate.rank}</td>
+    // A blocked server is listed so it is not simply missing, but it must read as
+    // unusable at a glance: Gluetun would refuse the selection outright.
+    const blockedBy = (candidate.blocked_by || []).join(', ');
+    const blockedWhy = `Gluetun cannot use this server: it enforces ${blockedBy || 'a filter'}`;
+
+    return `<tr class="${candidate.is_current ? 'is-current' : ''} ${candidate.blocked ? 'is-blocked' : ''}"
+      ${candidate.blocked ? `title="${escapeHTML(blockedWhy)}"` : ''}>
+      <td class="num">${candidate.blocked ? '<span class="muted">–</span>' : candidate.rank}</td>
       <td><div>${escapeHTML(candidate.server_name)}</div><div class="hostname">${escapeHTML(candidate.hostname)}</div></td>
-      <td>${escapeHTML(candidate.country)}${candidate.city ? ' · ' + escapeHTML(candidate.city) : ''}</td>
+      <td>${escapeHTML(candidate.country)}</td>
+      <td>${candidate.city ? escapeHTML(candidate.city) : '<span class="muted">–</span>'}</td>
       <td class="num">${loadCell(candidate.load)}</td>
       <td class="num">${candidate.rtt_known
         ? candidate.rtt_ms + ' ms'
@@ -430,24 +460,32 @@ function renderCandidates() {
       <td><div class="tags">${featureTags(candidate, { current: candidate.is_current })}</div></td>
       <td class="right">
         <button class="small" data-switch="${escapeHTML(candidate.hostname)}"
-          ${candidate.is_current ? 'disabled' : ''}>Use</button>
+          ${candidate.is_current || candidate.blocked ? 'disabled' : ''}
+          ${candidate.blocked ? `title="${escapeHTML(blockedWhy)}"` : ''}>Use</button>
       </td>
     </tr>`;
   }).join('');
 }
 
 function renderHistory() {
+  // The reason sits under the hostnames rather than in a column of its own. Two
+  // full hostnames and a sentence like "current server unknown or not a candidate"
+  // do not fit side by side in a half-width panel, and the result was a horizontal
+  // scrollbar on the one table that should be skimmable.
   const rows = (snapshot.history || []).map((record) => `<tr>
       <td title="${escapeHTML(record.at)}">${timeAgo(record.at)}</td>
-      <td class="hostname">${escapeHTML(record.from || '—')} → ${escapeHTML(record.to)}</td>
-      <td>${escapeHTML(record.reason)}</td>
+      <td title="${escapeHTML(`${record.from || '—'} → ${record.to}`)}">
+        <div class="hostname">${escapeHTML(shortHost(record.from) || '—')} → ${escapeHTML(shortHost(record.to))}</div>
+        <div class="muted">${escapeHTML(record.reason)}</div>
+      </td>
       <td class="num">${record.score_before >= 0 ? record.score_before.toFixed(3) : '–'} → ${record.score_after.toFixed(3)}</td>
       <td>${record.succeeded
         ? `<span class="ok">ok</span>${record.public_ip ? ' · ' + escapeHTML(record.public_ip) : ''}`
         : `<span class="no">failed</span> ${escapeHTML(record.error || '')}`}</td>
     </tr>`);
   el('history').tBodies[0].innerHTML = rows.join('')
-    || '<tr><td colspan="5" class="muted">No switches recorded yet.</td></tr>';
+    || '<tr><td colspan="4" class="muted">No switches recorded yet.</td></tr>';
+  el('clear-history').disabled = (snapshot.history || []).length === 0;
 }
 
 function renderSettings() {
@@ -588,6 +626,21 @@ document.addEventListener('click', (event) => {
     toast(`Switching to ${hostname}… this waits for the tunnel to come back up.`);
     runAction(use, '/api/switch', { hostname }, `Now on ${hostname}.`);
   }
+});
+
+// Clearing throws data away, so both ask first. The switch history is the only
+// record of what this tool has done, and it is not recoverable.
+el('clear-history').addEventListener('click', (event) => {
+  if (!confirm('Discard the recorded switch history? This cannot be undone.')) return;
+  runAction(event.currentTarget, '/api/history/clear', {}, 'Switch history cleared.');
+});
+
+el('clear-logs').addEventListener('click', async (event) => {
+  if (!confirm('Empty the activity log shown here? The container\'s own log stream is untouched.')) return;
+  await runAction(event.currentTarget, '/api/logs/clear', {}, 'Activity log cleared.');
+  // runAction refreshes the log, but it does so before the toast's own entry has
+  // been written; fetch once more so the panel is not left showing nothing at all.
+  refreshLogs();
 });
 
 el('auto-switch').addEventListener('change', (event) => {

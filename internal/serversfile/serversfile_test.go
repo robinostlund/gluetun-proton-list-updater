@@ -241,7 +241,7 @@ func TestDetectSchemaVersion(t *testing.T) {
 func TestDetectLayout(t *testing.T) {
 	t.Parallel()
 
-	t.Run("directory when a manifest exists", func(t *testing.T) {
+	t.Run("directory when only a manifest exists", func(t *testing.T) {
 		dir := t.TempDir()
 		serversDir := filepath.Join(dir, "servers")
 		if err := os.MkdirAll(serversDir, 0o755); err != nil {
@@ -250,14 +250,36 @@ func TestDetectLayout(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(serversDir, "manifest.json"), []byte(`{}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		// A legacy file left over from before a migration must not win.
+		// No legacy file: a legacy Gluetun would have written one at startup, so its
+		// absence is what makes the manifest conclusive.
+		legacy := filepath.Join(dir, "servers.json")
+
+		if got := DetectLayout(Paths{Directory: serversDir, LegacyFile: legacy}); got != LayoutDirectory {
+			t.Errorf("layout = %q, want directory", got)
+		}
+	})
+
+	// This subtest used to assert the opposite - that a manifest beats a legacy file,
+	// on the assumption that the legacy file was the leftover. A real deployment
+	// showed it is the other way round: the manifest is what survives, because
+	// nothing deletes it, while a legacy Gluetun rewrites servers.json every time it
+	// starts. See TestLayoutDetectionIsNotFooledByALeftoverManifest.
+	t.Run("both when a manifest and a legacy file both exist", func(t *testing.T) {
+		dir := t.TempDir()
+		serversDir := filepath.Join(dir, "servers")
+		if err := os.MkdirAll(serversDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(serversDir, "manifest.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		legacy := filepath.Join(dir, "servers.json")
 		if err := os.WriteFile(legacy, []byte(`{"version":1}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		if got := DetectLayout(Paths{Directory: serversDir, LegacyFile: legacy}); got != LayoutDirectory {
-			t.Errorf("layout = %q, want directory", got)
+		if got := DetectLayout(Paths{Directory: serversDir, LegacyFile: legacy}); got != LayoutBoth {
+			t.Errorf("layout = %q, want both: which one is being read is unknowable here", got)
 		}
 	})
 
@@ -519,5 +541,105 @@ func TestWriteRejectsRelativePaths(t *testing.T) {
 
 	if _, err := Write(sampleServers(), Options{SchemaVersion: 4}); err == nil {
 		t.Error("expected an error when no path is configured at all")
+	}
+}
+
+// A /gluetun volume outlives the Gluetun that wrote it. Running :latest once leaves
+// servers/manifest.json behind for ever; pointing v3.41.2 (legacy layout) at that
+// same volume left this tool writing only servers/protonvpn.json - a file that
+// Gluetun never reads - so it kept its small built-in list and refused every
+// hostname offered. Observed in a real deployment.
+func TestLayoutDetectionIsNotFooledByALeftoverManifest(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name     string
+		manifest bool
+		legacy   bool
+		want     Layout
+	}{
+		{"nothing written yet", false, false, LayoutBoth},
+		{"directory-layout gluetun", true, false, LayoutDirectory},
+		{"legacy gluetun", false, true, LayoutLegacy},
+		// The decisive case: both artefacts present. A legacy Gluetun rewrites its own
+		// servers.json at startup, so this is a legacy Gluetun on a volume that once
+		// ran a directory-layout one. Writing only the directory would be invisible
+		// breakage, so both are written.
+		{"legacy gluetun on a volume that once ran latest", true, true, LayoutBoth},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			paths := Paths{
+				Directory:  filepath.Join(directory, "servers"),
+				LegacyFile: filepath.Join(directory, "servers.json"),
+			}
+			if testCase.manifest {
+				if err := os.MkdirAll(paths.Directory, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(paths.ManifestPath(), []byte(`{"version":1}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if testCase.legacy {
+				if err := os.WriteFile(paths.LegacyFile, []byte(`{"version":1}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if got := DetectLayout(paths); got != testCase.want {
+				t.Errorf("DetectLayout = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+// The point of writing both is that a legacy Gluetun then actually gets the data.
+func TestAmbiguousLayoutWritesTheLegacyFileToo(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	paths := Paths{
+		Directory:  filepath.Join(directory, "servers"),
+		LegacyFile: filepath.Join(directory, "servers.json"),
+	}
+	// Simulate the real situation: a leftover manifest plus a legacy Gluetun's own
+	// servers.json.
+	if err := os.MkdirAll(paths.Directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ManifestPath(), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.LegacyFile, []byte(`{"version":1,"protonvpn":{"version":4}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Write(
+		[]Server{{Hostname: "node-se-10.protonvpn.net", Country: "Sweden", VPN: "wireguard"}},
+		Options{
+			Paths:         paths,
+			Layout:        DetectLayout(paths),
+			SchemaVersion: 4,
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wroteLegacy, wroteDirectory bool
+	for _, path := range result.Written {
+		switch path {
+		case paths.LegacyFile:
+			wroteLegacy = true
+		case paths.ProviderPath():
+			wroteDirectory = true
+		}
+	}
+	if !wroteLegacy {
+		t.Error("the legacy file was not written, so a legacy Gluetun would see nothing")
+	}
+	if !wroteDirectory {
+		t.Error("the directory file was not written, so a current Gluetun would see nothing")
 	}
 }

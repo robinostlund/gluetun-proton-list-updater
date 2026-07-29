@@ -17,6 +17,7 @@ const (
 	commandSwitchTo     = "switch-to"
 	commandWriteServers = "write-servers"
 	commandSetAuto      = "set-auto-switch"
+	commandClearHistory = "clear-history"
 )
 
 // command is a unit of work handed to the run loop. Results travel back over
@@ -86,6 +87,10 @@ func (e *Engine) handleCommand(ctx context.Context, cmd command) {
 	case commandWriteServers:
 		e.writeServersFile()
 		e.publish()
+	case commandClearHistory:
+		err = e.state.update(func(state *persistedState) { state.History = nil })
+		e.logger.Info("switch history cleared")
+		e.publish()
 	case commandSetAuto:
 		enabled := cmd.enabled
 		err = e.state.update(func(state *persistedState) { state.AutoSwitch = &enabled })
@@ -136,6 +141,13 @@ func (e *Engine) SwitchTo(ctx context.Context, hostname string) error {
 // WriteServersFile rewrites servers.json from the current catalog.
 func (e *Engine) WriteServersFile(ctx context.Context) error {
 	return e.submit(ctx, command{kind: commandWriteServers}, false)
+}
+
+// ClearHistory discards the persisted switch history. It waits for the result, so
+// the dashboard reports a failed write rather than showing rows that are still on
+// disk.
+func (e *Engine) ClearHistory(ctx context.Context) error {
+	return e.submit(ctx, command{kind: commandClearHistory}, true)
 }
 
 // SetAutoSwitch turns automatic switching on or off; the choice is persisted.

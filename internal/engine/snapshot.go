@@ -28,8 +28,14 @@ type Snapshot struct {
 
 	// Candidates is the ranked shortlist, capped so the payload stays small
 	// enough to push over SSE every few seconds.
+	//
+	// It ends with any Blocked entries: servers Gluetun's own filters rule out,
+	// listed for diagnosis but never selectable.
 	Candidates      []CandidateView `json:"candidates"`
 	CandidatesTotal int             `json:"candidates_total"`
+	// CandidatesBlocked counts the blocked servers, which are not part of
+	// CandidatesTotal.
+	CandidatesBlocked int `json:"candidates_blocked"`
 
 	History  []SwitchRecord    `json:"history"`
 	NextRuns map[string]string `json:"next_runs"`
@@ -109,9 +115,14 @@ type GluetunStatus struct {
 	// Gluetun, so it only ever picks servers Gluetun can actually use. They are
 	// kept once seen: pinning a server clears them in Gluetun by design, so a
 	// later "off" reading is our own doing rather than a change of intent.
-	RequirementsAdopted []string  `json:"requirements_adopted,omitempty"`
-	LastCheck           time.Time `json:"last_check"`
-	LastError           string    `json:"last_error,omitempty"`
+	RequirementsAdopted []string `json:"requirements_adopted,omitempty"`
+	// PortForwardRequirementFrom names the Gluetun setting behind the P2P
+	// restriction: "PORT_FORWARD_ONLY" when Gluetun enforces it, or
+	// "VPN_PORT_FORWARDING" when it only asked for a port and Proton forwards ports
+	// on P2P servers alone.
+	PortForwardRequirementFrom string    `json:"port_forward_requirement_from,omitempty"`
+	LastCheck                  time.Time `json:"last_check"`
+	LastError                  string    `json:"last_error,omitempty"`
 	// ProviderMismatch warns that Gluetun is not configured for ProtonVPN, in
 	// which case none of this tool's work can take effect.
 	ProviderMismatch bool `json:"provider_mismatch"`
@@ -140,7 +151,7 @@ type ServersStatus struct {
 	Path      string `json:"path"`
 	WriteMode string `json:"write_mode"`
 	// Layout is the Gluetun storage layout that was detected: "directory" for
-	// current versions, "legacy" for v3.41.1 and earlier, "both" when Gluetun has
+	// current versions, "legacy" for v3.41.2, "both" when Gluetun has
 	// not written anything yet.
 	Layout string `json:"layout"`
 	// Paths lists the files actually written.
@@ -213,6 +224,10 @@ type CandidateView struct {
 	// Excluded marks a server that is not in the allowed candidate set. It is
 	// only ever set on the current server, to explain why it has no rank.
 	Excluded bool `json:"excluded,omitempty"`
+	// Blocked marks a server Gluetun's own filters rule out. It is shown but not
+	// selectable, and BlockedBy names the Gluetun settings responsible.
+	Blocked   bool     `json:"blocked,omitempty"`
+	BlockedBy []string `json:"blocked_by,omitempty"`
 }
 
 // SettingsView exposes the effective configuration, so the dashboard can show

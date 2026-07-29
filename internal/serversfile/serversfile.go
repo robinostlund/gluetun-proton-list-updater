@@ -3,7 +3,8 @@
 // Gluetun has two storage layouts, and which one is in use decides where the
 // data has to go:
 //
-//   - Legacy (up to and including v3.41.1): one "fat" file, /gluetun/servers.json,
+//   - Legacy (v3.41.2, the oldest supported release): one "fat" file,
+//     /gluetun/servers.json,
 //     holding a schema version and one section per provider.
 //   - Directory (current master, published as :latest): /gluetun/servers/ with a
 //     manifest.json pointing at one file per provider, e.g.
@@ -121,16 +122,43 @@ func (p Paths) ManifestPath() string { return filepath.Join(p.Directory, manifes
 // ProviderPath is where the per-provider file belongs in the directory layout.
 func (p Paths) ProviderPath() string { return filepath.Join(p.Directory, Provider+".json") }
 
-// DetectLayout works out which layout the running Gluetun uses, by looking for
+// DetectLayout works out which layout the running Gluetun reads, by looking for
 // the artefacts it creates on startup.
+//
+// The artefacts outlive the Gluetun that made them, which is the trap here. A
+// /gluetun volume that once ran a directory-layout image keeps servers/manifest.json
+// for ever; point a legacy-layout image (v3.41.2 and earlier) at that same volume and
+// the manifest is still sitting there, describing a layout nothing is reading any
+// more. Trusting it sends every write to a file the running Gluetun ignores, and the
+// only symptom is that it refuses every hostname offered - having quietly kept its
+// small built-in list.
+//
+// So a single artefact is treated as conclusive, and both artefacts together are
+// treated as ambiguous rather than as a vote for the directory:
+//
+//   - manifest only: a directory-layout Gluetun. A legacy one always rewrites its
+//     own servers.json at startup, so its absence rules that out.
+//   - legacy file only: a legacy Gluetun.
+//   - both: unknowable from the filesystem. Write both.
+//   - neither: nothing has started yet. Write both.
+//
+// Writing both is safe in either direction, which is what makes that the right
+// answer when in doubt: a directory-layout Gluetun reads the legacy file only when
+// the manifest is missing, and a legacy Gluetun never looks in the directory.
 func DetectLayout(paths Paths) (layout Layout) {
-	if paths.Directory != "" && fileExists(paths.ManifestPath()) {
+	hasManifest := paths.Directory != "" && fileExists(paths.ManifestPath())
+	hasLegacy := paths.LegacyFile != "" && fileExists(paths.LegacyFile)
+
+	switch {
+	case hasManifest && hasLegacy:
+		return LayoutBoth
+	case hasManifest:
 		return LayoutDirectory
-	}
-	if paths.LegacyFile != "" && fileExists(paths.LegacyFile) {
+	case hasLegacy:
 		return LayoutLegacy
+	default:
+		return LayoutBoth
 	}
-	return LayoutBoth
 }
 
 // HasGluetunData reports whether Gluetun itself has written server data.

@@ -91,14 +91,14 @@ Dashboard: <http://localhost:8080>
 
 | Component | Minimum | Recommended | Why |
 |---|---|---|---|
-| **Gluetun** | `v3.31.0` | `v3.41.1` or `latest` (both tested) | `v3.31.0` introduced `/v1/vpn/*`, including `PUT /v1/vpn/settings` — the endpoint that makes a targeted reconnect possible. `v3.39.0` added the `secure_core` and `tor` fields to Gluetun's server model; on older versions those flags are ignored, so Gluetun cannot filter on them. Both **storage layouts** are supported and detected automatically — see below. |
+| **Gluetun** | `v3.41.2` | `v3.41.2` or `latest` (both tested) | `v3.41.2` is the oldest release supported. Earlier versions are not tested and not supported: they lack `secure_core`/`tor` in their server model (added in `v3.39.0`), so Gluetun cannot filter on those at all. Both **storage layouts** are supported and detected automatically — see below. |
 | **Gluetun setting** | `STORAGE_SERVERS_ENABLED=yes` | (the default) | With server storage off, Gluetun keeps no server data on disk and reads none, so the curated list written here is ignored. |
 | **Proton account** | paid | paid | Proton's server list has required authentication since 2025 — an unauthenticated `/vpn/v1/logicals` answers `401`. There is no credential-free mode. |
 | **Docker Engine** | `20.10` | `24+` | `docker compose` v2 syntax; multi-arch images are `linux/amd64` and `linux/arm64`. |
 | **Go** (only to build from source) | `1.23` | `1.24` | The module targets 1.23; the container image builds with 1.24. |
 
-Verified against Gluetun `v3.41.1` and `latest` by integration tests that run against a real
-Gluetun container — see [Development](#development). The ProtonVPN schema version has been `4`
+Verified against Gluetun `v3.41.2` and `latest` by integration tests that run against a
+real Gluetun container — see [Development](#development). The ProtonVPN schema version has been `4`
 throughout, and is detected at runtime regardless.
 
 ### Gluetun changed where server data lives — both layouts are handled
@@ -107,7 +107,7 @@ This is worth knowing, because getting it wrong is invisible:
 
 | Gluetun | Layout | What it reads |
 |---|---|---|
-| up to `v3.41.1` | **legacy** | one fat file, `/gluetun/servers.json` |
+| up to `v3.41.2` | **legacy** | one fat file, `/gluetun/servers.json` |
 | current `master` / `:latest` | **directory** | `/gluetun/servers/` with `manifest.json` plus one file per provider, e.g. `/gluetun/servers/protonvpn.json` |
 
 A Gluetun using the directory layout reads the legacy file **only when
@@ -115,8 +115,28 @@ A Gluetun using the directory layout reads the legacy file **only when
 has no effect at all — the tool would look healthy while being entirely ignored.
 
 The layout is therefore **detected on every write**, by looking for the artefacts Gluetun creates
-on startup, and the data goes wherever that Gluetun actually reads. On a fresh volume where Gluetun
-has not started yet, both are written. Confirmed against `:latest`, which then logs:
+on startup, and the data goes wherever that Gluetun actually reads.
+
+> **The artefacts outlive the Gluetun that made them.** This bit the author. Running `:latest`
+> once leaves `servers/manifest.json` on the volume for good; point `v3.41.2` (legacy layout) at
+> that same volume and the manifest is still there, describing a layout nothing reads any more.
+> Trusting it sent every write to a file the running Gluetun ignored, and the only symptom was
+> that it refused every hostname offered — having quietly kept its small built-in list.
+>
+> So detection treats **one** artefact as conclusive and **both together** as ambiguous:
+>
+> | On the volume | Conclusion |
+> |---|---|
+> | `manifest.json` only | directory layout (a legacy Gluetun would have written `servers.json` at startup, so its absence rules that out) |
+> | `servers.json` only | legacy |
+> | both | unknowable from the filesystem — **write both** |
+> | neither | nothing has started yet — **write both** |
+>
+> Writing both is always safe, which is what makes it the right answer when in doubt: a
+> directory-layout Gluetun reads the legacy file only when the manifest is missing, and a legacy
+> Gluetun never looks in the directory.
+
+Confirmed against `:latest`, which then logs:
 
 ```
 [storage] Using protonvpn servers from file (marked as preferred)
@@ -275,22 +295,28 @@ to evaluate, and the tool would lose contact whenever the tunnel drops.
   organisation, timezone and reverse DNS, and a note when it matches the selected server's Proton
   exit address (which is how the current server is identified).
 - **Gluetun's own view** — everything its control server reports: tunnel status, version, commit,
-  build date, protocol, provider, DNS state, its own updater state, and **the server filters
-  Gluetun is currently enforcing** (usually the reason a specific server was refused).
-  Its **Port forwarding** row is explicit about all four states — `unknown`, `off`,
-  `on, no port yet`, `on, port 55019` — and appends `· P2P servers only` when
-  `PORT_FORWARD_ONLY` has been adopted, so the reason selection is narrowed is visible next to
-  the setting that caused it.
+  build date, protocol, provider, DNS state, its own updater state, whether **port forwarding**
+  is on or off, the forwarded ports, and **the server filters Gluetun is currently enforcing**
+  (usually the reason a specific server was refused).
 - **Best candidate** — with the score gap, its feature tags, and the reason a switch has or has
   not happened. When Gluetun requires port forwarding, this card carries a note saying only P2P
   servers are considered — which is why a *busier* server can legitimately be the best one, and
   why "Reconnect to best" will go there.
 - **Actions** — reconnect to best, refresh the server list, refresh loads, probe latency,
   re-evaluate, rewrite `servers.json`, toggle automatic switching.
-- **Candidate table** — every allowed server ranked, with a load bar, latency, score breakdown
-  (hover the score) and a per-row **Use** button to switch to a specific server.
-- **Switch history**, **live log**, **effective settings** and **filtering statistics** (how many
-  servers each rule removed, so an unexpectedly short list is self-explanatory).
+- **Candidate table** — every allowed server ranked, with separate **Country** and **City**
+  columns, a load bar, latency, score breakdown (hover the score) and a per-row **Use** button to
+  switch to a specific server. Servers Gluetun's own filters rule out appear at the end in
+  **amber**, with no rank, a `cannot use` tag and a disabled button — visible for diagnosis,
+  impossible to select.
+- **Switch history** — what moved where and why, with the reason under the hostnames rather than
+  in a column of its own so the panel never scrolls sideways. The shared `.protonvpn.net` suffix
+  is trimmed for width; hover a row for the full names. A **Clear** button discards it (the last
+  100 entries are kept otherwise).
+- **Live log** — the most recent activity, also with a **Clear** button. That empties only the
+  buffer this page reads; the container's own log stream is untouched.
+- **Effective settings** and **filtering statistics** (how many servers each rule removed, so an
+  unexpectedly short list is self-explanatory).
 
 Live updates arrive over server-sent events. The page is a single self-contained asset — no CDN,
 no build step, works on an air-gapped network, and follows your light/dark preference.
@@ -313,6 +339,8 @@ unauthenticated so Docker's health check works.
 | `POST` | `/api/reconnect` | Switch to the best server (ignores cooldown) |
 | `POST` | `/api/switch` | `{"hostname":"se-02.protonvpn.net"}` |
 | `POST` | `/api/auto-switch` | `{"enabled":true}` |
+| `POST` | `/api/history/clear` | Discard the persisted switch history |
+| `POST` | `/api/logs/clear` | Empty the in-memory activity log |
 | `POST` | `/api/totp` | `{"code":"123456"}` |
 | `GET` | `/healthz` | Health check |
 
@@ -520,7 +548,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 
 | Variable | Default | Description |
 |---|---|---|
-| `SERVERS_FILE` | `/gluetun/servers.json` | Gluetun's **legacy** fat file (up to v3.41.1) |
+| `SERVERS_FILE` | `/gluetun/servers.json` | Gluetun's **legacy** fat file (used by v3.41.2) |
 | `SERVERS_DIR` | `/gluetun/servers` | Gluetun's **directory** layout (current versions). Which one is used is detected automatically |
 | `SERVERS_PREFERRED` | `true` | Set Gluetun's `preferred` flag, making it use our list regardless of timestamps |
 | `SERVERS_WRITE_MODE` | `update` | `update` keeps other providers' sections, `replace` writes only ProtonVPN, `none` disables writing |
@@ -543,28 +571,62 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `STREAM` | `include` | `include` / `exclude` / `only` |
 | `FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
 
-#### P2P servers are only required when Gluetun asks
+#### P2P servers are only required when Gluetun asks for a forwarded port
 
-Whether selection is restricted to P2P (port-forwarding-capable) servers comes from
-Gluetun's `PORT_FORWARD_ONLY`, and from nothing else. Verified against a real
-Gluetun in both configurations, with a deliberately quieter non-P2P server so the
-choice is unambiguous:
+Whether selection is restricted to P2P servers comes entirely from Gluetun's own
+port-forwarding settings. **Two** settings matter, and they are easy to confuse:
 
-| Gluetun | Requirement adopted | Candidates | Chooses |
-|---|---|---|---|
-| `PORT_FORWARD_ONLY=on` | `port_forward_only` | P2P only | the P2P server at 40 % load, over a non-P2P one at 5 % |
-| `PORT_FORWARD_ONLY=off` | none | both | the quieter non-P2P server at 5 % |
+| Gluetun setting | What it does |
+|---|---|
+| `VPN_PORT_FORWARDING` | asks Proton for a forwarded port once connected. Gluetun will still connect to a server that cannot give one. |
+| `PORT_FORWARD_ONLY` | makes Gluetun *refuse* a server that cannot forward a port. |
 
-So the constraint wins over the load preference when it applies, and nothing is
-narrowed when it does not. `P2P` here is a separate, independent preference
-(`include` by default) if you want to require or avoid P2P servers regardless of
-what Gluetun asks for.
+**ProtonVPN forwards ports on P2P servers and nowhere else.** So port forwarding
+being on at all is a reason to require P2P — otherwise the quietest server wins,
+connects perfectly, and never receives a port. Verified against a real Gluetun in
+all three configurations, with a deliberately quieter non-P2P server so the choice
+is unambiguous:
 
-One caveat worth knowing: an adopted requirement is **kept until this container
-restarts**. Pinning a server clears the filter inside Gluetun by design, so a later
-reading of "off" cannot be distinguished from our own doing — the tool assumes the
-operator still means it. If you turn `PORT_FORWARD_ONLY` off on Gluetun, restart the
-updater too, or it will go on preferring P2P servers.
+| `VPN_PORT_FORWARDING` | `PORT_FORWARD_ONLY` | Requirement adopted | Reason shown | Chooses |
+|---|---|---|---|---|
+| `on` | `on` | `port_forward_only` | `PORT_FORWARD_ONLY` | the P2P server at 40 % load, over a non-P2P one at 5 % |
+| `on` | `off` | `port_forward_only` | `VPN_PORT_FORWARDING` | the P2P server at 40 % load — a non-P2P one could never get the port |
+| `off` | `off` | none | — | the quieter non-P2P server at 5 % |
+
+Nothing is narrowed when port forwarding is off. `P2P` remains a separate,
+independent preference (`include` by default) if you want to require or avoid P2P
+servers regardless of what Gluetun asks for.
+
+Two caveats worth knowing:
+
+- **An adopted requirement is kept until this container restarts.** Pinning a server
+  clears the filter inside Gluetun by design, so a later reading of "off" cannot be
+  distinguished from our own doing — the tool assumes the operator still means it. If
+  you turn port forwarding off on Gluetun, restart the updater too.
+- **The inferred requirement gives way rather than stranding the tunnel.** If
+  `VPN_PORT_FORWARDING` is on and no P2P server survives your other filters,
+  requiring P2P would leave nothing to connect to at all — while Gluetun itself would
+  have connected happily. So it is dropped, with a warning in the log, and you get a
+  tunnel without a forwarded port. An explicit `PORT_FORWARD_ONLY` is never dropped:
+  that is Gluetun's own filter, and it would refuse those servers regardless.
+
+#### Servers Gluetun cannot use are still listed
+
+A server ruled out by one of those Gluetun-enforced filters does not silently
+disappear from the candidate table — that turns "where did my quiet Stockholm server
+go?" into a mystery whose answer lives on a different container. Instead it is shown
+with an **amber row**, no rank, a **`cannot use`** tag naming the responsible setting,
+and a **disabled Use button**. Asking for one over the API is refused with the same
+explanation:
+
+```
+server "node-se-plain.protonvpn.net" cannot be used: gluetun enforces port_forward_only
+```
+
+Only Gluetun-enforced exclusions are listed this way, capped at 25 rows. Servers you
+excluded yourself — `COUNTRIES`, `MAX_LOAD`, a feature filter — are counted in the
+**Filtering** panel instead, because you already know about those and listing them
+would bury the useful rows under hundreds of self-inflicted ones.
 
 ## Servers your account cannot use
 
@@ -717,7 +779,7 @@ what is being tested is Gluetun's API contract: that a hostname pin is accepted 
 an unknown hostname is a distinguishable `400`, that a cross-country pin does not crash the VPN
 loop, that stop/start works, and that the updater endpoint exists. A fake can only confirm that the
 code matches the author's understanding of the API; this confirms the understanding. Point it at
-another version with `make integration GLUETUN_VERSION=v3.39.0`.
+another version with `make integration GLUETUN_VERSION=latest`.
 
 The layout separates the pure logic from the I/O, so the interesting parts are testable without a
 network:
@@ -812,9 +874,28 @@ add the subnet to Gluetun's `FIREWALL_OUTBOUND_SUBNETS`.
 Either `STORAGE_SERVERS_ENABLED` is off on Gluetun, or the `/gluetun` volume is not shared between
 the containers. See [above](#storage_servers_enabledyes-is-required).
 
-**"Gluetun rejected every candidate hostname".** Gluetun is working from a server list older than
-the one written here. See
-[Can Gluetun see a server it did not know at startup?](#can-gluetun-see-a-server-it-did-not-know-at-startup)
+**"Gluetun rejected every candidate hostname"**, or an error saying a hostname *"is not one of the
+N choices gluetun knows"*. Gluetun is working from its own server list rather than the one written
+here. Two causes, in order of likelihood:
+
+1. **Gluetun has not restarted since the list was written.** It reads server data only at startup.
+   See [Can Gluetun see a server it did not know at startup?](#can-gluetun-see-a-server-it-did-not-know-at-startup)
+2. **The data was written in the layout Gluetun is not reading.** If the reported choice count is
+   only a few hundred while the dashboard shows thousands of servers written, this is it. Check the
+   `Servers written to` row in *Gluetun's own view* against the layout the running Gluetun uses —
+   `v3.41.2` reads `/gluetun/servers.json`, `:latest` reads `/gluetun/servers/protonvpn.json`. Both
+   are written whenever the layout is ambiguous, so this should not happen; if it does, please open
+   an issue with that row and the Gluetun version.
+
+**Gluetun's own updater is triggered but nothing changes**, and Gluetun logs *"credentials missing:
+email is empty - skipping update"*. Refreshing Gluetun's in-memory list needs
+`UPDATER_PROTONVPN_EMAIL` and `UPDATER_PROTONVPN_PASSWORD` on the **Gluetun** container. Without
+them, restart Gluetun to pick up the list written here.
+
+**Gluetun is stuck at `[vpn] stopping`.** That is a Gluetun-side hang in its own VPN loop, not
+something this tool can clear — a pinned selection cannot be applied while the loop is wedged, so
+switches queue up behind it. Restart the Gluetun container. It is much more likely while Gluetun is
+cycling on a selection it cannot satisfy, so fix the rejection above first.
 
 **Servers show `not probed`.** They are outside `LATENCY_TOP_N`. Raise it, or set it to `0` to probe
 every candidate. Selection is unaffected by *which* servers are probed — probe targets are chosen by

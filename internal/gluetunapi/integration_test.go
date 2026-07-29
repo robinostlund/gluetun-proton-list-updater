@@ -212,8 +212,20 @@ func TestIntegrationPinIsNotBlockedByOnlyFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}
-	if requirements := settings.Requirements(); requirements != (Requirements{}) {
+	requirements := settings.Requirements()
+	if !requirements.OnlyFiltersCleared() {
 		t.Errorf("only-filters should have been cleared, still have %+v", requirements)
+	}
+	// The pin must not have switched port forwarding off along with them. Those are
+	// separate settings: one constrains which servers are acceptable, the other asks
+	// for a port once connected, and silently cancelling the second would disable a
+	// feature the operator turned on.
+	if enabled, known := settings.PortForwardingEnabled(); known && !enabled {
+		t.Error("pinning a server switched port forwarding off; only the *_only filters " +
+			"should be cleared")
+	}
+	if !requirements.PortForwardingRequested {
+		t.Error("the port-forwarding request did not survive the pin")
 	}
 }
 

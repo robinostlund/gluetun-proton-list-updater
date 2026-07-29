@@ -258,6 +258,24 @@ tbody tr { border-top: 1px solid var(--border); }
 tbody tr:hover { background: var(--bg-inset); }
 tr.is-current { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 tr.is-current:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+
+/* Blocked: listed so the server is not simply missing, but visibly not usable.
+   The amber wash plus a left edge marks the whole row without relying on colour
+   alone - the rank is "–" and the Use button is disabled either way. */
+tr.is-blocked { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+tr.is-blocked:hover { background: color-mix(in srgb, var(--warn) 24%, transparent); }
+tr.is-blocked > td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+tr.is-blocked > td { color: var(--text-muted); }
+/* Switch history sits in a half-width panel, where two full hostnames plus a
+   reason plus an error message cannot fit on one unbreakable line - the row grew
+   past the panel and produced a horizontal scrollbar. Cells that hold prose or
+   hostnames may wrap; the arrow between the hostnames is a natural break point, so
+   "from → to" and "0.750 → 0.400" simply stack when the panel is narrow. Only the
+   timestamp is pinned to one line - "3h ago" broken across two lines looks like a
+   rendering fault, and it is short enough to always fit. */
+#history td { white-space: normal; }
+#history td:first-child { white-space: nowrap; }
+
 td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 td.right, th.right { text-align: right; }
 .hostname { font-family: var(--mono); font-size: 12px; color: var(--text-muted); }
@@ -343,6 +361,7 @@ td.right, th.right { text-align: right; }
 .card-tags { margin: 0 0 10px; }
 .tag-p2p { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .tag-excluded { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
+.tag-blocked { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
 .tag-free { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--border)); }
 .tag-paid { color: var(--text-muted); }
 

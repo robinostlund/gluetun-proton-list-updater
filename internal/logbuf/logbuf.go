@@ -47,6 +47,22 @@ func (b *Buffer) Append(record Record) {
 	}
 }
 
+// Reset discards every buffered record.
+//
+// Only the in-memory ring is affected; records already written to the container's
+// own log stream are untouched, which is deliberate - this clears the dashboard's
+// view, not the audit trail.
+func (b *Buffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Overwrite rather than reallocate, so the slot the reader indexes into never
+	// holds a stale record.
+	clear(b.records)
+	b.next = 0
+	b.filled = false
+}
+
 // Records returns up to limit records, newest first.
 func (b *Buffer) Records(limit int) (records []Record) {
 	b.mu.RLock()

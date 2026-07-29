@@ -1,9 +1,13 @@
 services:
   gluetun:
-    # v3.31.0 is the minimum (it introduced PUT /v1/vpn/settings); v3.39.0+ is
-    # recommended, since that is when Gluetun's server model gained the
-    # secure_core and tor fields.
-    image: qmcgaw/gluetun:latest
+    # v3.41.2 is the oldest supported release. Earlier ones are untested.
+    #
+    # Pinned deliberately rather than tracking :latest. The two differ in where
+    # Gluetun keeps server data - v3.41.2 uses /gluetun/servers.json, current
+    # master uses /gluetun/servers/ - and moving between them leaves artefacts of
+    # the other layout behind on the volume. Both are handled, but a pinned
+    # version is one less thing changing underneath the sidecar.
+    image: qmcgaw/gluetun:v3.41.2
     container_name: gluetun
     cap_add:
       - NET_ADMIN

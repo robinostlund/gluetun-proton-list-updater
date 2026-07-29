@@ -43,6 +43,7 @@ type Controller interface {
 	SwitchTo(ctx context.Context, hostname string) error
 	WriteServersFile(ctx context.Context) error
 	SetAutoSwitch(ctx context.Context, enabled bool) error
+	ClearHistory(ctx context.Context) error
 	SubmitTOTP(code string) bool
 	Healthy() (healthy bool, reason string)
 }
@@ -130,6 +131,8 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("POST /api/servers/write", s.command("write servers file", s.controller.WriteServersFile))
 	protected.HandleFunc("POST /api/switch", s.handleSwitch)
 	protected.HandleFunc("POST /api/auto-switch", s.handleAutoSwitch)
+	protected.HandleFunc("POST /api/history/clear", s.command("clear history", s.controller.ClearHistory))
+	protected.HandleFunc("POST /api/logs/clear", s.handleClearLogs)
 	protected.HandleFunc("POST /api/totp", s.handleTOTP)
 
 	mux.Handle("/", s.withAuth(protected))
@@ -221,6 +224,21 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.opts.Logs.Records(limit))
+}
+
+// handleClearLogs empties the in-memory log ring the dashboard reads from.
+//
+// It does not go through the engine: the buffer belongs to the logger, not to
+// engine state, and there is nothing to persist. Records already written to the
+// container's log stream are untouched.
+func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Logs != nil {
+		s.opts.Logs.Reset()
+	}
+	// Logged after the reset, so the confirmation is the first line the operator
+	// sees rather than being wiped by its own command.
+	s.logger.Info("dashboard cleared the activity log")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 }
 
 // handleEvents streams snapshots as server-sent events.

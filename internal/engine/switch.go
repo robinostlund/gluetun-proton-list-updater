@@ -553,6 +553,16 @@ func (e *Engine) recordSwitch(previousHostname string, previous scoring.Scored, 
 func (e *Engine) switchTo(ctx context.Context, hostname string) (err error) {
 	target, found := scoring.Find(e.ranked, hostname)
 	if !found {
+		// A blocked server is listed on the dashboard but must never be connected
+		// to: Gluetun would refuse the selection and leave the tunnel down. Saying
+		// which of its settings is responsible turns a dead end into an answer.
+		for _, candidate := range e.blocked {
+			if candidate.Hostname != hostname {
+				continue
+			}
+			return fmt.Errorf("server %q cannot be used: gluetun enforces %s",
+				hostname, strings.Join(e.requirements.Unmet(candidate), ", "))
+		}
 		return fmt.Errorf("server %q is not in the current candidate list", hostname)
 	}
 

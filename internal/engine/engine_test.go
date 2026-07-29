@@ -52,6 +52,11 @@ type fakeGluetun struct {
 	// portForwardOnly mirrors Gluetun's PORT_FORWARD_ONLY, which it ANDs with any
 	// pinned hostname.
 	portForwardOnly bool
+	// portForwarding mirrors VPN_PORT_FORWARDING, a genuinely separate setting:
+	// Gluetun asks Proton for a port but does not refuse servers that cannot give
+	// one. Keeping it separate here is the whole point - a fake that reported both
+	// from one flag made the two indistinguishable, and hid a real bug.
+	portForwarding bool
 	// statusAfterPin is the status reported once a hostname has been pinned, so a
 	// test can model Gluetun failing to connect with the new selection.
 	statusAfterPin string
@@ -122,6 +127,9 @@ func (f *fakeGluetun) handler() http.Handler {
 	mux.HandleFunc("GET /v1/vpn/settings", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		portForwardOnly := f.portForwardOnly
+		// Gluetun requires port forwarding to be on before PORT_FORWARD_ONLY has any
+		// effect, so the "only" flag implies the request - but not the reverse.
+		portForwarding := f.portForwarding || f.portForwardOnly
 		// Real Gluetun reports back the selection it is enforcing, including any
 		// pinned hostname. Verification depends on that, so the fake has to do it.
 		hostnames := ""
@@ -131,7 +139,7 @@ func (f *fakeGluetun) handler() http.Handler {
 		f.mu.Unlock()
 		fmt.Fprintf(w, `{"type":"wireguard","provider":{"name":"protonvpn",`+
 			`"server_selection":{"vpn":"wireguard",%s"port_forward_only":%t},`+
-			`"port_forwarding":{"enabled":%t}}}`, hostnames, portForwardOnly, portForwardOnly)
+			`"port_forwarding":{"enabled":%t}}}`, hostnames, portForwardOnly, portForwarding)
 	})
 	mux.HandleFunc("PUT /v1/vpn/settings", func(w http.ResponseWriter, r *http.Request) {
 		var patch gluetunapi.Settings
@@ -1639,3 +1647,194 @@ func TestForcedReconnectStillRespectsThePortForwardRequirement(t *testing.T) {
 }
 
 func tierPtr(value uint8) *uint8 { return &value }
+
+// mixedP2PLogicals is a busy P2P server and a much quieter non-P2P one, so which
+// of the two is chosen is never ambiguous.
+func mixedP2PLogicals() []proton.LogicalServer {
+	return []proton.LogicalServer{
+		{
+			ID: "p2p", Name: "SE#P2P", ExitCountry: "SE", Load: 40, Status: 1,
+			Tier: tierPtr(2), Features: proton.FeatureP2P,
+			Servers: []proton.PhysicalServer{{
+				EntryIP: netip.MustParseAddr("10.8.0.1"), ExitIP: netip.MustParseAddr("81.8.0.1"),
+				Domain: "node-se-p2p.protonvpn.net", Status: 1, X25519PublicKey: "k1",
+			}},
+		},
+		{
+			ID: "plain", Name: "SE#PLAIN", ExitCountry: "SE", Load: 2, Status: 1,
+			Tier: tierPtr(2), Features: 0,
+			Servers: []proton.PhysicalServer{{
+				EntryIP: netip.MustParseAddr("10.8.0.2"), ExitIP: netip.MustParseAddr("81.8.0.2"),
+				Domain: "node-se-plain.protonvpn.net", Status: 1, X25519PublicKey: "k2",
+			}},
+		},
+	}
+}
+
+// Asking Proton for a forwarded port is asking for a P2P server, whether or not
+// PORT_FORWARD_ONLY is also set: Proton forwards ports on P2P servers and nowhere
+// else, so the quietest non-P2P server would connect and never get a port.
+//
+// This is a real bug that shipped: only PORT_FORWARD_ONLY was read, so
+// VPN_PORT_FORWARDING=on alone left the best candidate on a server that could not
+// possibly deliver the port the operator asked for.
+func TestPortForwardingAloneIsEnoughToRequireP2P(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwarding = true // VPN_PORT_FORWARDING, *not* PORT_FORWARD_ONLY
+	harness.gluetun.portForwardOnly = false
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+
+	harness.engine.applyLogicals(mixedP2PLogicals(), false)
+	harness.engine.publish()
+	snapshot := harness.engine.Snapshot()
+
+	best := snapshot.Selection.Best
+	if best == nil {
+		t.Fatal("no best candidate")
+	}
+	if !best.P2P {
+		t.Errorf("best candidate is %s (p2p=%v); a non-P2P server cannot receive a forwarded port",
+			best.ServerName, best.P2P)
+	}
+	if best.ServerName != "SE#P2P" {
+		t.Errorf("best = %s, want SE#P2P despite it being busier", best.ServerName)
+	}
+	// The dashboard has to be able to say *which* setting caused this, because the
+	// operator never set PORT_FORWARD_ONLY.
+	if from := snapshot.Gluetun.PortForwardRequirementFrom; from != "VPN_PORT_FORWARDING" {
+		t.Errorf("PortForwardRequirementFrom = %q, want VPN_PORT_FORWARDING", from)
+	}
+}
+
+// With port forwarding off entirely, nothing is narrowed and the quiet server wins.
+func TestNoP2PRequirementWhenPortForwardingIsOff(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwarding = false
+	harness.gluetun.portForwardOnly = false
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+
+	harness.engine.applyLogicals(mixedP2PLogicals(), false)
+	harness.engine.publish()
+	snapshot := harness.engine.Snapshot()
+
+	if adopted := snapshot.Gluetun.RequirementsAdopted; len(adopted) != 0 {
+		t.Errorf("adopted %v with port forwarding off; nothing should be required", adopted)
+	}
+	if best := snapshot.Selection.Best; best == nil || best.ServerName != "SE#PLAIN" {
+		t.Errorf("best = %v, want the quieter non-P2P server", best)
+	}
+	if snapshot.CandidatesBlocked != 0 {
+		t.Errorf("blocked = %d, want 0 when no requirement is in force", snapshot.CandidatesBlocked)
+	}
+}
+
+// Servers Gluetun's filters rule out are still listed - otherwise "my quiet
+// Stockholm server vanished" has no answer - but they must be visibly unusable and
+// impossible to select.
+func TestBlockedServersAreListedButNotSelectable(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwardOnly = true
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+
+	harness.engine.applyLogicals(mixedP2PLogicals(), false)
+	harness.engine.publish()
+	snapshot := harness.engine.Snapshot()
+
+	if snapshot.CandidatesBlocked != 1 {
+		t.Fatalf("blocked = %d, want the one non-P2P server", snapshot.CandidatesBlocked)
+	}
+	if snapshot.CandidatesTotal != 1 {
+		t.Errorf("candidates_total = %d; blocked servers must not inflate the selectable count",
+			snapshot.CandidatesTotal)
+	}
+
+	var blocked *CandidateView
+	for i, view := range snapshot.Candidates {
+		if view.Blocked {
+			blocked = &snapshot.Candidates[i]
+		}
+	}
+	if blocked == nil {
+		t.Fatal("the non-P2P server is not in the candidate views at all")
+	}
+	if blocked.ServerName != "SE#PLAIN" {
+		t.Errorf("blocked server = %s, want SE#PLAIN", blocked.ServerName)
+	}
+	if got := blocked.BlockedBy; len(got) != 1 || got[0] != "port_forward_only" {
+		t.Errorf("BlockedBy = %v, want [port_forward_only]", got)
+	}
+	if blocked.Rank != 0 {
+		t.Errorf("rank = %d, want 0: a rank implies it can be chosen", blocked.Rank)
+	}
+	// Scored like everything else, so the row is comparable with the rest of the
+	// table rather than an empty stub.
+	if blocked.Load != 2 || blocked.Score <= 0 {
+		t.Errorf("blocked row should still carry load and score, got load=%d score=%v",
+			blocked.Load, blocked.Score)
+	}
+
+	// The decisive part: it cannot be switched to, and the error says why. This calls
+	// the in-loop method directly, because the public SwitchTo queues a command and
+	// the run loop has already been stopped by harness.run.
+	err := harness.engine.switchTo(context.Background(), "node-se-plain.protonvpn.net")
+	if err == nil {
+		t.Fatal("switching to a blocked server succeeded; gluetun would have refused it")
+	}
+	if !strings.Contains(err.Error(), "port_forward_only") {
+		t.Errorf("error %q should name the gluetun setting responsible", err)
+	}
+}
+
+// The inferred requirement must never be the reason the tunnel has nowhere to go:
+// Gluetun would have connected without it, so no port is better than no tunnel.
+func TestInferredP2PRequirementIsGivenUpRatherThanStrandingTheTunnel(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwarding = true
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+
+	// Only non-P2P servers exist, so requiring P2P would leave nothing at all.
+	onlyPlain := mixedP2PLogicals()[1:]
+	harness.engine.applyLogicals(onlyPlain, false)
+	harness.engine.publish()
+	snapshot := harness.engine.Snapshot()
+
+	if best := snapshot.Selection.Best; best == nil || best.ServerName != "SE#PLAIN" {
+		t.Fatalf("best = %v, want the only server available", best)
+	}
+	if adopted := snapshot.Gluetun.RequirementsAdopted; len(adopted) != 0 {
+		t.Errorf("adopted %v; the inferred requirement should have been given up", adopted)
+	}
+}
+
+// An explicit PORT_FORWARD_ONLY is Gluetun's own filter, not our inference, so it
+// is kept even when it empties the list: Gluetun would refuse those servers too, and
+// pretending otherwise just crashes its VPN loop.
+func TestExplicitPortForwardOnlyIsNeverGivenUp(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwardOnly = true
+	harness.run(t, func() bool {
+		adopted := harness.engine.Snapshot().Gluetun.RequirementsAdopted
+		return len(adopted) == 1 && adopted[0] == "port_forward_only"
+	})
+
+	harness.engine.applyLogicals(mixedP2PLogicals()[1:], false)
+	harness.engine.publish()
+	snapshot := harness.engine.Snapshot()
+
+	if snapshot.Selection.Best != nil {
+		t.Errorf("best = %v, want none: gluetun refuses every server here",
+			snapshot.Selection.Best.ServerName)
+	}
+	if adopted := snapshot.Gluetun.RequirementsAdopted; len(adopted) != 1 {
+		t.Errorf("adopted %v, want port_forward_only to be kept", adopted)
+	}
+}

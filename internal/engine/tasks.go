@@ -510,14 +510,33 @@ func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
 	//
 	// So an observed "off" is assumed to be our own doing. A genuine change to off
 	// is picked up when this container restarts.
+	// Asking Proton for a forwarded port counts as requiring P2P, even when Gluetun
+	// is not enforcing PORT_FORWARD_ONLY itself.
+	//
+	// Proton forwards ports on P2P servers and nowhere else, so with
+	// VPN_PORT_FORWARDING=on a non-P2P server connects perfectly and then never
+	// produces a port. Picking the quietest server would therefore quietly break the
+	// feature the operator switched on. Gluetun tolerates that combination; there is
+	// no reason for this tool to walk into it.
+	wantsPortForward := from.PortForward || from.PortForwardingRequested
 	requirements := catalog.Requirements{
-		PortForward: from.PortForward || e.requirements.PortForward,
+		PortForward: wantsPortForward || e.requirements.PortForward,
 		SecureCore:  from.SecureCore || e.requirements.SecureCore,
 		Tor:         from.Tor || e.requirements.Tor,
 		Stream:      from.Stream || e.requirements.Stream,
 		Free:        from.Free || e.requirements.Free,
 		Premium:     from.Premium || e.requirements.Premium,
 	}
+
+	// Record which setting is responsible, because "P2P only" is confusing when the
+	// operator never set PORT_FORWARD_ONLY.
+	switch {
+	case from.PortForward:
+		e.portForwardReason = "PORT_FORWARD_ONLY"
+	case from.PortForwardingRequested && e.portForwardReason == "":
+		e.portForwardReason = "VPN_PORT_FORWARDING"
+	}
+
 	if requirements == e.requirements {
 		return
 	}

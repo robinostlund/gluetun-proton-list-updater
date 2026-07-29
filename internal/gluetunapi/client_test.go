@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -510,5 +512,139 @@ func TestReadTimeoutIsUnavailable(t *testing.T) {
 	}
 	if errors.Is(err, ErrTimedOut) {
 		t.Error("a slow read must not be reported as an unknown outcome")
+	}
+}
+
+// VPN_PORT_FORWARDING and PORT_FORWARD_ONLY are different settings with different
+// meanings, and conflating them is exactly the bug this guards: Gluetun will
+// connect to a non-P2P server while asking Proton for a port it can never give.
+func TestPortForwardingRequestIsReportedSeparatelyFromTheOnlyFilter(t *testing.T) {
+	enabled, disabled := true, false
+
+	for _, testCase := range []struct {
+		name            string
+		portForwarding  *bool
+		portForwardOnly *bool
+		wantRequested   bool
+		wantOnly        bool
+	}{
+		{"neither", &disabled, &disabled, false, false},
+		{"port forwarding requested but not enforced", &enabled, &disabled, true, false},
+		{"enforced as well", &enabled, &enabled, true, true},
+		{"enforced without a request", &disabled, &enabled, false, true},
+		{"unset", nil, nil, false, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			settings := Settings{Provider: &Provider{
+				PortForwarding:  &PortForwarding{Enabled: testCase.portForwarding},
+				ServerSelection: &ServerSelection{PortForwardOnly: testCase.portForwardOnly},
+			}}
+			got := settings.Requirements()
+			if got.PortForwardingRequested != testCase.wantRequested {
+				t.Errorf("PortForwardingRequested = %v, want %v",
+					got.PortForwardingRequested, testCase.wantRequested)
+			}
+			if got.PortForward != testCase.wantOnly {
+				t.Errorf("PortForward = %v, want %v", got.PortForward, testCase.wantOnly)
+			}
+		})
+	}
+}
+
+// A settings body with port forwarding but no server selection at all must still
+// report the request, or the requirement is silently lost.
+func TestPortForwardingRequestSurvivesAnAbsentServerSelection(t *testing.T) {
+	enabled := true
+	settings := Settings{Provider: &Provider{PortForwarding: &PortForwarding{Enabled: &enabled}}}
+	if !settings.Requirements().PortForwardingRequested {
+		t.Error("a port-forwarding request should be reported without a server_selection block")
+	}
+}
+
+// Rejecting a hostname makes Gluetun list every hostname it would have accepted -
+// about 30 kB, ~570 names. That was quoted verbatim into the log, the dashboard and
+// the switch history, burying the one useful fact. This is the real message from a
+// deployment, shortened here only in the middle of the choices list.
+func TestTheChoicesWallIsSummarizedNotQuoted(t *testing.T) {
+	raw := "provider settings: server selection: for VPN service provider protonvpn: " +
+		"the hostname specified is not valid: value is not one of the possible choices: " +
+		"none of node-se-10.protonvpn.net is one of the choices available " +
+		"af-03.protonvpn.net, al-02.protonvpn.net, al-03.protonvpn.net, mz-01.protonvpn.net, " +
+		"node-se-07.protonvpn.net, node-se-20.protonvpn.net"
+
+	got := summarizeError([]byte(raw))
+
+	if len(got) > maxErrorLength {
+		t.Errorf("summary is %d characters, want at most %d:\n%s", len(got), maxErrorLength, got)
+	}
+	// The rejected hostname is the whole point of the message.
+	if !strings.Contains(got, "node-se-10.protonvpn.net") {
+		t.Errorf("the rejected hostname is missing from %q", got)
+	}
+	// The count is diagnostic: a few hundred means Gluetun is on its built-in list.
+	if !strings.Contains(got, "6 choices") {
+		t.Errorf("the number of choices is missing from %q", got)
+	}
+	// And it must not have pasted the list back in.
+	if strings.Contains(got, "al-02.protonvpn.net") {
+		t.Errorf("the choices list was quoted verbatim: %q", got)
+	}
+	// The actionable part: Gluetun is not using the list written here.
+	if !strings.Contains(got, "restart the gluetun container") {
+		t.Errorf("the summary does not say what to do about it: %q", got)
+	}
+	// The context Gluetun gave still has to survive.
+	if !strings.Contains(got, "protonvpn") || !strings.Contains(got, "hostname specified is not valid") {
+		t.Errorf("the original context was lost: %q", got)
+	}
+}
+
+// Any other long body is truncated rather than dumped whole.
+func TestLongErrorBodiesAreTruncated(t *testing.T) {
+	raw := strings.Repeat("x", maxErrorLength*3)
+	got := summarizeError([]byte(raw))
+	if len(got) > maxErrorLength+len("… (truncated)") {
+		t.Errorf("length = %d, want it bounded", len(got))
+	}
+	if !strings.HasSuffix(got, "… (truncated)") {
+		t.Error("a truncated message should say so")
+	}
+}
+
+// Short messages must pass through untouched, or every ordinary error gets noisier.
+func TestShortErrorsArePassedThrough(t *testing.T) {
+	const raw = "  provider settings: bad request  "
+	if got := summarizeError([]byte(raw)); got != "provider settings: bad request" {
+		t.Errorf("summarizeError = %q, want the trimmed original", got)
+	}
+}
+
+// The end-to-end path: a real rejection reaching the caller must be both classified
+// as ErrRejected and short enough to log.
+func TestRejectionErrorsReachTheCallerSummarized(t *testing.T) {
+	choices := make([]string, 0, 400)
+	for i := range 400 {
+		choices = append(choices, fmt.Sprintf("node-xx-%03d.protonvpn.net", i))
+	}
+	body := "provider settings: server selection: the hostname specified is not valid: " +
+		"value is not one of the possible choices: none of node-se-10.protonvpn.net is " +
+		"one of the choices available " + strings.Join(choices, ", ")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, body, http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := New(Options{BaseURL: server.URL, HTTPClient: server.Client()})
+	_, err := client.PinServer(context.Background(), PinTarget{Hostname: "node-se-10.protonvpn.net"})
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("error = %v, want ErrRejected", err)
+	}
+	if len(err.Error()) > maxErrorLength+200 {
+		t.Errorf("the error is %d characters; the choices wall was not summarized:\n%s",
+			len(err.Error()), err)
+	}
+	if !strings.Contains(err.Error(), "400 choices") {
+		t.Errorf("the choice count is missing from %q", err)
 	}
 }

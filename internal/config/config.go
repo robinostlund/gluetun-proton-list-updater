@@ -128,7 +128,7 @@ type Gluetun struct {
 // Servers describes how the server data Gluetun reads is produced.
 type Servers struct {
 	// FilePath is Gluetun's legacy single servers file, /gluetun/servers.json by
-	// default. Used by Gluetun up to and including v3.41.1.
+	// default. Used by Gluetun v3.41.2, the oldest supported release.
 	FilePath string
 	// DirPath is Gluetun's servers directory, /gluetun/servers/ by default.
 	// Current Gluetun versions keep one file per provider there, and read the

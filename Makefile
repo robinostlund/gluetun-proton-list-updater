@@ -55,7 +55,7 @@ clean: ## Remove build artefacts
 # is the only way to catch a change in its behaviour. The WireGuard key is random
 # on purpose: the tunnel never comes up, and none of these tests need it to.
 
-GLUETUN_VERSION ?= v3.41.1
+GLUETUN_VERSION ?= v3.41.2
 ITEST_CONTAINER := gluetun-itest
 ITEST_PORT      ?= 18000
 ITEST_APIKEY    ?= itest-secret

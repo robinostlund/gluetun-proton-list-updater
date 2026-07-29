@@ -32,6 +32,11 @@ import (
 // waste far more bandwidth than it is worth.
 const maxCandidateViews = 150
 
+// maxBlockedViews caps the unselectable rows shown alongside them. They exist to
+// answer "where did that server go?", and a couple of dozen answers that question
+// as well as hundreds would.
+const maxBlockedViews = 25
+
 // Engine coordinates every periodic task.
 type Engine struct {
 	cfg     config.Config
@@ -56,22 +61,34 @@ type Engine struct {
 
 	// Fields below are only touched by the run loop, except through snapshot.
 	//
-	// There are deliberately two candidate sets. candidates is fully filtered
+	// There are deliberately three candidate sets. candidates is fully filtered
 	// and is what selection ranks. fileCandidates only drops servers that are
 	// unusable (disabled, wrong protocol, unwanted features) and keeps every
 	// country, because servers.json should give Gluetun the whole picture: a
 	// manual override, or a Gluetun restart with different SERVER_COUNTRIES,
 	// then still has servers to work with.
+	//
+	// blocked is the third: servers that pass every filter the operator chose but
+	// fail one Gluetun itself enforces. They are never selectable - Gluetun would
+	// refuse them - but they are shown, because "my quiet Stockholm server has
+	// vanished from the list" is otherwise a mystery, and the answer is a setting
+	// on the *other* container.
 	candidates     []catalog.Candidate
 	fileCandidates []catalog.Candidate
+	blocked        []catalog.Candidate
 	ranked         []scoring.Scored
 	stats          catalog.Stats
 	vpnType        string
 	// requirements are the "only" filters Gluetun is enforcing. They are read from
 	// Gluetun rather than configured here, because a candidate that fails one of
 	// them cannot be connected to at all.
-	requirements  catalog.Requirements
-	schemaVersion uint16
+	requirements catalog.Requirements
+	// portForwardReason names the Gluetun setting that made P2P a requirement,
+	// either "PORT_FORWARD_ONLY" or "VPN_PORT_FORWARDING". They are different
+	// settings with the same consequence here, and saying which one applies is the
+	// difference between an explicable restriction and a baffling one.
+	portForwardReason string
+	schemaVersion     uint16
 	// layout is which storage layout the running Gluetun uses. It is detected
 	// rather than configured, and re-detected on each write because Gluetun can
 	// be upgraded underneath us.
@@ -431,9 +448,24 @@ func (e *Engine) applyCachedLoads(listFetchedAt time.Time) {
 // applyLogicals rebuilds the catalog and ranking from a logical server list.
 func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) {
 	candidates, stats := catalog.Build(logicals, e.catalogOptions())
+
+	// Requiring P2P because a forwarded port was *requested* is an inference, not a
+	// filter Gluetun enforces, so it must never be the reason the tunnel has nowhere
+	// to go. If it empties the candidate list, drop it and say so: no port at all is
+	// better than no connection at all, and Gluetun would have connected anyway.
+	if len(candidates) == 0 && e.portForwardOnlyIsInferred() {
+		e.logger.Warn("no port-forwarding server is available, so that preference is being ignored",
+			"reason", "VPN_PORT_FORWARDING is on, but no P2P server survives the other filters",
+			"consequence", "the tunnel will connect, but Proton will not forward a port")
+		e.requirements.PortForward = false
+		e.portForwardReason = ""
+		candidates, stats = catalog.Build(logicals, e.catalogOptions())
+	}
+
 	e.candidates = candidates
 	e.stats = stats
 	e.fileCandidates, _ = catalog.Build(logicals, e.fileCatalogOptions())
+	e.blocked = e.buildBlocked(logicals)
 
 	// Re-apply the newest utilisation figures over the freshly built candidates:
 	// the list they came from can be hours older than the last loads refresh.
@@ -455,6 +487,47 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 			"from_cache", fromCache,
 			"hint", "check COUNTRIES, MAX_LOAD and the feature filters")
 	}
+}
+
+// portForwardOnlyIsInferred reports whether the P2P requirement came from Gluetun
+// merely asking for a forwarded port, rather than from PORT_FORWARD_ONLY. Only the
+// inferred one may be given up.
+func (e *Engine) portForwardOnlyIsInferred() bool {
+	return e.requirements.PortForward && e.portForwardReason == "VPN_PORT_FORWARDING"
+}
+
+// buildBlocked lists the servers that only a Gluetun-enforced filter rejects.
+//
+// It is a set difference rather than a separate filter pass, so it cannot drift
+// from what selection actually accepts: anything that survives the operator's
+// filters but is absent from the real candidate list was removed by a requirement,
+// by definition.
+//
+// Deliberately narrow. Servers dropped by COUNTRIES, MAX_LOAD or a feature filter
+// are *not* included: the operator set those, the filtering statistics already
+// count them, and listing them would bury the useful rows under hundreds of
+// self-inflicted ones.
+func (e *Engine) buildBlocked(logicals []proton.LogicalServer) (blocked []catalog.Candidate) {
+	if e.requirements.None() {
+		return nil
+	}
+
+	opts := e.catalogOptions()
+	opts.Require = catalog.Requirements{}
+	unrestricted, _ := catalog.Build(logicals, opts)
+
+	selectable := make(map[string]struct{}, len(e.candidates))
+	for _, candidate := range e.candidates {
+		selectable[candidate.Hostname] = struct{}{}
+	}
+
+	for _, candidate := range unrestricted {
+		if _, usable := selectable[candidate.Hostname]; usable {
+			continue
+		}
+		blocked = append(blocked, candidate)
+	}
+	return blocked
 }
 
 // catalogOptions maps the configuration onto catalog filters.
@@ -573,6 +646,7 @@ func (e *Engine) publish() {
 		}
 		views = append(views, toCandidateView(i+1, entry, entry.Candidate.Hostname == currentHostname))
 	}
+	views = append(views, e.blockedViews(currentHostname)...)
 
 	var current, best *CandidateView
 	switch scored, found := scoring.Find(ranked, currentHostname); {
@@ -610,6 +684,7 @@ func (e *Engine) publish() {
 		snapshot.Latency = e.prober.Summarize()
 		snapshot.Candidates = views
 		snapshot.CandidatesTotal = len(ranked)
+		snapshot.CandidatesBlocked = len(e.blocked)
 		snapshot.History = reverseHistory(persisted.History)
 		snapshot.Settings = e.settingsView()
 		snapshot.Servers.Path = e.cfg.Servers.FilePath
@@ -619,6 +694,7 @@ func (e *Engine) publish() {
 		snapshot.Proton.Session = e.proton.SessionUID()
 		snapshot.Proton.NeedsTOTP = e.manual != nil && e.manual.Waiting()
 		snapshot.Gluetun.RequirementsAdopted = requirementLabels(e.requirements)
+		snapshot.Gluetun.PortForwardRequirementFrom = e.portForwardReason
 		snapshot.Selection.AutoSwitch = e.autoSwitchEnabled()
 		snapshot.Selection.Mode = e.cfg.Switch.Mode
 		snapshot.Selection.Current = current
@@ -630,6 +706,30 @@ func (e *Engine) publish() {
 		snapshot.Selection.CooldownRemaining = formatDuration(e.cooldownRemaining())
 		snapshot.NextRuns = nextRuns
 	})
+}
+
+// blockedViews renders the servers Gluetun's filters rule out.
+//
+// They are scored with the same weights as everything else - a blocked row is
+// only useful if its load and latency are comparable with the rest of the table -
+// but they carry no rank, because ranking implies selectability.
+func (e *Engine) blockedViews(currentHostname string) (views []CandidateView) {
+	if len(e.blocked) == 0 {
+		return nil
+	}
+
+	scored := scoring.Rank(e.blocked, e.prober.Results(), e.cfg.Score)
+	views = make([]CandidateView, 0, min(len(scored), maxBlockedViews))
+	for i, entry := range scored {
+		if i >= maxBlockedViews {
+			break
+		}
+		view := toCandidateView(0, entry, entry.Candidate.Hostname == currentHostname)
+		view.Blocked = true
+		view.BlockedBy = e.requirements.Unmet(entry.Candidate)
+		views = append(views, view)
+	}
+	return views
 }
 
 func (e *Engine) cooldownRemaining() time.Duration {

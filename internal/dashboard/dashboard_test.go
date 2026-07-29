@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -86,6 +87,10 @@ func (s *stubController) SetAutoSwitch(_ context.Context, enabled bool) error {
 		return s.record("auto-switch:on")
 	}
 	return s.record("auto-switch:off")
+}
+
+func (s *stubController) ClearHistory(_ context.Context) error {
+	return s.record("clear-history")
 }
 
 func (s *stubController) SubmitTOTP(code string) bool {
@@ -614,5 +619,299 @@ func TestEveryPageElementIsFilled(t *testing.T) {
 	sort.Strings(unused)
 	if len(unused) > 0 {
 		t.Errorf("index.html declares elements nothing fills, so they show a permanent dash: %v", unused)
+	}
+}
+
+// A blocked candidate is a row the operator can see but must not be able to use.
+// The rendering is JavaScript, so this asserts statically on the asset: the fields
+// the engine publishes have to be the ones the script reads, and the row has to be
+// both styled and disabled. Getting either half wrong produces a row that looks
+// selectable and fails on click.
+func TestBlockedRowsAreRenderedAsUnusable(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fragment := range []string{
+		// The snapshot fields, spelled exactly as the JSON tags on CandidateView.
+		"candidate.blocked",
+		"candidate.blocked_by",
+		// The Use button must be disabled for them, not merely styled.
+		"candidate.is_current || candidate.blocked ? 'disabled' : ''",
+		// And the row must be marked so it reads as unusable.
+		"is-blocked",
+		"tag-blocked",
+	} {
+		if !bytes.Contains(script, []byte(fragment)) {
+			t.Errorf("app.js does not contain %q, so blocked servers are not handled", fragment)
+		}
+	}
+
+	for _, selector := range []string{"tr.is-blocked", ".tag-blocked"} {
+		if !bytes.Contains(styles, []byte(selector)) {
+			t.Errorf("style.css has no %q rule, so a blocked row is indistinguishable", selector)
+		}
+	}
+}
+
+// The P2P restriction has two possible causes and the dashboard must be able to
+// name the right one; "Gluetun requires one" is meaningless to an operator who only
+// ever set VPN_PORT_FORWARDING.
+func TestThePortForwardingReasonIsShown(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		"port_forward_requirement_from",
+		"VPN_PORT_FORWARDING",
+		"PORT_FORWARD_ONLY",
+	} {
+		if !bytes.Contains(script, []byte(fragment)) {
+			t.Errorf("app.js does not mention %q, so the restriction cannot explain itself", fragment)
+		}
+	}
+}
+
+// Clearing the switch history goes through the engine, because the history is
+// persisted: only the engine can write the state file.
+func TestClearHistoryReachesTheController(t *testing.T) {
+	t.Parallel()
+
+	stub := newStub()
+	server := newTestServer(t, stub, Options{})
+
+	response, err := server.Client().Post(server.URL+"/api/history/clear",
+		"application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", response.StatusCode)
+	}
+	if !containsString(stub.recorded(), "clear-history") {
+		t.Errorf("calls = %v, want clear-history", stub.recorded())
+	}
+}
+
+// Clearing the activity log empties the buffer the page reads, and deliberately
+// does not involve the engine: there is no persisted state behind it.
+func TestClearLogsEmptiesTheBuffer(t *testing.T) {
+	t.Parallel()
+
+	logs := logbuf.NewBuffer(50)
+	logs.Append(logbuf.Record{Message: "something happened"})
+	logs.Append(logbuf.Record{Message: "and again"})
+
+	stub := newStub()
+	server := newTestServer(t, stub, Options{Logs: logs})
+
+	if got := len(logs.Records(0)); got != 2 {
+		t.Fatalf("buffer should start with 2 records, got %d", got)
+	}
+	response, err := server.Client().Post(server.URL+"/api/logs/clear",
+		"application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+
+	// One record survives: the confirmation written by the handler itself, which is
+	// what tells the operator the clear actually happened.
+	remaining := logs.Records(0)
+	for _, record := range remaining {
+		if strings.Contains(record.Message, "something happened") {
+			t.Error("the old records are still in the buffer")
+		}
+	}
+	if len(stub.recorded()) != 0 {
+		t.Errorf("the engine should not be involved, got %v", stub.recorded())
+	}
+}
+
+// A clear on an unconfigured buffer must not panic - the buffer is optional.
+func TestClearLogsWithoutABufferIsHarmless(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t, newStub(), Options{})
+	response, err := server.Client().Post(server.URL+"/api/logs/clear",
+		"application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", response.StatusCode)
+	}
+}
+
+// The candidate table's columns and the cells the script emits have to agree, or
+// every row is shifted under the wrong headings - which looks like corrupt data
+// rather than a layout bug.
+func TestCandidateTableColumnsMatchTheRenderedCells(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Country and City are separate columns; a single merged "Location" is what this
+	// replaced.
+	head := regexp.MustCompile(`(?s)<table id="candidates">.*?</thead>`).Find(page)
+	if head == nil {
+		t.Fatal("could not find the candidates table head")
+	}
+	headings := regexp.MustCompile(`<th[^>]*>([^<]*)</th>`).FindAllSubmatch(head, -1)
+	var got []string
+	for _, match := range headings {
+		got = append(got, strings.TrimSpace(string(match[1])))
+	}
+	want := []string{"#", "Server", "Country", "City", "Load", "Latency", "Score", "Features", "Action"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("headings = %v, want %v", got, want)
+	}
+
+	// The row template must emit exactly that many cells.
+	row := regexp.MustCompile(`(?s)return \x60<tr class=.*?</tr>\x60;`).Find(script)
+	if row == nil {
+		t.Fatal("could not find the candidate row template in app.js")
+	}
+	if cells := bytes.Count(row, []byte("<td")); cells != len(want) {
+		t.Errorf("the row template emits %d cells for %d columns", cells, len(want))
+	}
+}
+
+// The switch history is rendered in a half-width panel, and it overflowed: two full
+// hostnames, a reason and an error on one nowrap line are wider than the panel, so
+// the table scrolled sideways. The reason now sits under the hostnames and the prose
+// cells are allowed to wrap. This pins all three parts of that fix.
+func TestSwitchHistoryFitsItsPanel(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	head := regexp.MustCompile(`(?s)<table id="history">.*?</thead>`).Find(page)
+	if head == nil {
+		t.Fatal("could not find the history table head")
+	}
+	if bytes.Contains(head, []byte("Reason")) {
+		t.Error("the Reason column is back; it belongs under the hostnames")
+	}
+	var headings []string
+	for _, match := range regexp.MustCompile(`<th[^>]*>([^<]*)</th>`).FindAllSubmatch(head, -1) {
+		headings = append(headings, strings.TrimSpace(string(match[1])))
+	}
+	want := []string{"When", "From → to", "Score", "Result"}
+	if strings.Join(headings, "|") != strings.Join(want, "|") {
+		t.Errorf("headings = %v, want %v", headings, want)
+	}
+
+	row := regexp.MustCompile(`(?s)snapshot\.history \|\| \[\]\)\.map\(\(record\) => \x60<tr>.*?</tr>\x60\)`).Find(script)
+	if row == nil {
+		t.Fatal("could not find the history row template")
+	}
+	if cells := bytes.Count(row, []byte("<td")); cells != len(want) {
+		t.Errorf("the row template emits %d cells for %d columns", cells, len(want))
+	}
+	// The reason has to still be shown, just in the hostname cell.
+	if !bytes.Contains(row, []byte("record.reason")) {
+		t.Error("the reason is no longer rendered at all")
+	}
+	// The empty-state row must span the new column count, or it renders short.
+	if !bytes.Contains(script, []byte(`colspan="4" class="muted">No switches recorded yet.`)) {
+		t.Error(`the empty-state row does not span 4 columns`)
+	}
+
+	// Without this the cells inherit the global nowrap and the panel scrolls again.
+	if !bytes.Contains(styles, []byte("#history td { white-space: normal; }")) {
+		t.Error("history cells are not allowed to wrap, so long rows will overflow the panel")
+	}
+	if !bytes.Contains(styles, []byte("#history td:first-child { white-space: nowrap; }")) {
+		t.Error("the timestamp column should stay on one line")
+	}
+	// The shared domain suffix is dropped for width, so the full name has to remain
+	// reachable somewhere or the panel loses information.
+	if !bytes.Contains(script, []byte("shortHost(record.to)")) {
+		t.Error("history hostnames are not shortened, so the row stays too wide")
+	}
+	if !bytes.Contains(script, []byte(`<td title="${escapeHTML(`+"`"+`${record.from || '—'} → ${record.to}`+"`"+`)}">`)) {
+		t.Error("the full hostnames are not preserved in the cell title")
+	}
+}
+
+// A static width budget, since the rendered page cannot be measured here. The
+// widest realistic history row has to fit the narrowest panel the split grid
+// produces, or the scrollbar comes back.
+func TestSwitchHistoryRowFitsTheNarrowestPanel(t *testing.T) {
+	t.Parallel()
+
+	// .split uses minmax(340px, 1fr), so 340px is the narrowest a panel gets before
+	// the grid drops to one column and each panel becomes full width.
+	const panelWidth = 340
+	const cellPadding = 12 * 2 // th, td { padding: 7px 12px }
+
+	// Widths in pixels, measured conservatively: ~7px per character at 12px in a
+	// monospace face, ~6.5px at 13px in the UI face.
+	// Only the widest unbreakable token in each column has to fit: everything else
+	// is allowed to wrap.
+	widest := []struct {
+		name  string
+		token string
+		px    float64
+	}{
+		// Pinned to one line, so the whole value must fit.
+		{"When", "3h ago", 6 * 6.5},
+		// Breaks at the arrow, and the shared domain is dropped, so one short
+		// hostname plus the arrow is the widest unbreakable run.
+		{"From → to", "node-se-20 →", 12 * 7},
+		// Breaks at the arrow too, leaving one score.
+		{"Score", "0.750", 5 * 7},
+		// The error wraps; only "failed" is unbreakable.
+		{"Result", "failed", 6 * 6.5},
+	}
+
+	total := 0.0
+	for _, column := range widest {
+		total += column.px + cellPadding
+	}
+	if total > panelWidth {
+		var detail []string
+		for _, column := range widest {
+			detail = append(detail, fmt.Sprintf("%s(%q %.0fpx)", column.name, column.token, column.px))
+		}
+		t.Errorf("the widest history row needs %.0fpx but the narrowest panel is %dpx; "+
+			"columns %v either need to wrap or the table needs fewer of them",
+			total, panelWidth, detail)
 	}
 }

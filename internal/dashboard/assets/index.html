@@ -68,7 +68,6 @@
           <div><dt>Protocol</dt><dd id="gluetun-vpn">–</dd></div>
           <div><dt>Provider</dt><dd id="gluetun-provider">–</dd></div>
           <div><dt>DNS</dt><dd id="gluetun-dns">–</dd></div>
-          <div class="wide"><dt>Port forwarding</dt><dd id="gluetun-pf">–</dd></div>
           <div><dt>Last check</dt><dd id="gluetun-check">–</dd></div>
         </dl>
         <p id="gluetun-error" class="card-note error"></p>
@@ -154,7 +153,8 @@
             <tr>
               <th class="num">#</th>
               <th>Server</th>
-              <th>Location</th>
+              <th>Country</th>
+              <th>City</th>
               <th class="num">Load</th>
               <th class="num">Latency</th>
               <th class="num">Score</th>
@@ -169,11 +169,14 @@
 
     <div class="split">
       <section class="panel">
-        <div class="panel-head"><h2>Switch history</h2></div>
+        <div class="panel-head">
+          <h2>Switch history</h2>
+          <button id="clear-history" class="small" title="Discard the recorded switches. This cannot be undone.">Clear</button>
+        </div>
         <div class="table-scroll short">
           <table id="history">
             <thead>
-              <tr><th>When</th><th>From → to</th><th>Reason</th><th class="num">Score</th><th>Result</th></tr>
+              <tr><th>When</th><th>From → to</th><th class="num">Score</th><th>Result</th></tr>
             </thead>
             <tbody></tbody>
           </table>
@@ -181,7 +184,10 @@
       </section>
 
       <section class="panel">
-        <div class="panel-head"><h2>Recent activity</h2></div>
+        <div class="panel-head">
+          <h2>Recent activity</h2>
+          <button id="clear-logs" class="small" title="Empty the log this page reads. The container's own log stream is untouched.">Clear</button>
+        </div>
         <ol id="logs" class="logs"></ol>
       </section>
     </div>

@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -270,24 +271,52 @@ type Requirements struct {
 	// equivalent, so they cannot be satisfied deliberately.
 	MultiHop bool
 	Owned    bool
+	// PortForwardingRequested is VPN_PORT_FORWARDING, which is a *different*
+	// setting from PORT_FORWARD_ONLY and easy to confuse with it.
+	//
+	// PORT_FORWARD_ONLY makes Gluetun refuse a server that cannot forward a port.
+	// VPN_PORT_FORWARDING merely asks for a port once connected - Gluetun will
+	// happily connect to a server that has no port to give. With ProtonVPN only P2P
+	// servers forward ports, so turning port forwarding on without the "only"
+	// filter is a configuration that connects fine and never gets a port. Reporting
+	// the two separately lets a caller treat the request as a reason to prefer P2P
+	// while still knowing Gluetun is not itself enforcing it.
+	PortForwardingRequested bool
 }
 
-// Requirements reports the "only" filters currently in force.
+// OnlyFiltersCleared reports whether no "only" filter is in force.
+//
+// PortForwardingRequested is deliberately excluded. Pinning a server clears the
+// filters - they are redundant next to an exact hostname and can crash Gluetun's VPN
+// loop - but it must never cancel the request for a forwarded port, which is a
+// feature the operator asked for rather than a selection constraint.
+func (r Requirements) OnlyFiltersCleared() bool {
+	r.PortForwardingRequested = false
+	return r == Requirements{}
+}
+
+// Requirements reports the "only" filters currently in force, plus whether a
+// forwarded port is being requested at all.
 func (s Settings) Requirements() (requirements Requirements) {
-	if s.Provider == nil || s.Provider.ServerSelection == nil {
+	if s.Provider == nil {
 		return requirements
+	}
+	enabled, _ := s.PortForwardingEnabled()
+	if s.Provider.ServerSelection == nil {
+		return Requirements{PortForwardingRequested: enabled}
 	}
 	selection := s.Provider.ServerSelection
 	isSet := func(flag *bool) bool { return flag != nil && *flag }
 	return Requirements{
-		PortForward: isSet(selection.PortForwardOnly),
-		SecureCore:  isSet(selection.SecureCoreOnly),
-		Tor:         isSet(selection.TorOnly),
-		Stream:      isSet(selection.StreamOnly),
-		Free:        isSet(selection.FreeOnly),
-		Premium:     isSet(selection.PremiumOnly),
-		MultiHop:    isSet(selection.MultiHopOnly),
-		Owned:       isSet(selection.OwnedOnly),
+		PortForwardingRequested: enabled,
+		PortForward:             isSet(selection.PortForwardOnly),
+		SecureCore:              isSet(selection.SecureCoreOnly),
+		Tor:                     isSet(selection.TorOnly),
+		Stream:                  isSet(selection.StreamOnly),
+		Free:                    isSet(selection.FreeOnly),
+		Premium:                 isSet(selection.PremiumOnly),
+		MultiHop:                isSet(selection.MultiHopOnly),
+		Owned:                   isSet(selection.OwnedOnly),
 	}
 }
 
@@ -548,11 +577,50 @@ func (c *Client) do(ctx context.Context, httpClient *http.Client,
 			ErrRejected, method, path, response.StatusCode)
 	case response.StatusCode >= 400 && response.StatusCode < 500:
 		return nil, fmt.Errorf("%w: %s %s: HTTP %d: %s",
-			ErrRejected, method, path, response.StatusCode, strings.TrimSpace(string(raw)))
+			ErrRejected, method, path, response.StatusCode, summarizeError(raw))
 	default:
 		return nil, fmt.Errorf("%w: %s %s: HTTP %d: %s",
-			ErrUnavailable, method, path, response.StatusCode, strings.TrimSpace(string(raw)))
+			ErrUnavailable, method, path, response.StatusCode, summarizeError(raw))
 	}
+}
+
+// choicesPattern matches the tail Gluetun appends when it rejects a value: the
+// complete list of what it would have accepted.
+var choicesPattern = regexp.MustCompile(
+	`(?s)value is not one of the possible choices: (?:none of (\S+) is one of the choices available )?(.*)`)
+
+// maxErrorLength bounds an error message that is quoted into logs and the
+// dashboard.
+const maxErrorLength = 400
+
+// summarizeError makes a Gluetun error fit in a log line.
+//
+// Rejecting a hostname makes Gluetun list every hostname it *would* have accepted -
+// around 30 kB of it, roughly 570 names. Quoting that verbatim buried the one useful
+// fact (which hostname was refused) under a wall of text, in the log, in the
+// dashboard, and in the switch history. The count is kept because it is genuinely
+// diagnostic: a few hundred choices means Gluetun is running on its small built-in
+// list rather than the one written here.
+func summarizeError(raw []byte) string {
+	message := strings.TrimSpace(string(raw))
+
+	if match := choicesPattern.FindStringSubmatch(message); match != nil {
+		prefix := strings.TrimSpace(message[:strings.Index(message, "value is not one of the possible choices:")])
+		choices := strings.Count(match[2], ",") + 1
+		rejected := match[1]
+		if rejected == "" {
+			return fmt.Sprintf("%s value is not one of the %d choices gluetun knows",
+				prefix, choices)
+		}
+		return fmt.Sprintf("%s %s is not one of the %d choices gluetun knows "+
+			"(it is using its own server list, not the one written here - restart the gluetun "+
+			"container to load it)", prefix, rejected, choices)
+	}
+
+	if len(message) > maxErrorLength {
+		return message[:maxErrorLength] + "… (truncated)"
+	}
+	return message
 }
 
 // VPNType reports the protocol Gluetun is configured for, normalised to
