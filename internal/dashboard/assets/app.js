@@ -140,6 +140,13 @@ function renderAlerts() {
       container the matching <code>GLUETUN_API_KEY</code>.
     </div></div>`);
   }
+  if (snapshot.proton.account_delinquent) {
+    alerts.push(`<div class="alert alert-warn"><div>
+      <strong>Proton reports this account as delinquent</strong>
+      Connections can be refused while an account is behind on payment, which looks
+      identical to a server problem from here.
+    </div></div>`);
+  }
   if (snapshot.proton.from_cache) {
     const stale = snapshot.proton.cache_stale;
     alerts.push(`<div class="alert alert-${stale ? 'bad' : 'warn'}"><div>
@@ -313,6 +320,12 @@ function renderProton() {
   const proton = snapshot.proton;
   text('proton-count', `${proton.logicals_count} logical servers`);
   el('proton-login').innerHTML = boolMark(proton.logged_in);
+  // The account's tier decides which servers are usable at all: Proton lists
+  // servers above it, and they refuse the connection.
+  const tier = proton.account_tier;
+  text('proton-plan', proton.account_plan
+    ? `${proton.account_plan}${tier === undefined || tier === null ? '' : ` (tier ${tier})`}`
+    : '–');
   text('proton-fetch', timeAgo(proton.last_fetch) + (proton.from_cache ? ' (from cache)' : ''));
   text('proton-loads', timeAgo(proton.last_load_refresh));
   text('proton-next', snapshot.next_runs.server_list || '–');
@@ -365,7 +378,11 @@ function renderCandidates() {
     if (candidate.stream) tags.push('<span class="tag">stream</span>');
     if (candidate.secure_core) tags.push('<span class="tag">secure core</span>');
     if (candidate.tor) tags.push('<span class="tag">tor</span>');
-    if (candidate.free) tags.push('<span class="tag">free</span>');
+    // "free" means the server is available on the free tier; everything else in
+    // the list needs a paid plan, which is worth showing rather than implying.
+    tags.push(candidate.free
+      ? '<span class="tag tag-free">free</span>'
+      : '<span class="tag tag-paid">paid</span>');
     if (candidate.wireguard) tags.push('<span class="tag">wg</span>');
 
     const scoreTitle = candidate.rtt_known
@@ -446,6 +463,7 @@ function renderStats() {
     ['Physical servers', `${stats.physical_kept || 0} of ${stats.physical_total || 0}`],
     ['Skipped: disabled', stats.disabled_skipped || 0],
     ['Skipped: duplicate IP', stats.duplicate_skipped || 0],
+    ['Skipped: above account tier', stats.above_tier_skipped || 0],
     ['Secure core available', stats.secure_core_total || 0],
     ['Tor available', stats.tor_total || 0],
     ['P2P available', stats.p2p_total || 0],

@@ -220,3 +220,24 @@ func TestExplainReportsSiblingLogicalNames(t *testing.T) {
 		t.Errorf("notes = %v, want the sibling explained", got.Notes)
 	}
 }
+
+// "Why can I not use SE#444?" has a specific answer when the account is not
+// entitled to it, and it is not one the operator can guess.
+func TestExplainReportsTierEntitlement(t *testing.T) {
+	t.Parallel()
+
+	plusServer := logical("SE#444", "SE", 5, 0)
+	plusServer.Tier = tier(2)
+	free := uint8(0)
+
+	explanations := Explain([]proton.LogicalServer{plusServer}, Options{MaxTier: &free}, "SE#444")
+	if len(explanations) != 1 {
+		t.Fatalf("got %d explanations", len(explanations))
+	}
+	if explanations[0].Included {
+		t.Error("a server above the account tier is not a candidate")
+	}
+	if !reasonsContain(explanations[0].Reasons, "needs Proton tier 2") {
+		t.Errorf("reasons = %v, want the tier requirement named", explanations[0].Reasons)
+	}
+}

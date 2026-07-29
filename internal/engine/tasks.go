@@ -30,6 +30,10 @@ func (e *Engine) refreshServerList(ctx context.Context, trigger string) {
 	started := time.Now()
 	previousModified := e.Snapshot().Proton.ListLastModified
 
+	// Ask what the account may actually use before applying the list, so the tier
+	// limit is in place when candidates are built.
+	e.refreshAccountInfo(ctx)
+
 	logicals, lastModified, err := e.proton.Logicals(ctx, previousModified)
 	switch {
 	case errors.Is(err, proton.ErrNotModified):
@@ -92,6 +96,52 @@ func (e *Engine) refreshServerList(ctx context.Context, trigger string) {
 		"took", time.Since(started).Truncate(time.Millisecond))
 
 	e.writeServersFile()
+}
+
+// refreshAccountInfo learns the account's plan and its highest usable server
+// tier.
+//
+// Proton's list contains servers above the account's entitlement, and they are
+// indistinguishable from usable ones until the connection is refused. Knowing the
+// tier turns that into a filter rather than a failed reconnect.
+func (e *Engine) refreshAccountInfo(ctx context.Context) {
+	info, err := e.proton.Account(ctx)
+	if err != nil {
+		// Not fatal: without it nothing is filtered by tier, which is how this
+		// worked before the account was consulted at all.
+		e.logger.Warn("could not read the proton account details", "error", err)
+		return
+	}
+
+	tier := info.Tier
+	changed := e.accountTier == nil || *e.accountTier != tier
+	e.accountTier = &tier
+
+	e.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Proton.AccountTier = &tier
+		snapshot.Proton.AccountPlan = info.PlanTitle
+		if info.PlanTitle == "" {
+			snapshot.Proton.AccountPlan = info.PlanName
+		}
+		snapshot.Proton.AccountFree = info.Free()
+		snapshot.Proton.MaxConnections = info.MaxConnections
+		snapshot.Proton.AccountDelinquent = info.Delinquent != 0
+	})
+
+	if changed {
+		e.logger.Info("proton account details",
+			"plan", info.PlanName, "tier", tier, "free", info.Free(),
+			"max_connections", info.MaxConnections)
+		if err := e.state.update(func(state *persistedState) {
+			state.AccountTier = &tier
+			state.AccountPlan = info.PlanName
+		}); err != nil {
+			e.logger.Warn("could not persist the proton account tier", "error", err)
+		}
+	}
+	if info.Delinquent != 0 {
+		e.logger.Warn("proton reports the account as delinquent, which can cause connections to be refused")
+	}
 }
 
 // refreshLoads updates utilisation from the cheap loads endpoint. This is what

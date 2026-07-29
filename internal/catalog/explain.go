@@ -125,6 +125,11 @@ func Explain(logicals []proton.LogicalServer, opts Options, query string) (expla
 			explanation.Reasons = append(explanation.Reasons,
 				"does not satisfy a filter Gluetun itself enforces "+requirementNames(opts.Require))
 		}
+		if aboveTier(logical, opts.MaxTier) {
+			explanation.Reasons = append(explanation.Reasons, sprintf(
+				"needs Proton tier %d, and this account is tier %d - it would refuse the connection",
+				*logical.Tier, *opts.MaxTier))
+		}
 		if len(allowedCountries) > 0 {
 			if _, allowed := allowedCountries[country]; !allowed {
 				explanation.Reasons = append(explanation.Reasons,

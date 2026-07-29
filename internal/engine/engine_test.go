@@ -221,6 +221,10 @@ func protonServer(t *testing.T, failing bool) *httptest.Server {
 		switch r.URL.Path {
 		case "/vpn/v1/logicals":
 			_, _ = io.WriteString(w, body)
+		case "/vpn/v2":
+			// Tier 2 (Plus), matching the tier of the fake server list.
+			_, _ = io.WriteString(w, `{"Code":1000,"VPN":{"Status":1,"PlanName":"vpn2022",`+
+				`"PlanTitle":"VPN Plus","MaxTier":2,"MaxConnect":10}}`)
 		case "/vpn/v1/loads":
 			_, _ = io.WriteString(w, `{"Code":1000,"LogicalServers":[
 			  {"ID":"l1","Load":80,"Score":2.0,"Status":1},
@@ -1512,5 +1516,49 @@ func TestBecameUsable(t *testing.T) {
 				t.Errorf("becameUsable = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+// The account tier has to be known before candidates are built, and remembered so
+// a restart while Proton is unreachable does not reconsider servers the account
+// cannot use.
+func TestAccountTierIsAppliedAndRemembered(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Proton.AccountTier != nil })
+
+	snapshot := harness.engine.Snapshot()
+	if got := *snapshot.Proton.AccountTier; got != 2 {
+		t.Errorf("AccountTier = %d, want 2", got)
+	}
+	if snapshot.Proton.AccountPlan != "VPN Plus" {
+		t.Errorf("AccountPlan = %q", snapshot.Proton.AccountPlan)
+	}
+	if snapshot.Proton.AccountFree {
+		t.Error("tier 2 is not the free tier")
+	}
+	// The tier reaches the catalog, which is what actually excludes servers.
+	if harness.engine.catalogOptions().MaxTier == nil {
+		t.Error("the tier should be applied when building candidates")
+	}
+
+	// Persisted, so a restart without Proton still filters correctly.
+	if tier := harness.engine.state.snapshot().AccountTier; tier == nil || *tier != 2 {
+		t.Errorf("persisted tier = %v, want 2", tier)
+	}
+
+	cold := newHarness(t, true, nil)
+	if err := os.Rename(filepath.Join(harness.stateDir, stateFileName),
+		filepath.Join(cold.stateDir, stateFileName)); err != nil {
+		t.Fatal(err)
+	}
+	cold2, err := New(Options{
+		Config: cold.engine.cfg, Logger: quietLogger(), Version: "test",
+		Proton: cold.engine.proton, Gluetun: cold.engine.gluetun,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tier := cold2.accountTier; tier == nil || *tier != 2 {
+		t.Errorf("a restarted engine should remember the tier, got %v", tier)
 	}
 }

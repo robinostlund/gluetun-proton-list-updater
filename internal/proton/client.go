@@ -30,6 +30,7 @@ const (
 	pathAuth2FA      = "/auth/2fa"
 	pathAuthRefresh  = "/auth/refresh"
 	pathLogicals     = "/vpn/v1/logicals?SecureCoreFilter=all&WithState=true&WithIpV6=1"
+	pathAccount      = "/vpn/v2"
 	pathLoads        = "/vpn/v1/loads"
 	protonSuccessAPI = 1000
 )
@@ -186,6 +187,27 @@ func (c *Client) Loads(ctx context.Context) (loads []ServerLoad, err error) {
 		return nil, errors.New("proton: loads response contains no servers")
 	}
 	return response.LogicalServers, nil
+}
+
+// Account reports what Proton says about the signed-in account, most importantly
+// the highest server tier it may connect to.
+func (c *Client) Account(ctx context.Context) (info AccountInfo, err error) {
+	var response accountResponse
+	if _, err := c.authenticatedRequest(ctx, http.MethodGet, pathAccount, nil, nil, &response); err != nil {
+		return AccountInfo{}, err
+	}
+	if response.Code != protonSuccessAPI {
+		return AccountInfo{}, fmt.Errorf("proton: account response code %d is not %d",
+			response.Code, protonSuccessAPI)
+	}
+	return AccountInfo{
+		Tier:           response.VPN.MaxTier,
+		PlanName:       response.VPN.PlanName,
+		PlanTitle:      response.VPN.PlanTitle,
+		MaxConnections: response.VPN.MaxConnect,
+		Status:         response.VPN.Status,
+		Delinquent:     response.Delinquent,
+	}, nil
 }
 
 // SessionUID returns the current session identifier, redacted for logging. It

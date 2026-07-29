@@ -63,12 +63,14 @@ type Candidate struct {
 // Every "kept" figure is counted after filtering, so the pair explains exactly
 // why a candidate list is smaller than expected.
 type Stats struct {
-	LogicalsTotal    int      `json:"logicals_total"`
-	LogicalsKept     int      `json:"logicals_kept"`
-	PhysicalTotal    int      `json:"physical_total"`
-	PhysicalKept     int      `json:"physical_kept"`
-	DisabledSkipped  int      `json:"disabled_skipped"`
-	DuplicateSkipped int      `json:"duplicate_skipped"`
+	LogicalsTotal    int `json:"logicals_total"`
+	LogicalsKept     int `json:"logicals_kept"`
+	PhysicalTotal    int `json:"physical_total"`
+	PhysicalKept     int `json:"physical_kept"`
+	DisabledSkipped  int `json:"disabled_skipped"`
+	DuplicateSkipped int `json:"duplicate_skipped"`
+	// AboveTierSkipped counts servers the Proton account is not entitled to use.
+	AboveTierSkipped int      `json:"above_tier_skipped"`
 	SecureCoreTotal  int      `json:"secure_core_total"`
 	TorTotal         int      `json:"tor_total"`
 	P2PTotal         int      `json:"p2p_total"`
@@ -99,6 +101,14 @@ type Options struct {
 	VPNType string
 	// IncludeIPv6 keeps Proton's IPv6 entry addresses.
 	IncludeIPv6 bool
+	// MaxTier is the highest server tier the Proton account may connect to, or nil
+	// when it is not known.
+	//
+	// Proton's list includes servers above the account's entitlement: they look
+	// ordinary but refuse the connection, so selecting one wastes a reconnect and
+	// leaves the tunnel down. Nil means "unknown", and nothing is filtered - a
+	// missing answer must not empty the candidate list.
+	MaxTier *uint8
 	// Require narrows candidates to those satisfying filters Gluetun itself is
 	// enforcing. Gluetun ANDs its "only" filters with a pinned hostname, so a
 	// server that fails one of them cannot be connected to - it leaves Gluetun
@@ -201,6 +211,10 @@ func Build(logicals []proton.LogicalServer, opts Options) (candidates []Candidat
 			continue
 		}
 		if !opts.Require.satisfied(logical) {
+			continue
+		}
+		if aboveTier(logical, opts.MaxTier) {
+			stats.AboveTierSkipped++
 			continue
 		}
 
@@ -379,6 +393,16 @@ func resolveCountry(logical proton.LogicalServer) (name string, known bool) {
 		code = logical.Name[:2]
 	}
 	return countries.Name(code)
+}
+
+// aboveTier reports whether a server needs a higher tier than the account has.
+// An unknown tier on either side is treated as usable, since refusing on missing
+// information would be worse than attempting a connection.
+func aboveTier(logical proton.LogicalServer, maxTier *uint8) bool {
+	if maxTier == nil || logical.Tier == nil {
+		return false
+	}
+	return *logical.Tier > *maxTier
 }
 
 // featureAllowed applies a tri-state filter to a boolean feature.

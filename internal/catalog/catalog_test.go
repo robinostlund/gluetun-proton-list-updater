@@ -420,3 +420,56 @@ func TestBuildAppliesGluetunRequirements(t *testing.T) {
 		t.Errorf("got %d candidates, want none", len(candidates))
 	}
 }
+
+// Proton's list contains servers above the account's entitlement. They look
+// ordinary but refuse the connection, so selecting one costs a reconnect and
+// leaves the tunnel down - a free account must not be sent to a Plus server.
+func TestBuildExcludesServersAboveTheAccountTier(t *testing.T) {
+	t.Parallel()
+
+	freeServer := logical("SE-FREE#1", "SE", 30, 0)
+	freeServer.Tier = tier(0)
+	plusServer := logical("SE#444", "SE", 5, 0, withEntryIP("10.0.0.2"))
+	plusServer.Tier = tier(2)
+
+	logicals := []proton.LogicalServer{freeServer, plusServer}
+	free := uint8(0)
+	plus := uint8(2)
+
+	// A free account may only use the free server, even though the Plus one is
+	// quieter and would otherwise win.
+	candidates, stats := Build(logicals, Options{MaxTier: &free, Free: config.FilterInclude})
+	if len(candidates) != 1 || candidates[0].ServerName != "SE-FREE#1" {
+		t.Fatalf("got %+v, want only the free server", candidates)
+	}
+	if stats.AboveTierSkipped != 1 {
+		t.Errorf("AboveTierSkipped = %d, want 1", stats.AboveTierSkipped)
+	}
+
+	// A Plus account may use both.
+	candidates, _ = Build(logicals, Options{MaxTier: &plus, Free: config.FilterInclude})
+	if len(candidates) != 2 {
+		t.Errorf("got %d candidates, want both", len(candidates))
+	}
+
+	// An unknown tier must not filter anything: refusing on missing information
+	// would be worse than attempting the connection.
+	candidates, _ = Build(logicals, Options{Free: config.FilterInclude})
+	if len(candidates) != 2 {
+		t.Errorf("got %d candidates with an unknown account tier, want both", len(candidates))
+	}
+}
+
+// A server whose tier Proton does not report must not be discarded.
+func TestBuildKeepsServersWithAnUnknownTier(t *testing.T) {
+	t.Parallel()
+
+	unknown := logical("SE#1", "SE", 10, 0)
+	unknown.Tier = nil
+	free := uint8(0)
+
+	candidates, _ := Build([]proton.LogicalServer{unknown}, Options{MaxTier: &free})
+	if len(candidates) != 1 {
+		t.Errorf("got %d candidates, want the server kept", len(candidates))
+	}
+}

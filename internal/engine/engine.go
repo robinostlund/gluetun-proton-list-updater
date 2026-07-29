@@ -76,6 +76,9 @@ type Engine struct {
 	// rather than configured, and re-detected on each write because Gluetun can
 	// be upgraded underneath us.
 	layout serversfile.Layout
+	// accountTier is the highest server tier the Proton account may use, nil until
+	// known. Servers above it refuse the connection, so they are not candidates.
+	accountTier *uint8
 	// latestLoads is the most recent utilisation figures seen, from either a
 	// refresh or the cache.
 	//
@@ -150,6 +153,9 @@ func New(opts Options) (engine *Engine, err error) {
 		// everything it needs from Proton and Gluetun.
 		logger.Warn("could not load persisted state, starting fresh", "error", err)
 	}
+	// A remembered tier applies immediately, so a restart while Proton is
+	// unreachable does not consider servers the account cannot use.
+	engine.accountTier = engine.state.snapshot().AccountTier
 	return engine, nil
 }
 
@@ -466,6 +472,7 @@ func (e *Engine) catalogOptions() catalog.Options {
 		VPNType:          e.effectiveVPNType(),
 		IncludeIPv6:      e.cfg.Servers.IncludeIPv6,
 		Require:          e.requirements,
+		MaxTier:          e.accountTier,
 	}
 }
 
@@ -482,7 +489,9 @@ func (e *Engine) fileCatalogOptions() catalog.Options {
 	opts.Cities = nil
 	opts.MaxLoad = 0
 	// Gluetun applies its own "only" filters when choosing from this list, so it
-	// should receive every server rather than a pre-narrowed set.
+	// should receive every server rather than a pre-narrowed set. The tier limit
+	// stays, though: a server the account cannot connect to is of no use to Gluetun
+	// either, and offering it only invites failed connections.
 	opts.Require = catalog.Requirements{}
 	return opts
 }

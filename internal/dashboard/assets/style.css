@@ -340,6 +340,9 @@ td.right, th.right { text-align: right; }
 .toast.bad { border-color: var(--bad); color: var(--bad); }
 .toast.good { border-color: var(--good); }
 
+.tag-free { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--border)); }
+.tag-paid { color: var(--text-muted); }
+
 .ok { color: var(--good); }
 .no { color: var(--bad); }
 

@@ -53,6 +53,11 @@ type persistedState struct {
 	PinnedHostname string    `json:"pinned_hostname,omitempty"`
 	LastSwitchAt   time.Time `json:"last_switch_at"`
 	AutoSwitch     *bool     `json:"auto_switch,omitempty"`
+	// AccountTier is the Proton account's highest usable server tier, remembered so
+	// a restart while Proton is unreachable still avoids servers the account cannot
+	// connect to.
+	AccountTier *uint8 `json:"account_tier,omitempty"`
+	AccountPlan string `json:"account_plan,omitempty"`
 	// GluetunHadServerData records that Gluetun's own server data was seen at
 	// least once. It only ever goes from false to true: once Gluetun has proven it
 	// keeps server data on disk, a later absence is far more likely to be a

@@ -106,3 +106,44 @@ type loadsResponse struct {
 	Code           int          `json:"Code"`
 	LogicalServers []ServerLoad `json:"LogicalServers"`
 }
+
+// AccountInfo is what Proton reports about the signed-in account, from
+// GET /vpn/v2.
+//
+// MaxTier is the important field: it is the highest server tier the account may
+// connect to. Proton's server list includes servers above it, which look
+// perfectly ordinary but simply refuse the connection - so knowing this is what
+// keeps a free account from being sent to a Plus server.
+type AccountInfo struct {
+	// Tier is the account's MaxTier: 0 is free, 2 is Plus.
+	Tier uint8
+	// PlanName and PlanTitle are Proton's identifiers for the subscription.
+	PlanName  string
+	PlanTitle string
+	// MaxConnections is how many simultaneous sessions the account allows.
+	MaxConnections uint8
+	// Status is 1 for an active VPN entitlement.
+	Status uint8
+	// Delinquent is non-zero when the account is behind on payment, which is a
+	// plausible cause of otherwise inexplicable connection refusals.
+	Delinquent uint8
+}
+
+// Free reports whether the account is on the free tier.
+func (a AccountInfo) Free() bool { return a.Tier == 0 }
+
+// accountResponse mirrors Proton's /vpn/v2 envelope.
+type accountResponse struct {
+	Code uint `json:"Code"`
+	VPN  struct {
+		Status     uint8  `json:"Status"`
+		PlanName   string `json:"PlanName"`
+		PlanTitle  string `json:"PlanTitle"`
+		MaxTier    uint8  `json:"MaxTier"`
+		MaxConnect uint8  `json:"MaxConnect"`
+		GroupID    string `json:"GroupID"`
+		NeedsAlloc bool   `json:"NeedConnectionAllocation"`
+	} `json:"VPN"`
+	Delinquent uint8 `json:"Delinquent"`
+	Subscribed uint8 `json:"Subscribed"`
+}

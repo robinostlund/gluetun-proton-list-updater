@@ -345,3 +345,57 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// The account's tier decides which servers are usable at all, so reading it
+// correctly matters more than it looks.
+func TestAccountInfo(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newTestClient(t, &memoryStore{session: validSession()},
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/vpn/v2" {
+				t.Errorf("unexpected path %q", r.URL.Path)
+			}
+			_, _ = io.WriteString(w, `{"Code":1000,"VPN":{"Status":1,"PlanName":"vpn2022",
+				"PlanTitle":"VPN Plus","MaxTier":2,"MaxConnect":10,"GroupID":"g"},
+				"Delinquent":0,"Subscribed":1}`)
+		})
+
+	info, err := client.Account(context.Background())
+	if err != nil {
+		t.Fatalf("Account: %v", err)
+	}
+	switch {
+	case info.Tier != 2:
+		t.Errorf("Tier = %d, want 2", info.Tier)
+	case info.PlanTitle != "VPN Plus":
+		t.Errorf("PlanTitle = %q", info.PlanTitle)
+	case info.MaxConnections != 10:
+		t.Errorf("MaxConnections = %d, want 10", info.MaxConnections)
+	case info.Free():
+		t.Error("tier 2 is not free")
+	}
+}
+
+func TestAccountInfoFreeTier(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newTestClient(t, &memoryStore{session: validSession()},
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"Code":1000,"VPN":{"Status":1,"PlanName":"free",
+				"PlanTitle":"VPN Free","MaxTier":0,"MaxConnect":1},"Delinquent":1}`)
+		})
+
+	info, err := client.Account(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Free() {
+		t.Error("tier 0 is the free tier")
+	}
+	// Delinquency is surfaced because it causes refusals that look like server
+	// faults.
+	if info.Delinquent == 0 {
+		t.Error("Delinquent should be reported")
+	}
+}

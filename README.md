@@ -307,6 +307,31 @@ unauthenticated so Docker's health check works.
 
 ---
 
+## Servers your account cannot use
+
+Proton's server list is the same whoever asks: it includes servers **above your
+plan's tier**, which look entirely ordinary and simply refuse the connection. A
+free account offered a Plus server would burn a reconnect and leave the tunnel
+down for nothing.
+
+So the tool asks Proton what the account is entitled to (`GET /vpn/v2` → `MaxTier`)
+and excludes anything above it. The tier is remembered in `STATE_DIR`, so a restart
+while Proton is unreachable still filters correctly, and a server whose tier Proton
+does not report is kept rather than discarded — refusing on missing information
+would be worse than trying.
+
+The dashboard shows this in three places:
+
+- the **Proton list** card shows the plan and tier, e.g. `VPN Plus (tier 2)`
+- every server in the candidate table carries a **`free`** or **`paid`** badge, so
+  which servers need a subscription is visible rather than implied
+- the **Filtering** panel counts what was skipped as *above account tier*
+
+`FREE_TIER` remains a separate preference: it decides whether you *want* free-tier
+servers (default `exclude`, since they are heavily loaded), while the tier check
+decides what is *possible*. A delinquent account is also flagged, because Proton
+refuses connections in that state and it looks identical to a server fault.
+
 ## "Why is server X not in the list?"
 
 Ask the tool. It evaluates the question against the **raw Proton response** cached in `STATE_DIR`, so
@@ -509,7 +534,32 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `STREAM` | `include` | `include` / `exclude` / `only` |
 | `FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
 
-### "Why is server X not in the list?"
+### Servers your account cannot use
+
+Proton's server list is the same whoever asks: it includes servers **above your
+plan's tier**, which look entirely ordinary and simply refuse the connection. A
+free account offered a Plus server would burn a reconnect and leave the tunnel
+down for nothing.
+
+So the tool asks Proton what the account is entitled to (`GET /vpn/v2` → `MaxTier`)
+and excludes anything above it. The tier is remembered in `STATE_DIR`, so a restart
+while Proton is unreachable still filters correctly, and a server whose tier Proton
+does not report is kept rather than discarded — refusing on missing information
+would be worse than trying.
+
+The dashboard shows this in three places:
+
+- the **Proton list** card shows the plan and tier, e.g. `VPN Plus (tier 2)`
+- every server in the candidate table carries a **`free`** or **`paid`** badge, so
+  which servers need a subscription is visible rather than implied
+- the **Filtering** panel counts what was skipped as *above account tier*
+
+`FREE_TIER` remains a separate preference: it decides whether you *want* free-tier
+servers (default `exclude`, since they are heavily loaded), while the tier check
+decides what is *possible*. A delinquent account is also flagged, because Proton
+refuses connections in that state and it looks identical to a server fault.
+
+## "Why is server X not in the list?"
 
 Ask the tool. It evaluates the question against the **raw Proton response** cached in `STATE_DIR`, so
 it can explain servers that are not candidates:

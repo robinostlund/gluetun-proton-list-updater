@@ -52,6 +52,16 @@ type ProtonStatus struct {
 	// FromCache is true when the current list came from disk because Proton
 	// could not be reached.
 	FromCache bool `json:"from_cache"`
+	// AccountTier is the highest server tier this account may connect to: 0 is
+	// free, 2 is Plus. Servers above it are excluded, because Proton refuses them.
+	AccountTier *uint8 `json:"account_tier,omitempty"`
+	AccountPlan string `json:"account_plan,omitempty"`
+	AccountFree bool   `json:"account_free"`
+	// MaxConnections is how many simultaneous sessions the plan allows.
+	MaxConnections uint8 `json:"max_connections,omitempty"`
+	// AccountDelinquent warns that Proton considers the account behind on payment,
+	// a plausible cause of otherwise inexplicable connection refusals.
+	AccountDelinquent bool `json:"account_delinquent"`
 	// CacheStale is true when that cached list is older than
 	// PROTON_CACHE_MAX_AGE. It is still used - a stale list beats none - but the
 	// utilisation figures behind every decision may be well out of date.
