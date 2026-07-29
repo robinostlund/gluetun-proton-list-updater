@@ -89,7 +89,13 @@ integration-down: ## Remove the throwaway Gluetun container
 
 .PHONY: integration
 integration: integration-up ## Run integration tests against a real Gluetun container
-	@docker cp $(ITEST_CONTAINER):/gluetun/servers.json /tmp/$(ITEST_CONTAINER)-servers.json
+	# Gluetun has two storage layouts: current versions keep one file per provider
+	# under /gluetun/servers/, older ones a single /gluetun/servers.json. Copy
+	# whichever this Gluetun produced; the test handles both shapes.
+	@docker cp $(ITEST_CONTAINER):/gluetun/servers/protonvpn.json \
+		/tmp/$(ITEST_CONTAINER)-servers.json 2>/dev/null || \
+	 docker cp $(ITEST_CONTAINER):/gluetun/servers.json \
+		/tmp/$(ITEST_CONTAINER)-servers.json
 	@GLUETUN_ITEST_URL=http://127.0.0.1:$(ITEST_PORT) \
 	 GLUETUN_ITEST_API_KEY=$(ITEST_APIKEY) \
 	 GLUETUN_ITEST_COUNTRY=$(ITEST_COUNTRY) \

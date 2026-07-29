@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
@@ -285,4 +286,172 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestGetForwardedPortsHandlesBothShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		body string
+		want []uint16
+	}{
+		"port list":   {body: `{"ports":[5914,5915]}`, want: []uint16{5914, 5915}},
+		"single port": {body: `{"port":5914}`, want: []uint16{5914}},
+		"no port":     {body: `{"port":0,"ports":null}`, want: nil},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, test.body)
+			})
+			ports, err := client.GetForwardedPorts(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ports) != len(test.want) {
+				t.Fatalf("ports = %v, want %v", ports, test.want)
+			}
+			for i := range ports {
+				if ports[i] != test.want[i] {
+					t.Errorf("ports = %v, want %v", ports, test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestDNSStatus(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/dns/status" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"status":"running"}`)
+	})
+
+	status, err := client.DNSStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" {
+		t.Errorf("status = %q", status)
+	}
+}
+
+func TestVersionReturnsBuildInfo(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"version":"v3.41.1","commit":"abc1234","created":"2026-02-11T14:22:29Z"}`)
+	})
+
+	build, err := client.Version(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if build.Version != "v3.41.1" || build.Commit != "abc1234" || build.Created == "" {
+		t.Errorf("build = %+v", build)
+	}
+}
+
+// The dashboard shows the filters Gluetun is enforcing, because they are usually
+// the reason a particular server was refused.
+func TestSelectionSummaryAndPortForwarding(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"type":"wireguard",
+			"provider":{
+				"name":"protonvpn",
+				"server_selection":{"vpn":"wireguard","countries":["Sweden"],"cities":["Stockholm"],
+					"hostnames":["se-01.protonvpn.net"],"names":null},
+				"port_forwarding":{"enabled":true}
+			}
+		}`)
+	})
+
+	settings, err := client.GetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary := settings.SelectionSummary()
+	for _, key := range []string{"countries", "cities", "hostnames"} {
+		if len(summary[key]) == 0 {
+			t.Errorf("summary is missing %q: %v", key, summary)
+		}
+	}
+	// Empty filters must be omitted rather than shown as empty rows.
+	if _, present := summary["names"]; present {
+		t.Errorf("empty filters should be omitted: %v", summary)
+	}
+
+	enabled, known := settings.PortForwardingEnabled()
+	if !known || !enabled {
+		t.Errorf("PortForwardingEnabled = (%v, %v), want (true, true)", enabled, known)
+	}
+
+	// An absent section must be reported as unknown, not as false: "not requested"
+	// and "no answer yet" are different things on the dashboard.
+	var empty Settings
+	if _, known := empty.PortForwardingEnabled(); known {
+		t.Error("a missing port_forwarding section must report unknown")
+	}
+	if summary := empty.SelectionSummary(); summary != nil {
+		t.Errorf("SelectionSummary on empty settings = %v, want nil", summary)
+	}
+}
+
+// A state change that does not answer in time has an unknown outcome: Gluetun may
+// well have applied it. That must be distinguishable from "Gluetun is down", or
+// the caller would retry and cause a second reconnect.
+func TestMutationTimeoutIsDistinctFromUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			time.Sleep(300 * time.Millisecond) // outlast the mutation timeout
+		}
+		_, _ = io.WriteString(w, `{"status":"running"}`)
+	}))
+	defer server.Close()
+
+	client := New(Options{
+		BaseURL:         server.URL,
+		Timeout:         5 * time.Second,
+		MutationTimeout: 50 * time.Millisecond,
+	})
+
+	_, err := client.SetStatus(context.Background(), StatusRunning)
+	if !errors.Is(err, ErrTimedOut) {
+		t.Fatalf("err = %v, want ErrTimedOut for a slow state change", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Error("a timed-out mutation must not be classified as unavailability")
+	}
+}
+
+// A read that times out carries no such ambiguity: Gluetun simply is not
+// answering, and calling that "outcome unknown" would be misleading.
+func TestReadTimeoutIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = io.WriteString(w, `{"status":"running"}`)
+	}))
+	defer server.Close()
+
+	client := New(Options{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+
+	_, err := client.Status(context.Background())
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable for a slow read", err)
+	}
+	if errors.Is(err, ErrTimedOut) {
+		t.Error("a slow read must not be reported as an unknown outcome")
+	}
 }

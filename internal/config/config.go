@@ -120,11 +120,22 @@ type Gluetun struct {
 	UpdaterTimeout time.Duration
 }
 
-// Servers describes how servers.json is produced.
+// Servers describes how the server data Gluetun reads is produced.
 type Servers struct {
-	// FilePath is the servers file Gluetun reads, /gluetun/servers.json by
-	// default.
+	// FilePath is Gluetun's legacy single servers file, /gluetun/servers.json by
+	// default. Used by Gluetun up to and including v3.41.1.
 	FilePath string
+	// DirPath is Gluetun's servers directory, /gluetun/servers/ by default.
+	// Current Gluetun versions keep one file per provider there, and read the
+	// legacy file only when the directory's manifest.json is absent - so writing
+	// only the legacy file to a current Gluetun has no effect at all.
+	//
+	// Which layout is in use is detected at runtime; this is only the location.
+	DirPath string
+	// Preferred sets Gluetun's "preferred" flag on our servers, which makes
+	// Gluetun use them regardless of timestamps. It removes the timestamp race
+	// entirely. Gluetun versions that predate the flag ignore it harmlessly.
+	Preferred bool
 	// WriteMode is one of WriteModeUpdate, WriteModeReplace, WriteModeNone.
 	WriteMode string
 	// SchemaVersion is the per-provider version Gluetun expects. Gluetun
@@ -200,8 +211,12 @@ type Latency struct {
 	Concurrency int
 	// Interval is how often probing runs.
 	Interval time.Duration
-	// TopN limits probing to the N best candidates by load, keeping probe
-	// cost proportional to what can actually be selected. Zero probes all.
+	// TopN limits probing to the N most promising candidates, keeping probe cost
+	// proportional to what can realistically be selected. Zero probes all.
+	//
+	// Candidates are chosen by load, never by score: including latency in that
+	// choice would mean an unprobed server's latency penalty kept it out of the
+	// probe budget, so it could never become probed.
 	TopN int
 	// SmoothingFactor is the EWMA weight given to a new measurement
 	// (0 < f <= 1). Lower values make scores steadier across runs.
@@ -282,6 +297,8 @@ func Load() (cfg Config, err error) {
 
 	cfg.Servers = Servers{
 		FilePath:             r.str("SERVERS_FILE", "/gluetun/servers.json"),
+		DirPath:              r.str("SERVERS_DIR", "/gluetun/servers"),
+		Preferred:            r.boolean("SERVERS_PREFERRED", true),
 		WriteMode:            r.choice("SERVERS_WRITE_MODE", WriteModeUpdate, WriteModeUpdate, WriteModeReplace, WriteModeNone),
 		SchemaVersion:        uint16(r.integer("SERVERS_SCHEMA_VERSION", 0)), //nolint:gosec // range checked below
 		OnlyAllowedCountries: r.boolean("SERVERS_ONLY_ALLOWED_COUNTRIES", false),
@@ -316,7 +333,7 @@ func Load() (cfg Config, err error) {
 		Timeout:         r.duration("LATENCY_TIMEOUT", 2*time.Second),
 		Concurrency:     r.integer("LATENCY_CONCURRENCY", 24),
 		Interval:        r.duration("LATENCY_INTERVAL", 30*time.Minute),
-		TopN:            r.integer("LATENCY_TOP_N", 60),
+		TopN:            r.integer("LATENCY_TOP_N", 150),
 		SmoothingFactor: r.float("LATENCY_SMOOTHING", 0.5),
 	}
 

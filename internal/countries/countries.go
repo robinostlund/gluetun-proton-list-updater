@@ -6,8 +6,26 @@ import (
 	"strings"
 )
 
+// supplement holds codes Proton uses that Gluetun's map does not contain.
+//
+// Gluetun would render these as the bare code, so supplying a real name is
+// strictly better: our servers.json defines the country values Gluetun accepts
+// for filtering, so a readable name here becomes a usable filter value there.
+//
+// XK is the user-assigned code for Kosovo. It is not in ISO 3166-1, which is why
+// Gluetun's list omits it, but Proton returns it.
+var supplement = map[string]string{
+	"xk": "Kosovo",
+}
+
 // nameToCode is the reverse of codeToName, keyed by lowercase country name.
 var nameToCode = func() map[string]string {
+	for code, name := range supplement {
+		if _, exists := codeToName[code]; !exists {
+			codeToName[code] = name
+		}
+	}
+
 	m := make(map[string]string, len(codeToName))
 	for code, name := range codeToName {
 		m[strings.ToLower(name)] = code

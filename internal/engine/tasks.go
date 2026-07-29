@@ -156,13 +156,21 @@ func (e *Engine) writeServersFile() {
 	// restart with different SERVER_COUNTRIES, still has servers to work with.
 	servers := catalog.ToGluetunServers(e.serversForFile())
 
+	// The layout is re-detected on every write: Gluetun can be upgraded (or
+	// started for the first time) after this process began, which moves where
+	// the data has to go.
+	e.layout = serversfile.DetectLayout(e.serversPaths())
+
 	result, err := serversfile.Write(servers, serversfile.Options{
-		Path:                   e.cfg.Servers.FilePath,
+		Paths:                  e.serversPaths(),
+		Layout:                 e.layout,
 		SchemaVersion:          e.schemaVersion,
+		Preferred:              e.cfg.Servers.Preferred,
 		PreserveOtherProviders: e.cfg.Servers.WriteMode == config.WriteModeUpdate,
 	})
 	if err != nil {
-		e.logger.Error("could not write servers file", "path", e.cfg.Servers.FilePath, "error", err)
+		e.logger.Error("could not write gluetun server data",
+			"layout", string(e.layout), "error", err)
 		e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Servers.LastError = err.Error() })
 		return
 	}
@@ -172,12 +180,17 @@ func (e *Engine) writeServersFile() {
 		snapshot.Servers.ServerCount = result.ServerCount
 		snapshot.Servers.SchemaVersion = result.SchemaVersion
 		snapshot.Servers.PreservedKeys = result.PreservedKeys
+		snapshot.Servers.Layout = string(result.Layout)
+		snapshot.Servers.Paths = result.Written
+		snapshot.Servers.Preferred = result.Preferred
 		snapshot.Servers.LastError = ""
 	})
-	e.logger.Info("wrote servers file",
-		"path", result.Path,
+	e.logger.Info("wrote gluetun server data",
+		"layout", string(result.Layout),
+		"paths", result.Written,
 		"servers", result.ServerCount,
 		"schema_version", result.SchemaVersion,
+		"preferred", result.Preferred,
 		"preserved", result.PreservedKeys)
 }
 
@@ -267,44 +280,122 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 	}
 
 	// The public IP is only meaningful while the tunnel is up, and asking for it
-	// while stopped produces a confusing "your real IP" answer.
-	var publicIP gluetunapi.PublicIP
-	var port uint16
+	// while stopped reports the real address, which is confusing rather than
+	// useful.
+	var exit gluetunapi.PublicIP
+	var ports []uint16
 	if status == gluetunapi.StatusRunning {
 		if ip, ipErr := e.gluetun.GetPublicIP(ctx); ipErr == nil {
-			publicIP = ip
+			exit = ip
 		}
-		if forwarded, portErr := e.gluetun.GetForwardedPort(ctx); portErr == nil {
-			port = forwarded
+		if forwarded, portErr := e.gluetun.GetForwardedPorts(ctx); portErr == nil {
+			ports = forwarded
 		}
 	}
 
-	version, _ := e.gluetun.Version(ctx)
+	// These two are cheap and answer questions an operator otherwise has to use
+	// curl for; a failure on either is not worth reporting as a problem.
+	dnsStatus, _ := e.gluetun.DNSStatus(ctx)
+	updaterStatus, _ := e.gluetun.UpdaterStatus(ctx)
+	build, _ := e.gluetun.Version(ctx)
 
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Gluetun.Reachable = true
 		snapshot.Gluetun.Status = status
 		snapshot.Gluetun.LastCheck = time.Now()
 		snapshot.Gluetun.LastError = errorText(settingsErr)
-		snapshot.Gluetun.PublicIP = publicIP.IP
-		snapshot.Gluetun.Country = publicIP.Country
-		snapshot.Gluetun.City = publicIP.City
-		snapshot.Gluetun.ForwardedPort = port
-		if version != "" {
-			snapshot.Gluetun.Version = version
+		snapshot.Gluetun.Exit = ExitInfo{
+			IP:           exit.IP,
+			Country:      exit.Country,
+			Region:       exit.Region,
+			City:         exit.City,
+			Hostname:     exit.Hostname,
+			Location:     exit.Location,
+			Organization: exit.Organization,
+			PostalCode:   exit.PostalCode,
+			Timezone:     exit.Timezone,
 		}
+		snapshot.Gluetun.ForwardedPorts = ports
+		snapshot.Gluetun.DNSStatus = dnsStatus
+		snapshot.Gluetun.UpdaterStatus = updaterStatus
+		if build.Version != "" {
+			snapshot.Gluetun.Version = build.Version
+			snapshot.Gluetun.Commit = build.Commit
+			snapshot.Gluetun.Created = build.Created
+		}
+
+		snapshot.Gluetun.SettingsReadable = settingsErr == nil
 		if settingsErr == nil {
 			snapshot.Gluetun.VPNType = settings.VPNType()
 			snapshot.Gluetun.Provider = settings.ProviderName()
 			snapshot.Gluetun.ProviderMismatch = settings.ProviderName() != "" &&
 				settings.ProviderName() != serversfile.Provider
+			snapshot.Gluetun.Selection = settings.SelectionSummary()
+			if enabled, known := settings.PortForwardingEnabled(); known {
+				snapshot.Gluetun.PortForwardingEnabled = &enabled
+			}
 		}
 	})
+
+	e.checkServerDataIsRead()
 
 	if e.Snapshot().Gluetun.ProviderMismatch {
 		e.logger.Warn("gluetun is not configured for protonvpn; this tool cannot affect it",
 			"provider", e.Snapshot().Gluetun.Provider)
 	}
+}
+
+// checkServerDataIsRead warns when the server data this tool writes cannot
+// possibly be read.
+//
+// Gluetun with STORAGE_SERVERS_ENABLED=no keeps no server data on disk at all,
+// and a container whose /gluetun volume is not shared with Gluetun looks
+// identical. Either way the files are written into the void: the tool can still
+// switch servers, but only among the ones Gluetun has built in, and none of the
+// curated list matters. Silence here would be the worst outcome, since
+// everything else reports success.
+func (e *Engine) checkServerDataIsRead() {
+	if e.cfg.Servers.WriteMode == config.WriteModeNone {
+		return // not writing anything, so nothing to warn about
+	}
+	// Re-check first: Gluetun may have started after this process did, in which
+	// case its data appears and there is nothing to warn about.
+	e.refreshGluetunDataObservation()
+
+	snapshot := e.Snapshot()
+	if !snapshot.Gluetun.Reachable {
+		return
+	}
+	if e.gluetunWroteServerData {
+		// Clear a warning raised before Gluetun had written anything.
+		if snapshot.Servers.Ignored {
+			e.mutateSnapshot(func(snapshot *Snapshot) {
+				snapshot.Servers.Ignored = false
+				snapshot.Servers.IgnoredReason = ""
+			})
+		}
+		return
+	}
+	if snapshot.Servers.Ignored {
+		return // already reported
+	}
+
+	const reason = "Gluetun answers its control server but has written no server data of its own, " +
+		"so it cannot be reading the data written here. This tool requires " +
+		"STORAGE_SERVERS_ENABLED=yes on the Gluetun container (its default), and requires the same " +
+		"/gluetun volume to be mounted into both containers - one of those two is not the case. " +
+		"Server switching still works meanwhile, but only across the list Gluetun has built in. " +
+		"If running without server storage is deliberate, set SERVERS_WRITE_MODE=none here to stop " +
+		"writing data nothing reads."
+
+	e.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Servers.Ignored = true
+		snapshot.Servers.IgnoredReason = reason
+	})
+	e.logger.Warn("gluetun is not reading the server data written here",
+		"servers_dir", e.cfg.Servers.DirPath,
+		"legacy_file", e.cfg.Servers.FilePath,
+		"hint", reason)
 }
 
 // updateVPNType reacts to Gluetun's configured protocol. When VPN_TYPE is auto
@@ -338,8 +429,8 @@ func (e *Engine) updateVPNType(vpnType string) {
 func (e *Engine) currentHostname() (hostname, source string) {
 	snapshot := e.Snapshot()
 
-	if snapshot.Gluetun.PublicIP != "" {
-		if address, err := netip.ParseAddr(snapshot.Gluetun.PublicIP); err == nil {
+	if snapshot.Gluetun.Exit.IP != "" {
+		if address, err := netip.ParseAddr(snapshot.Gluetun.Exit.IP); err == nil {
 			// Search the wide set, not just the allowed one: a tunnel sitting on
 			// an over-loaded or out-of-country server is exactly the case worth
 			// reporting accurately, and it is what triggers a switch.

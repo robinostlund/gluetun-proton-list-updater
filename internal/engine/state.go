@@ -47,10 +47,16 @@ type persistedState struct {
 	// PinnedHostname is the server this tool last asked Gluetun to use. On
 	// startup it is what lets the tool recognise that the tunnel is already
 	// where it wants it, instead of reconnecting for no reason.
-	PinnedHostname string         `json:"pinned_hostname,omitempty"`
-	LastSwitchAt   time.Time      `json:"last_switch_at"`
-	AutoSwitch     *bool          `json:"auto_switch,omitempty"`
-	History        []SwitchRecord `json:"history,omitempty"`
+	PinnedHostname string    `json:"pinned_hostname,omitempty"`
+	LastSwitchAt   time.Time `json:"last_switch_at"`
+	AutoSwitch     *bool     `json:"auto_switch,omitempty"`
+	// GluetunHadServerData records that Gluetun's own server data was seen at
+	// least once. It only ever goes from false to true: once Gluetun has proven it
+	// keeps server data on disk, a later absence is far more likely to be a
+	// transient read than a configuration change, and warning on it would be
+	// noise.
+	GluetunHadServerData bool           `json:"gluetun_had_server_data,omitempty"`
+	History              []SwitchRecord `json:"history,omitempty"`
 }
 
 // stateStore persists engine state atomically.

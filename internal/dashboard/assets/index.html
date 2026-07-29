@@ -56,16 +56,40 @@
       </article>
 
       <article class="card">
-        <h2>Gluetun</h2>
+        <h2>Gluetun tunnel</h2>
         <p id="gluetun-status" class="card-headline">–</p>
         <dl class="kv">
           <div><dt>Reachable</dt><dd id="gluetun-reachable">–</dd></div>
           <div><dt>Version</dt><dd id="gluetun-version">–</dd></div>
           <div><dt>Protocol</dt><dd id="gluetun-vpn">–</dd></div>
           <div><dt>Provider</dt><dd id="gluetun-provider">–</dd></div>
+          <div><dt>DNS</dt><dd id="gluetun-dns">–</dd></div>
           <div><dt>Last check</dt><dd id="gluetun-check">–</dd></div>
         </dl>
         <p id="gluetun-error" class="card-note error"></p>
+      </article>
+
+      <article class="card card-exit">
+        <h2>Public IP (from Gluetun)</h2>
+        <p id="exit-ip" class="card-headline">–</p>
+        <p id="exit-where" class="card-sub"></p>
+        <dl class="kv">
+          <div><dt>Organisation</dt><dd id="exit-org">–</dd></div>
+          <div><dt>Timezone</dt><dd id="exit-tz">–</dd></div>
+          <div><dt>Reverse DNS</dt><dd id="exit-hostname">–</dd></div>
+          <div><dt>Coordinates</dt><dd id="exit-location">–</dd></div>
+        </dl>
+        <p id="exit-note" class="card-note"></p>
+      </article>
+
+      <article class="card card-port">
+        <h2>Forwarded port</h2>
+        <p id="port-value" class="card-headline">–</p>
+        <dl class="kv">
+          <div><dt>Requested</dt><dd id="port-enabled">–</dd></div>
+          <div><dt>All ports</dt><dd id="port-all">–</dd></div>
+        </dl>
+        <p id="port-note" class="card-note"></p>
       </article>
 
       <article class="card">
@@ -85,8 +109,10 @@
         <h2>servers.json</h2>
         <p id="servers-count" class="card-headline">–</p>
         <dl class="kv">
-          <div><dt>Path</dt><dd id="servers-path">–</dd></div>
+          <div><dt>Layout</dt><dd id="servers-layout">–</dd></div>
+          <div><dt>Paths</dt><dd id="servers-path">–</dd></div>
           <div><dt>Mode</dt><dd id="servers-mode">–</dd></div>
+          <div><dt>Preferred</dt><dd id="servers-preferred-flag">–</dd></div>
           <div><dt>Schema version</dt><dd id="servers-schema">–</dd></div>
           <div><dt>Last write</dt><dd id="servers-write">–</dd></div>
           <div><dt>Preserved</dt><dd id="servers-preserved">–</dd></div>
@@ -102,6 +128,7 @@
           <div><dt>Failed</dt><dd id="latency-failed">–</dd></div>
           <div><dt>Best</dt><dd id="latency-best">–</dd></div>
           <div><dt>Worst</dt><dd id="latency-worst">–</dd></div>
+          <div><dt>Coverage</dt><dd id="latency-coverage">–</dd></div>
           <div><dt>Next sweep</dt><dd id="latency-next">–</dd></div>
         </dl>
       </article>
@@ -162,6 +189,13 @@
         <ol id="logs" class="logs"></ol>
       </section>
     </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Gluetun's own view <span class="muted">what its control server reports</span></h2>
+      </div>
+      <dl id="gluetun-detail" class="settings"></dl>
+    </section>
 
     <section class="panel">
       <div class="panel-head"><h2>Effective settings</h2></div>

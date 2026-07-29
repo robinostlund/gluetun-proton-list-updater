@@ -26,12 +26,21 @@ func sampleServers() []Server {
 	}
 }
 
+func legacyPaths(t *testing.T) (paths Paths, legacy string) {
+	t.Helper()
+	dir := t.TempDir()
+	legacy = filepath.Join(dir, "servers.json")
+	return Paths{Directory: filepath.Join(dir, "servers"), LegacyFile: legacy}, legacy
+}
+
 func TestWriteProducesGluetunSchema(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "servers.json")
+	paths, path := legacyPaths(t)
 	now := time.Unix(1_700_000_000, 0)
 
-	result, err := Write(sampleServers(), Options{Path: path, SchemaVersion: 4, Now: now})
+	result, err := Write(sampleServers(), Options{
+		Paths: paths, Layout: LayoutLegacy, SchemaVersion: 4, Now: now,
+	})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -68,7 +77,7 @@ func TestWriteProducesGluetunSchema(t *testing.T) {
 // provider's section.
 func TestWritePreservesOtherProviders(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "servers.json")
+	paths, path := legacyPaths(t)
 
 	existing := `{
 	  "version": 1,
@@ -80,7 +89,7 @@ func TestWritePreservesOtherProviders(t *testing.T) {
 	}
 
 	result, err := Write(sampleServers(), Options{
-		Path: path, SchemaVersion: 4, PreserveOtherProviders: true,
+		Paths: paths, Layout: LayoutLegacy, SchemaVersion: 4, PreserveOtherProviders: true,
 	})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
@@ -98,12 +107,12 @@ func TestWritePreservesOtherProviders(t *testing.T) {
 
 func TestWriteReplaceModeDropsOtherProviders(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "servers.json")
+	paths, path := legacyPaths(t)
 	if err := os.WriteFile(path, []byte(`{"version":1,"mullvad":{"version":9,"timestamp":1}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := Write(sampleServers(), Options{Path: path, SchemaVersion: 4}); err != nil {
+	if _, err := Write(sampleServers(), Options{Paths: paths, Layout: LayoutLegacy, SchemaVersion: 4}); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -118,9 +127,9 @@ func TestWriteReplaceModeDropsOtherProviders(t *testing.T) {
 // than keeping a stale file.
 func TestWriteRefusesEmptyList(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "servers.json")
+	paths, path := legacyPaths(t)
 
-	if _, err := Write(nil, Options{Path: path, SchemaVersion: 4}); err == nil {
+	if _, err := Write(nil, Options{Paths: paths, SchemaVersion: 4}); err == nil {
 		t.Fatal("expected an error for an empty server list")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -130,63 +139,250 @@ func TestWriteRefusesEmptyList(t *testing.T) {
 
 func TestWriteRefusesZeroSchemaVersion(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "servers.json")
-	if _, err := Write(sampleServers(), Options{Path: path}); err == nil {
+	paths, _ := legacyPaths(t)
+	if _, err := Write(sampleServers(), Options{Paths: paths}); err == nil {
 		t.Fatal("expected an error for a zero schema version")
 	}
 }
 
-// The schema version must be read back from whatever Gluetun wrote, since it
+// The schema version must be read back from whatever Gluetun wrote, because it
 // changes between Gluetun releases.
 func TestDetectSchemaVersion(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
 
-	tests := map[string]struct {
-		content     string
-		wantVersion uint16
-		wantFound   bool
-		wantErr     bool
-	}{
-		"present":         {content: `{"version":1,"protonvpn":{"version":7,"timestamp":1}}`, wantVersion: 7, wantFound: true},
-		"provider absent": {content: `{"version":1,"mullvad":{"version":9}}`},
-		"empty file":      {content: ``},
-		"zero version":    {content: `{"version":1,"protonvpn":{"timestamp":1}}`},
-		"invalid json":    {content: `{`, wantErr: true},
+	t.Run("from the per-provider file", func(t *testing.T) {
+		dir := t.TempDir()
+		serversDir := filepath.Join(dir, "servers")
+		if err := os.MkdirAll(serversDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(serversDir, "protonvpn.json"),
+			[]byte(`{"version":7,"timestamp":1,"servers":[]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		version, source, err := DetectSchemaVersion(Paths{
+			Directory: serversDir, LegacyFile: filepath.Join(dir, "servers.json"),
+		})
+		if err != nil {
+			t.Fatalf("DetectSchemaVersion: %v", err)
+		}
+		if version != 7 {
+			t.Errorf("version = %d, want 7", version)
+		}
+		if source == "" {
+			t.Error("source should name the file it came from")
+		}
+	})
+
+	t.Run("from the legacy file", func(t *testing.T) {
+		dir := t.TempDir()
+		legacy := filepath.Join(dir, "servers.json")
+		if err := os.WriteFile(legacy,
+			[]byte(`{"version":1,"protonvpn":{"version":5,"timestamp":1}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		version, _, err := DetectSchemaVersion(Paths{
+			Directory: filepath.Join(dir, "servers"), LegacyFile: legacy,
+		})
+		if err != nil {
+			t.Fatalf("DetectSchemaVersion: %v", err)
+		}
+		if version != 5 {
+			t.Errorf("version = %d, want 5", version)
+		}
+	})
+
+	// The per-provider file wins: on a migrated Gluetun the legacy file may still
+	// exist but be stale.
+	t.Run("per-provider file takes precedence", func(t *testing.T) {
+		dir := t.TempDir()
+		serversDir := filepath.Join(dir, "servers")
+		if err := os.MkdirAll(serversDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(serversDir, "protonvpn.json"),
+			[]byte(`{"version":9,"timestamp":1,"servers":[]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		legacy := filepath.Join(dir, "servers.json")
+		if err := os.WriteFile(legacy,
+			[]byte(`{"version":1,"protonvpn":{"version":3,"timestamp":1}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		version, _, err := DetectSchemaVersion(Paths{Directory: serversDir, LegacyFile: legacy})
+		if err != nil {
+			t.Fatalf("DetectSchemaVersion: %v", err)
+		}
+		if version != 9 {
+			t.Errorf("version = %d, want 9 from the per-provider file", version)
+		}
+	})
+
+	t.Run("nothing written yet", func(t *testing.T) {
+		dir := t.TempDir()
+		version, _, err := DetectSchemaVersion(Paths{
+			Directory: filepath.Join(dir, "servers"), LegacyFile: filepath.Join(dir, "servers.json"),
+		})
+		if err != nil {
+			t.Fatalf("DetectSchemaVersion: %v", err)
+		}
+		if version != 0 {
+			t.Errorf("version = %d, want 0 when Gluetun has written nothing", version)
+		}
+	})
+}
+
+// Which layout Gluetun uses decides where the data must go. Getting this wrong
+// means writing a file a current Gluetun never reads.
+func TestDetectLayout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("directory when a manifest exists", func(t *testing.T) {
+		dir := t.TempDir()
+		serversDir := filepath.Join(dir, "servers")
+		if err := os.MkdirAll(serversDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(serversDir, "manifest.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// A legacy file left over from before a migration must not win.
+		legacy := filepath.Join(dir, "servers.json")
+		if err := os.WriteFile(legacy, []byte(`{"version":1}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := DetectLayout(Paths{Directory: serversDir, LegacyFile: legacy}); got != LayoutDirectory {
+			t.Errorf("layout = %q, want directory", got)
+		}
+	})
+
+	t.Run("legacy when only the fat file exists", func(t *testing.T) {
+		dir := t.TempDir()
+		legacy := filepath.Join(dir, "servers.json")
+		if err := os.WriteFile(legacy, []byte(`{"version":1}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := DetectLayout(Paths{Directory: filepath.Join(dir, "servers"), LegacyFile: legacy}); got != LayoutLegacy {
+			t.Errorf("layout = %q, want legacy", got)
+		}
+	})
+
+	t.Run("both when Gluetun has not run yet", func(t *testing.T) {
+		dir := t.TempDir()
+		got := DetectLayout(Paths{
+			Directory: filepath.Join(dir, "servers"), LegacyFile: filepath.Join(dir, "servers.json"),
+		})
+		if got != LayoutBoth {
+			t.Errorf("layout = %q, want both", got)
+		}
+	})
+}
+
+// Current Gluetun reads /gluetun/servers/protonvpn.json and ignores the legacy
+// file entirely, so this is the path that matters most.
+func TestWriteDirectoryLayout(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	paths := Paths{
+		Directory:  filepath.Join(dir, "servers"),
+		LegacyFile: filepath.Join(dir, "servers.json"),
 	}
 
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(directory, name+".json")
-			if err := os.WriteFile(path, []byte(test.content), 0o644); err != nil {
-				t.Fatal(err)
-			}
+	result, err := Write(sampleServers(), Options{
+		Paths: paths, Layout: LayoutDirectory, SchemaVersion: 4, Preferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if result.Layout != LayoutDirectory {
+		t.Errorf("layout = %q", result.Layout)
+	}
+	if len(result.Written) != 1 || result.Written[0] != paths.ProviderPath() {
+		t.Errorf("written = %v, want just the per-provider file", result.Written)
+	}
+	// The legacy file must not be created: doing so on a migrated Gluetun would
+	// resurrect a file it deliberately removed.
+	if _, err := os.Stat(paths.LegacyFile); !os.IsNotExist(err) {
+		t.Error("the legacy file should not be written in directory layout")
+	}
 
-			version, found, err := DetectSchemaVersion(path)
-			if test.wantErr {
-				if err == nil {
-					t.Fatal("expected an error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("DetectSchemaVersion: %v", err)
-			}
-			if found != test.wantFound || version != test.wantVersion {
-				t.Errorf("got (%d, %v), want (%d, %v)", version, found, test.wantVersion, test.wantFound)
-			}
-		})
+	var section struct {
+		Version   uint16   `json:"version"`
+		Timestamp int64    `json:"timestamp"`
+		Preferred bool     `json:"preferred"`
+		Servers   []Server `json:"servers"`
+	}
+	readJSON(t, paths.ProviderPath(), &section)
+
+	if section.Version != 4 {
+		t.Errorf("version = %d, want 4", section.Version)
+	}
+	// preferred makes Gluetun use our list regardless of timestamps.
+	if !section.Preferred {
+		t.Error("preferred should be set")
+	}
+	if len(section.Servers) != 2 {
+		t.Errorf("servers = %d, want 2", len(section.Servers))
+	}
+	// There is no top-level "version" key in a per-provider file.
+	var raw map[string]json.RawMessage
+	readJSON(t, paths.ProviderPath(), &raw)
+	if _, present := raw["protonvpn"]; present {
+		t.Error("a per-provider file must not be wrapped in a provider key")
 	}
 }
 
-func TestDetectSchemaVersionMissingFile(t *testing.T) {
+// On a fresh volume neither layout exists yet, so both are written and whichever
+// Gluetun starts finds data it understands.
+func TestWriteBothLayouts(t *testing.T) {
 	t.Parallel()
-	_, found, err := DetectSchemaVersion(filepath.Join(t.TempDir(), "absent.json"))
-	if err != nil {
-		t.Fatalf("DetectSchemaVersion: %v", err)
+
+	dir := t.TempDir()
+	paths := Paths{
+		Directory:  filepath.Join(dir, "servers"),
+		LegacyFile: filepath.Join(dir, "servers.json"),
 	}
-	if found {
-		t.Error("found should be false for a missing file")
+
+	result, err := Write(sampleServers(), Options{Paths: paths, SchemaVersion: 4, Preferred: true})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if result.Layout != LayoutBoth {
+		t.Errorf("layout = %q, want both", result.Layout)
+	}
+	for _, path := range []string{paths.ProviderPath(), paths.LegacyFile} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was not written: %v", path, err)
+		}
+	}
+}
+
+func TestWritePreferredFlagIsOmittedWhenFalse(t *testing.T) {
+	t.Parallel()
+
+	paths, _ := legacyPaths(t)
+	if _, err := Write(sampleServers(), Options{
+		Paths: paths, Layout: LayoutLegacy, SchemaVersion: 4, Preferred: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The top-level "version" is a number, so the file is decoded loosely and only
+	// the provider section is inspected.
+	var file map[string]json.RawMessage
+	readJSON(t, paths.LegacyFile, &file)
+
+	var section map[string]any
+	if err := json.Unmarshal(file["protonvpn"], &section); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := section["preferred"]; present {
+		t.Error("preferred should be omitted when false, matching Gluetun's own encoding")
 	}
 }
 
@@ -242,5 +438,63 @@ func readJSON(t *testing.T, path string, value any) {
 	}
 	if err := json.Unmarshal(data, value); err != nil {
 		t.Fatalf("decoding %s: %v", path, err)
+	}
+}
+
+// Regression test: a second run must not mistake its own output for Gluetun's.
+//
+// File existence alone cannot distinguish them, because this tool writes into the
+// same locations. Getting this wrong meant a restart concluded that Gluetun kept
+// server data on disk when it did not.
+func TestHasGluetunDataIgnoresOurOwnWrites(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	paths := Paths{
+		Directory:  filepath.Join(dir, "servers"),
+		LegacyFile: filepath.Join(dir, "servers.json"),
+	}
+
+	if HasGluetunData(paths) {
+		t.Error("nothing written yet, so there is no Gluetun data")
+	}
+
+	// Write exactly what this tool writes, to both layouts.
+	if _, err := Write(sampleServers(), Options{
+		Paths: paths, Layout: LayoutBoth, SchemaVersion: 4, Preferred: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if HasGluetunData(paths) {
+		t.Error("our own files must not count as Gluetun's server data")
+	}
+
+	// A manifest is written only by Gluetun, so it is conclusive.
+	if err := os.WriteFile(paths.ManifestPath(), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !HasGluetunData(paths) {
+		t.Error("a manifest means Gluetun keeps server data on disk")
+	}
+}
+
+// The other signal: Gluetun writes every provider it knows, this tool writes only
+// protonvpn.
+func TestHasGluetunDataDetectsOtherProviders(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	paths := Paths{
+		Directory:  filepath.Join(dir, "servers"),
+		LegacyFile: filepath.Join(dir, "servers.json"),
+	}
+
+	if err := os.WriteFile(paths.LegacyFile,
+		[]byte(`{"version":1,"protonvpn":{"version":4,"timestamp":1},"mullvad":{"version":9,"timestamp":1}}`),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !HasGluetunData(paths) {
+		t.Error("a provider other than protonvpn can only have come from Gluetun")
 	}
 }

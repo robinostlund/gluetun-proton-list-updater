@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,6 +43,9 @@ type fakeGluetun struct {
 	// statusPuts records PUT /v1/vpn/status bodies in order, so the stop-then-
 	// start sequence of a plain reconnect can be asserted.
 	statusPuts []string
+	// settingsDelay makes PUT /v1/vpn/settings answer slowly while still applying
+	// the change, which is how a real Gluetun behaves while its VPN loop restarts.
+	settingsDelay time.Duration
 }
 
 func newFakeGluetun(publicIP string, exitIPs map[string]string) *fakeGluetun {
@@ -110,6 +115,13 @@ func (f *fakeGluetun) handler() http.Handler {
 		if len(hostnames) != 1 {
 			http.Error(w, "expected exactly one hostname", http.StatusBadRequest)
 			return
+		}
+
+		f.mu.Lock()
+		delay := f.settingsDelay
+		f.mu.Unlock()
+		if delay > 0 {
+			time.Sleep(delay)
 		}
 
 		f.mu.Lock()
@@ -222,7 +234,19 @@ func newHarness(t *testing.T, protonFailing bool, mutate func(cfg *config.Config
 
 	stateDir := t.TempDir()
 	seedSession(t, stateDir)
-	filePath := filepath.Join(t.TempDir(), "servers.json")
+
+	gluetunDir := t.TempDir()
+	filePath := filepath.Join(gluetunDir, "servers.json")
+	serversDir := filepath.Join(gluetunDir, "servers")
+
+	// A real Gluetun writes its own server data on startup, covering every
+	// provider it knows. Modelling that matters: its absence is how the engine
+	// detects a Gluetun that keeps no server data on disk, and a fake that never
+	// writes anything would make every test look like that case.
+	if err := os.WriteFile(filePath,
+		[]byte(`{"version":1,"mullvad":{"version":9,"timestamp":1,"servers":[]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	fake := newFakeGluetun("81.0.0.1", map[string]string{
 		"se-01.protonvpn.net": "81.0.0.1",
@@ -245,8 +269,12 @@ func newHarness(t *testing.T, protonFailing bool, mutate func(cfg *config.Config
 		Gluetun: config.Gluetun{
 			BaseURL: gluetunServer.URL, RequestTimeout: 5 * time.Second,
 			HealthInterval: time.Hour, UpdaterTimeout: 20 * time.Second,
+			MutationTimeout: 30 * time.Second,
 		},
-		Servers: config.Servers{FilePath: filePath, WriteMode: config.WriteModeUpdate},
+		Servers: config.Servers{
+			FilePath: filePath, DirPath: serversDir,
+			WriteMode: config.WriteModeUpdate, Preferred: true,
+		},
 		Filter: config.Filter{
 			Countries: []string{"Sweden"}, MaxLoad: 90, VPNType: "auto",
 			SecureCore: config.FilterExclude, Tor: config.FilterExclude,
@@ -281,8 +309,12 @@ func newHarness(t *testing.T, protonFailing bool, mutate func(cfg *config.Config
 	core, err := New(Options{
 		Config: cfg, Logger: quietLogger(), Version: "test",
 		Proton: protonClient,
+		// Real timeouts rather than an injected client, so tests can exercise a
+		// state change that does not answer in time.
 		Gluetun: gluetunapi.New(gluetunapi.Options{
-			BaseURL: cfg.Gluetun.BaseURL, HTTPClient: gluetunServer.Client(),
+			BaseURL:         cfg.Gluetun.BaseURL,
+			Timeout:         cfg.Gluetun.RequestTimeout,
+			MutationTimeout: cfg.Gluetun.MutationTimeout,
 		}),
 	})
 	if err != nil {
@@ -362,8 +394,7 @@ func TestEngineWritesServersFile(t *testing.T) {
 	harness := newHarness(t, false, nil)
 
 	harness.run(t, func() bool {
-		_, err := os.Stat(harness.filePath)
-		return err == nil
+		return !harness.engine.Snapshot().Servers.LastWrite.IsZero()
 	})
 
 	var file struct {
@@ -768,8 +799,7 @@ func TestEngineReconnectModeNoneNeverTouchesTheTunnel(t *testing.T) {
 	})
 
 	harness.run(t, func() bool {
-		_, err := os.Stat(harness.filePath)
-		return err == nil
+		return !harness.engine.Snapshot().Servers.LastWrite.IsZero()
 	})
 
 	if pinned := harness.gluetun.pinnedHostnames(); len(pinned) != 0 {
@@ -874,4 +904,161 @@ func TestSubscriberSetNotifiesAndUnsubscribes(t *testing.T) {
 	}
 	// Cancelling twice must not panic on a double close.
 	cancel()
+}
+
+// Probe selection must not depend on latency, or it becomes self-reinforcing:
+// an unprobed server carries the unknown-latency penalty, which pushes it down
+// the ranking, which keeps it outside the probe budget, so it never gets probed
+// even when its load is better than that of servers being probed.
+func TestProbeTargetsAreChosenWithoutLatencyBias(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Score.LatencyWeight = 0.7
+		cfg.Score.UnknownLatencyPenalty = 0.5
+	})
+	engine := harness.engine
+
+	// Two candidates: the quieter one has never been probed, the busier one has a
+	// good measurement. By full score the busy-but-measured server wins, so a
+	// score-ordered budget of one would keep probing it and never touch the other.
+	quietUnprobed := catalog.Candidate{
+		Hostname: "quiet.protonvpn.net", Load: 20,
+		EntryIP: netip.MustParseAddr("10.9.0.1"),
+	}
+	busyProbed := catalog.Candidate{
+		Hostname: "busy.protonvpn.net", Load: 45,
+		EntryIP: netip.MustParseAddr("10.9.0.2"),
+	}
+	engine.candidates = []catalog.Candidate{quietUnprobed, busyProbed}
+	engine.prober.Record(busyProbed.EntryIP, 5*time.Millisecond)
+	engine.rerank()
+
+	// Confirm the premise: by full score the measured, busier server ranks first.
+	if engine.ranked[0].Candidate.Hostname != "busy.protonvpn.net" {
+		t.Fatalf("premise failed: expected the probed server to rank first, got %q",
+			engine.ranked[0].Candidate.Hostname)
+	}
+
+	// With a budget of one, the unprobed-but-quieter server must still be chosen.
+	targets := engine.entryIPs(1)
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want 1", len(targets))
+	}
+	if targets[0] != quietUnprobed.EntryIP {
+		t.Errorf("probe target = %s, want the quieter unprobed server %s",
+			targets[0], quietUnprobed.EntryIP)
+	}
+}
+
+// STORAGE_SERVERS_ENABLED=yes is a requirement, so an unmet one has to be
+// reported rather than warned about once and forgotten. The health check is what
+// makes it visible to Docker and to any monitoring.
+func TestHealthyReportsServerDataThatGluetunIgnores(t *testing.T) {
+	t.Parallel()
+
+	harness := newHarness(t, false, nil)
+	engine := harness.engine
+
+	// Give it candidates so the other health condition is satisfied.
+	engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.CandidatesTotal = 5 })
+	if healthy, reason := engine.Healthy(); !healthy {
+		t.Fatalf("expected healthy, got %q", reason)
+	}
+
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Servers.Ignored = true
+		snapshot.Servers.IgnoredReason = "storage disabled"
+	})
+
+	healthy, reason := engine.Healthy()
+	if healthy {
+		t.Error("writing server data nothing reads must be unhealthy")
+	}
+	if !strings.Contains(reason, "not reading") {
+		t.Errorf("reason = %q, want it to explain the problem", reason)
+	}
+}
+
+// The warning must not fire while Gluetun is merely down, which is a condition
+// the tool is built to survive.
+func TestIgnoredServerDataIsNotReportedWhileGluetunIsDown(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Gluetun.BaseURL = "http://127.0.0.1:1" // nothing listening
+	})
+
+	harness.run(t, func() bool { return harness.engine.Snapshot().CandidatesTotal > 0 })
+
+	snapshot := harness.engine.Snapshot()
+	if snapshot.Servers.Ignored {
+		t.Error("an unreachable Gluetun must not be reported as ignoring the server data")
+	}
+	// And the tool stays healthy: a Gluetun outage is survivable by design.
+	if healthy, reason := harness.engine.Healthy(); !healthy {
+		t.Errorf("a Gluetun outage must not make the tool unhealthy, got %q", reason)
+	}
+}
+
+// A crashed tunnel is actionable, not something to wait out: Gluetun cannot
+// connect with its current selection, and moving to another server is usually
+// what fixes it. Only a deliberately stopped tunnel is left alone.
+func TestEngineMovesACrashedTunnel(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.status = gluetunapi.StatusCrashed
+
+	harness.run(t, func() bool {
+		return len(harness.gluetun.pinnedHostnames()) > 0
+	})
+
+	if pinned := harness.gluetun.pinnedHostnames(); pinned[0] != "se-02.protonvpn.net" {
+		t.Errorf("pinned %v, want the best server", pinned)
+	}
+}
+
+// Gluetun answers a state change only once its VPN loop has restarted, which can
+// outlast any sane timeout. The outcome is then unknown rather than failed, so it
+// must be verified instead of re-sent - re-sending would cause a second,
+// pointless reconnect.
+func TestEngineVerifiesInsteadOfRetryingAfterASlowStateChange(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Gluetun.MutationTimeout = 200 * time.Millisecond
+	})
+	// The request outlasts the timeout but still applies, exactly as Gluetun does.
+	harness.gluetun.settingsDelay = 600 * time.Millisecond
+
+	harness.run(t, func() bool {
+		history := harness.engine.Snapshot().History
+		return len(history) > 0 && history[0].Succeeded
+	})
+
+	// Verification, not a retry: the hostname must have been sent exactly once.
+	pinned := harness.gluetun.pinnedHostnames()
+	if len(pinned) != 1 {
+		t.Errorf("pinned %v, want exactly one request - a timeout must not be re-sent", pinned)
+	}
+	if pinned[0] != "se-02.protonvpn.net" {
+		t.Errorf("pinned %v, want se-02", pinned)
+	}
+}
+
+// The other health failure: unable to write the server data at all.
+func TestHealthyReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	engine := newHarness(t, false, nil).engine
+	engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.CandidatesTotal = 5 })
+
+	if healthy, reason := engine.Healthy(); !healthy {
+		t.Fatalf("expected healthy, got %q", reason)
+	}
+
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Servers.LastError = "permission denied"
+	})
+
+	healthy, reason := engine.Healthy()
+	if healthy {
+		t.Error("being unable to write the server data must be unhealthy")
+	}
+	if !strings.Contains(reason, "permission denied") {
+		t.Errorf("reason = %q, want the underlying error", reason)
+	}
 }

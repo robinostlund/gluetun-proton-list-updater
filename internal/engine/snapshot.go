@@ -54,33 +54,85 @@ type ProtonStatus struct {
 	FromCache bool `json:"from_cache"`
 }
 
-// GluetunStatus reports the state of the Gluetun side.
+// GluetunStatus is everything this tool reads from Gluetun's control server,
+// surfaced as-is. It is deliberately complete: when something is wrong, the
+// answer is almost always visible in one of these values, and having to reach
+// for curl to see them is a poor experience.
 type GluetunStatus struct {
-	Reachable     bool      `json:"reachable"`
-	Status        string    `json:"status"`
-	Version       string    `json:"version"`
-	VPNType       string    `json:"vpn_type"`
-	Provider      string    `json:"provider"`
-	PublicIP      string    `json:"public_ip"`
-	Country       string    `json:"country"`
-	City          string    `json:"city"`
-	ForwardedPort uint16    `json:"forwarded_port"`
-	LastCheck     time.Time `json:"last_check"`
-	LastError     string    `json:"last_error,omitempty"`
+	Reachable bool   `json:"reachable"`
+	Status    string `json:"status"`
+	// Version, Commit and Created come from GET /v1/version. The version also
+	// determines the storage layout and schema version, so it is load-bearing.
+	Version  string `json:"version"`
+	Commit   string `json:"commit,omitempty"`
+	Created  string `json:"created,omitempty"`
+	VPNType  string `json:"vpn_type"`
+	Provider string `json:"provider"`
+	// Exit is Gluetun's own view of where traffic comes out, from
+	// GET /v1/publicip/ip.
+	Exit ExitInfo `json:"exit"`
+	// ForwardedPorts is what Proton forwarded, from GET /v1/portforward.
+	ForwardedPorts []uint16 `json:"forwarded_ports,omitempty"`
+	// PortForwardingEnabled distinguishes "no port yet" from "not requested".
+	PortForwardingEnabled *bool `json:"port_forwarding_enabled,omitempty"`
+	// DNSStatus is Gluetun's DNS-over-TLS resolver state, from
+	// GET /v1/dns/status.
+	DNSStatus string `json:"dns_status,omitempty"`
+	// UpdaterStatus is Gluetun's own server-list updater state, from
+	// GET /v1/updater/status.
+	UpdaterStatus string `json:"updater_status,omitempty"`
+	// Selection is the filter set Gluetun is currently applying, which is often
+	// the reason a particular server was refused.
+	Selection map[string][]string `json:"selection,omitempty"`
+	LastCheck time.Time           `json:"last_check"`
+	LastError string              `json:"last_error,omitempty"`
 	// ProviderMismatch warns that Gluetun is not configured for ProtonVPN, in
 	// which case none of this tool's work can take effect.
 	ProviderMismatch bool `json:"provider_mismatch"`
+	// SettingsReadable is false when GET /v1/vpn/settings is refused, which
+	// happens with Gluetun's default control-server role and also means
+	// hostname pinning will be refused.
+	SettingsReadable bool `json:"settings_readable"`
 }
 
-// ServersStatus reports what was last written to servers.json.
+// ExitInfo is Gluetun's public-IP report.
+type ExitInfo struct {
+	IP           string `json:"ip,omitempty"`
+	Country      string `json:"country,omitempty"`
+	Region       string `json:"region,omitempty"`
+	City         string `json:"city,omitempty"`
+	Hostname     string `json:"hostname,omitempty"`
+	Location     string `json:"location,omitempty"`
+	Organization string `json:"organization,omitempty"`
+	PostalCode   string `json:"postal_code,omitempty"`
+	Timezone     string `json:"timezone,omitempty"`
+}
+
+// ServersStatus reports what was last written for Gluetun to read.
 type ServersStatus struct {
-	Path          string    `json:"path"`
-	WriteMode     string    `json:"write_mode"`
+	// Path is the configured legacy file, kept for display.
+	Path      string `json:"path"`
+	WriteMode string `json:"write_mode"`
+	// Layout is the Gluetun storage layout that was detected: "directory" for
+	// current versions, "legacy" for v3.41.1 and earlier, "both" when Gluetun has
+	// not written anything yet.
+	Layout string `json:"layout"`
+	// Paths lists the files actually written.
+	Paths []string `json:"paths,omitempty"`
+	// Preferred reports whether Gluetun's "preferred" flag was set, which makes
+	// it use our servers regardless of timestamps.
+	Preferred     bool      `json:"preferred"`
 	SchemaVersion uint16    `json:"schema_version"`
 	LastWrite     time.Time `json:"last_write"`
 	ServerCount   int       `json:"server_count"`
 	PreservedKeys []string  `json:"preserved_keys,omitempty"`
 	LastError     string    `json:"last_error,omitempty"`
+	// Ignored is true when Gluetun is running but keeps no server data on disk,
+	// so nothing written here can have any effect. Server switching still works,
+	// but only across the servers Gluetun has built in.
+	Ignored bool `json:"ignored"`
+	// IgnoredReason explains what to change.
+	IgnoredReason string `json:"ignored_reason,omitempty"`
 }
 
 // SelectionStatus reports the current and desired server.

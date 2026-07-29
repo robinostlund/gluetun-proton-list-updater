@@ -297,3 +297,9 @@ func itoa(value int) string {
 	}
 	return string(digits[index:])
 }
+
+// Record stores a measurement directly. It exists for tests and for seeding a
+// prober from persisted data; normal operation goes through Probe.
+func (p *Prober) Record(address netip.Addr, rtt time.Duration) {
+	p.record(address.String(), Result{RTT: rtt, MeasuredAt: time.Now(), Samples: 1})
+}

@@ -203,7 +203,7 @@ func (e *Engine) performSwitch(ctx context.Context, previousHostname string,
 func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 	previousHostname string, previous scoring.Scored, havePrevious bool, reason string,
 ) (switched bool) {
-	previousIP := e.Snapshot().Gluetun.PublicIP
+	previousIP := e.Snapshot().Gluetun.Exit.IP
 	rejections := 0
 
 	for attempt, target := range candidates {
@@ -258,7 +258,7 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 		e.mutateSnapshot(func(snapshot *Snapshot) {
 			snapshot.Selection.NeedsGluetunRestart = false
 			snapshot.Selection.LastError = ""
-			snapshot.Gluetun.PublicIP = publicIP
+			snapshot.Gluetun.Exit.IP = publicIP
 		})
 		e.logger.Info("switched server",
 			"hostname", target.Candidate.Hostname,
@@ -482,7 +482,7 @@ func (e *Engine) switchTo(ctx context.Context, hostname string) (err error) {
 		e.publish()
 	}()
 
-	previousIP := e.Snapshot().Gluetun.PublicIP
+	previousIP := e.Snapshot().Gluetun.Exit.IP
 	outcome, err := e.applyTarget(ctx, target)
 	if errors.Is(err, gluetunapi.ErrRejected) {
 		// The operator picked a specific server, so rather than silently
@@ -506,7 +506,7 @@ func (e *Engine) switchTo(ctx context.Context, hostname string) (err error) {
 	}
 
 	e.mutateSnapshot(func(snapshot *Snapshot) {
-		snapshot.Gluetun.PublicIP = publicIP
+		snapshot.Gluetun.Exit.IP = publicIP
 		snapshot.Selection.LastError = ""
 	})
 	e.logger.Info("switched to requested server", "hostname", hostname, "public_ip", publicIP)

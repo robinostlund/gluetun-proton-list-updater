@@ -62,6 +62,9 @@ function render() {
   renderCurrent();
   renderBest();
   renderGluetun();
+  renderExit();
+  renderPort();
+  renderGluetunDetail();
   renderProton();
   renderServersFile();
   renderLatency();
@@ -110,6 +113,21 @@ function renderAlerts() {
       ${escapeHTML(snapshot.gluetun.last_error || '')}
     </div></div>`);
   }
+  if (snapshot.servers_file.ignored) {
+    alerts.push(`<div class="alert alert-bad"><div>
+      <strong>Gluetun is not reading the server list written here</strong>
+      ${escapeHTML(snapshot.servers_file.ignored_reason || '')}
+    </div></div>`);
+  }
+  if (snapshot.gluetun.reachable && !snapshot.gluetun.settings_readable) {
+    alerts.push(`<div class="alert alert-bad"><div>
+      <strong>Gluetun will not let this tool read or change its settings</strong>
+      GET /v1/vpn/settings was refused, so PUT will be too and no server can be pinned.
+      Gluetun's default control-server role excludes those routes — set
+      <code>HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE</code> on the Gluetun container and give this
+      container the matching <code>GLUETUN_API_KEY</code>.
+    </div></div>`);
+  }
   if (snapshot.proton.from_cache) {
     alerts.push(`<div class="alert alert-warn"><div>
       <strong>Using the cached server list</strong>
@@ -142,8 +160,9 @@ function renderCurrent() {
   text('current-rank', current && current.rank
     ? `#${current.rank} of ${snapshot.candidates_total}`
     : current && current.excluded ? 'not in allowed set' : '–');
-  text('current-ip', gluetun.public_ip || '–');
-  text('current-port', gluetun.forwarded_port ? String(gluetun.forwarded_port) : 'none');
+  text('current-ip', (gluetun.exit && gluetun.exit.ip) || '–');
+  const ports = gluetun.forwarded_ports || [];
+  text('current-port', ports.length ? ports.join(', ') : 'none');
 
   const sources = {
     'pinned': 'Identified by the hostname this tool pinned in Gluetun.',
@@ -183,11 +202,99 @@ function renderGluetun() {
   text('gluetun-version', gluetun.version || '–');
   text('gluetun-vpn', gluetun.vpn_type || '–');
   text('gluetun-provider', gluetun.provider || '–');
+  text('gluetun-dns', gluetun.dns_status || '–');
   text('gluetun-check', timeAgo(gluetun.last_check));
   text('gluetun-error', gluetun.reachable ? (gluetun.last_error || '') : '');
 
   const stream = el('stream-state');
   stream.className = 'pill ' + (gluetun.status === 'running' ? 'pill-good' : 'pill-bad');
+}
+
+// Gluetun's public IP report: this is the exit address the internet actually
+// sees, which is the definitive answer to "where am I coming out?".
+function renderExit() {
+  const exit = snapshot.gluetun.exit || {};
+  const running = snapshot.gluetun.status === 'running';
+
+  text('exit-ip', exit.ip || (running ? 'not reported yet' : '—'));
+  const place = [exit.city, exit.region, exit.country].filter(Boolean).join(', ');
+  text('exit-where', place || (running ? '' : 'Tunnel is not running'));
+  text('exit-org', exit.organization || '–');
+  text('exit-tz', exit.timezone || '–');
+  text('exit-hostname', exit.hostname || '–');
+  text('exit-location', exit.location || '–');
+
+  let note = '';
+  if (!running) {
+    note = 'Only queried while the tunnel is running: with it down, Gluetun would report your real address.';
+  } else if (!exit.ip) {
+    note = 'Gluetun has not resolved the public IP yet.';
+  } else {
+    const current = snapshot.selection.current;
+    if (current && current.exit_ip && current.exit_ip === exit.ip) {
+      note = `Matches ${current.server_name}'s Proton exit address, which is how the current server is identified.`;
+    }
+  }
+  text('exit-note', note);
+}
+
+// Proton only forwards ports on P2P servers, and only when Gluetun asks. Showing
+// whether it was requested separates "not yet" from "never will be".
+function renderPort() {
+  const gluetun = snapshot.gluetun;
+  const ports = gluetun.forwarded_ports || [];
+  const requested = gluetun.port_forwarding_enabled;
+
+  text('port-value', ports.length ? String(ports[0]) : 'none');
+  el('port-enabled').innerHTML = requested === undefined || requested === null
+    ? '<span class="muted">unknown</span>'
+    : boolMark(requested);
+  text('port-all', ports.length ? ports.join(', ') : '–');
+
+  let note = '';
+  if (requested === false) {
+    note = 'Gluetun is not requesting a forwarded port (VPN_PORT_FORWARDING is off).';
+  } else if (!ports.length && gluetun.status === 'running') {
+    const current = snapshot.selection.current;
+    note = current && !current.p2p
+      ? 'The current server is not P2P-enabled, and Proton only forwards ports on those.'
+      : 'No port forwarded yet; Proton can take a moment after connecting.';
+  }
+  text('port-note', note);
+}
+
+// Everything else Gluetun's API reports, including the filters it is enforcing -
+// which is usually the reason a specific server was refused.
+function renderGluetunDetail() {
+  const gluetun = snapshot.gluetun;
+  const entries = [
+    ['Control server', gluetun.reachable ? 'reachable' : 'unreachable'],
+    ['Tunnel status', gluetun.status || 'unknown'],
+    ['Version', gluetun.version || '–'],
+    ['Commit', gluetun.commit || '–'],
+    ['Built', gluetun.created || '–'],
+    ['VPN type', gluetun.vpn_type || '–'],
+    ['Provider', gluetun.provider || '–'],
+    ['DNS status', gluetun.dns_status || '–'],
+    ["Gluetun's own updater", gluetun.updater_status || '–'],
+    ['Settings readable', gluetun.settings_readable ? 'yes' : 'no — PUT /v1/vpn/settings will also be refused'],
+    ['Public IP', (gluetun.exit && gluetun.exit.ip) || '–'],
+    ['Forwarded ports', (gluetun.forwarded_ports || []).join(', ') || 'none'],
+    ['Servers layout', snapshot.servers_file.layout || '–'],
+    ['Servers written to', (snapshot.servers_file.paths || []).join(', ') || '–'],
+    ['Preferred flag', snapshot.servers_file.preferred ? 'yes' : 'no'],
+    ['Schema version', String(snapshot.servers_file.schema_version || '–')],
+  ];
+
+  // Gluetun's active server filters, which are ANDed with anything we pin.
+  const selection = gluetun.selection || {};
+  for (const [key, values] of Object.entries(selection)) {
+    entries.push([`Filter: ${key}`, values.join(', ')]);
+  }
+
+  el('gluetun-detail').innerHTML = entries
+    .map(([key, value]) => `<div><dt>${escapeHTML(key)}</dt><dd>${escapeHTML(value)}</dd></div>`)
+    .join('');
 }
 
 function renderProton() {
@@ -204,12 +311,14 @@ function renderProton() {
 function renderServersFile() {
   const servers = snapshot.servers_file;
   text('servers-count', `${servers.server_count} entries`);
-  text('servers-path', servers.path);
+  text('servers-layout', servers.ignored ? `${servers.layout || '–'} (ignored)` : (servers.layout || '–'));
+  text('servers-path', (servers.paths || [servers.path]).join(', '));
+  el('servers-preferred-flag').innerHTML = boolMark(servers.preferred);
   text('servers-mode', servers.write_mode);
   text('servers-schema', String(servers.schema_version));
   text('servers-write', timeAgo(servers.last_write));
   text('servers-preserved', (servers.preserved_keys || []).join(', ') || 'none');
-  text('servers-error', servers.last_error || '');
+  text('servers-error', servers.last_error || (servers.ignored ? 'Gluetun keeps no server data on disk, so this is not read.' : ''));
 }
 
 function renderLatency() {
@@ -220,6 +329,11 @@ function renderLatency() {
   text('latency-best', nanos(latency.best_ns));
   text('latency-worst', nanos(latency.worst_ns));
   text('latency-next', snapshot.next_runs.latency || '–');
+
+  // Coverage tells the operator whether the probe budget is large enough.
+  const total = snapshot.candidates_total || 0;
+  const covered = latency.measured || 0;
+  text('latency-coverage', total ? `${covered} of ${total} candidates` : '–');
 }
 
 function renderCandidates() {
@@ -242,15 +356,22 @@ function renderCandidates() {
     if (candidate.free) tags.push('<span class="tag">free</span>');
     if (candidate.wireguard) tags.push('<span class="tag">wg</span>');
 
-    const scoreTitle = `load ${candidate.score_load} + latency ${candidate.score_latency} + proton ${candidate.score_proton}`;
+    const scoreTitle = candidate.rtt_known
+      ? `load ${candidate.score_load} + latency ${candidate.score_latency} + proton ${candidate.score_proton}`
+      : `load ${candidate.score_load} + assumed latency ${candidate.score_latency} (not probed yet) ` +
+        `+ proton ${candidate.score_proton}`;
 
     return `<tr class="${candidate.is_current ? 'is-current' : ''}">
       <td class="num">${candidate.rank}</td>
       <td><div>${escapeHTML(candidate.server_name)}</div><div class="hostname">${escapeHTML(candidate.hostname)}</div></td>
       <td>${escapeHTML(candidate.country)}${candidate.city ? ' · ' + escapeHTML(candidate.city) : ''}</td>
       <td class="num">${loadCell(candidate.load)}</td>
-      <td class="num">${candidate.rtt_known ? candidate.rtt_ms + ' ms' : '–'}</td>
-      <td class="num" title="${escapeHTML(scoreTitle)}">${candidate.score.toFixed(3)}</td>
+      <td class="num">${candidate.rtt_known
+        ? candidate.rtt_ms + ' ms'
+        : '<span class="muted" title="Outside the latency probe budget (LATENCY_TOP_N)">not probed</span>'}</td>
+      <td class="num" title="${escapeHTML(scoreTitle)}">${candidate.rtt_known
+        ? candidate.score.toFixed(3)
+        : '~' + candidate.score.toFixed(3)}</td>
       <td><div class="tags">${tags.join('')}</div></td>
       <td class="right">
         <button class="small" data-switch="${escapeHTML(candidate.hostname)}"

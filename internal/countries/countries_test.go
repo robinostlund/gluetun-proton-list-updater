@@ -88,3 +88,27 @@ func TestAllNamesIsSortedAndComplete(t *testing.T) {
 		}
 	}
 }
+
+// Proton returns country codes that are not in ISO 3166-1 and therefore not in
+// Gluetun's map. They must resolve to a readable name rather than a bare code:
+// our servers.json defines the country values Gluetun will accept for filtering.
+func TestSupplementaryCodes(t *testing.T) {
+	t.Parallel()
+
+	name, known := Name("XK")
+	if !known {
+		t.Error("XK (Kosovo) should be known")
+	}
+	if name != "Kosovo" {
+		t.Errorf("Name(XK) = %q, want Kosovo", name)
+	}
+
+	// And it round-trips, so COUNTRIES=Kosovo works.
+	normalized, err := Normalize("kosovo")
+	if err != nil || normalized != "Kosovo" {
+		t.Errorf("Normalize(kosovo) = %q, %v", normalized, err)
+	}
+	if normalized, err := Normalize("xk"); err != nil || normalized != "Kosovo" {
+		t.Errorf("Normalize(xk) = %q, %v", normalized, err)
+	}
+}

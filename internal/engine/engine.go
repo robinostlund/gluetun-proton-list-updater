@@ -67,6 +67,20 @@ type Engine struct {
 	stats          catalog.Stats
 	vpnType        string
 	schemaVersion  uint16
+	// layout is which storage layout the running Gluetun uses. It is detected
+	// rather than configured, and re-detected on each write because Gluetun can
+	// be upgraded underneath us.
+	layout serversfile.Layout
+	// gluetunWroteServerData records whether Gluetun had written any server data
+	// of its own before this process wrote anything.
+	//
+	// It is captured once, at startup, precisely because our own writes would
+	// otherwise pollute the signal. Combined with "Gluetun answers its control
+	// server", its absence means Gluetun is running but keeps no server data on
+	// disk - either STORAGE_SERVERS_ENABLED=no, or the /gluetun volume is not
+	// actually shared with this container. In both cases everything written here
+	// is ignored, which is worth saying out loud.
+	gluetunWroteServerData bool
 
 	snapshotMu sync.RWMutex
 	snapshot   Snapshot
@@ -238,27 +252,64 @@ func (e *Engine) latencyInterval() time.Duration {
 // file Gluetun itself wrote is far more robust than hardcoding a number that
 // silently rots.
 func (e *Engine) detectSchemaVersion() {
+	e.refreshGluetunDataObservation()
+	e.layout = serversfile.DetectLayout(e.serversPaths())
+	e.logger.Info("detected gluetun storage layout",
+		"layout", string(e.layout),
+		"servers_dir", e.cfg.Servers.DirPath,
+		"legacy_file", e.cfg.Servers.FilePath)
+
 	if e.cfg.Servers.SchemaVersion > 0 {
 		e.schemaVersion = e.cfg.Servers.SchemaVersion
-		e.logger.Info("using configured servers.json schema version", "version", e.schemaVersion)
+		e.logger.Info("using configured servers schema version", "version", e.schemaVersion)
 		return
 	}
 
-	version, found, err := serversfile.DetectSchemaVersion(e.cfg.Servers.FilePath)
+	version, source, err := serversfile.DetectSchemaVersion(e.serversPaths())
 	switch {
 	case err != nil:
 		e.schemaVersion = config.DefaultSchemaVersion
-		e.logger.Warn("could not read schema version from servers file, using default",
-			"path", e.cfg.Servers.FilePath, "version", e.schemaVersion, "error", err)
-	case found:
+		e.logger.Warn("could not read the schema version from Gluetun's server data, using default",
+			"version", e.schemaVersion, "error", err)
+	case version > 0:
 		e.schemaVersion = version
-		e.logger.Info("detected servers.json schema version from existing file",
-			"path", e.cfg.Servers.FilePath, "version", version)
+		e.logger.Info("detected servers schema version from Gluetun's own data",
+			"path", source, "version", version)
 	default:
 		e.schemaVersion = config.DefaultSchemaVersion
-		e.logger.Info("no existing servers file, using default schema version",
+		e.logger.Info("Gluetun has not written server data yet, using the default schema version",
 			"version", e.schemaVersion,
 			"hint", "if Gluetun logs that servers were discarded, set SERVERS_SCHEMA_VERSION to the version it reports")
+	}
+}
+
+// refreshGluetunDataObservation notes whether Gluetun's own server data is
+// present, remembering a positive result permanently.
+func (e *Engine) refreshGluetunDataObservation() {
+	if e.gluetunWroteServerData {
+		return
+	}
+	if e.state.snapshot().GluetunHadServerData {
+		e.gluetunWroteServerData = true
+		return
+	}
+	if !serversfile.HasGluetunData(e.serversPaths()) {
+		return
+	}
+
+	e.gluetunWroteServerData = true
+	if err := e.state.update(func(state *persistedState) {
+		state.GluetunHadServerData = true
+	}); err != nil {
+		e.logger.Warn("could not persist the gluetun server data observation", "error", err)
+	}
+}
+
+// serversPaths locates both of Gluetun's storage layouts.
+func (e *Engine) serversPaths() serversfile.Paths {
+	return serversfile.Paths{
+		Directory:  e.cfg.Servers.DirPath,
+		LegacyFile: e.cfg.Servers.FilePath,
 	}
 }
 
@@ -356,9 +407,20 @@ func (e *Engine) rerank() {
 	e.ranked = scoring.Rank(e.candidates, e.prober.Results(), e.cfg.Score)
 }
 
-// entryIPs lists the addresses worth probing, best-ranked first.
+// entryIPs lists the addresses worth probing, most promising first.
+//
+// The ordering deliberately ignores latency. Ranking by the full score would
+// make probing self-reinforcing: an unprobed server carries the
+// UnknownLatencyPenalty, which pushes it down the ranking, which keeps it
+// outside the probe budget, so it stays unprobed forever - even when its load is
+// better than that of servers being probed. Selecting on load (and Proton's own
+// score) instead means a server's chance of being measured never depends on
+// whether it has already been measured.
 func (e *Engine) entryIPs(limit int) (addresses []netip.Addr) {
-	ranked := e.ranked
+	latencyBlind := e.cfg.Score
+	latencyBlind.LatencyWeight = 0
+	ranked := scoring.Rank(e.candidates, nil, latencyBlind)
+
 	if limit > 0 && limit < len(ranked) {
 		ranked = ranked[:limit]
 	}

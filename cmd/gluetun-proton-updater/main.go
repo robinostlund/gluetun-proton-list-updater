@@ -22,6 +22,7 @@ import (
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/engine"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/gluetunapi"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/logbuf"
+	"github.com/robinostlund/gluetun-proton-list-updater/internal/preflight"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/proton"
 )
 
@@ -53,8 +54,35 @@ func run() (err error) {
 		"gluetun", cfg.Gluetun.BaseURL,
 		"servers_file", cfg.Servers.FilePath)
 
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-		return fmt.Errorf("creating state directory %s: %w", cfg.StateDir, err)
+	// Fail fast on unwritable directories. Without this the tool runs, logs a
+	// warning per attempt and never writes servers.json - the one file that
+	// makes it useful - which is a very easy failure to miss.
+	checks := []preflight.Check{{
+		Path:    cfg.StateDir,
+		Purpose: "STATE_DIR: Proton session, cached server list, switch history",
+		Hint: "Without it the Proton session cannot be persisted, so every restart re-authenticates - " +
+			"and Proton rate-limits logins.",
+	}}
+	if cfg.Servers.WriteMode != config.WriteModeNone {
+		// Both layouts are checked: which one Gluetun uses is detected at
+		// runtime, and on a fresh volume the tool writes both.
+		hint := "Gluetun creates this directory owned by root, so a container running as a " +
+			"non-root user cannot replace files in it."
+		checks = append(checks,
+			preflight.Check{
+				Path:    preflight.ServersDir(cfg.Servers.FilePath),
+				Purpose: "SERVERS_FILE directory: Gluetun's legacy servers.json location",
+				Hint:    hint,
+			},
+			preflight.Check{
+				Path:    cfg.Servers.DirPath,
+				Purpose: "SERVERS_DIR: Gluetun's per-provider servers directory",
+				Hint:    hint,
+			},
+		)
+	}
+	if err := preflight.Verify(checks...); err != nil {
+		return err
 	}
 
 	codeProvider, manual, err := newCodeProvider(cfg, logger)

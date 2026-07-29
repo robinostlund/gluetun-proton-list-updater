@@ -146,13 +146,28 @@ func (e *Engine) SetAutoSwitch(ctx context.Context, enabled bool) error {
 // Healthy reports whether the tool is doing its job, for a container health
 // check.
 //
-// Deliberately lenient: Gluetun being down or Proton being unreachable are
-// conditions this tool is built to survive, so they do not make it unhealthy.
-// Only never having produced a usable server list does.
+// Deliberately lenient about the things it is built to survive: Gluetun being
+// down or Proton being briefly unreachable do not make it unhealthy, because a
+// cached list and a paused switch are working-as-intended.
+//
+// Strict about the three ways it is genuinely not doing its job: having no
+// candidate servers, being unable to write the server data, and writing server
+// data that Gluetun does not read. The last two matter because everything else
+// can look fine while the tool has no effect at all.
+//
+// Note this cannot false-positive while Gluetun is down: the "ignored" condition
+// is only ever set when Gluetun answers its control server, and Gluetun writes
+// its server data before that server starts listening.
 func (e *Engine) Healthy() (healthy bool, reason string) {
 	snapshot := e.Snapshot()
-	if snapshot.CandidatesTotal == 0 {
+	switch {
+	case snapshot.CandidatesTotal == 0:
 		return false, "no candidate servers available"
+	case snapshot.Servers.LastError != "":
+		return false, "cannot write server data: " + snapshot.Servers.LastError
+	case snapshot.Servers.Ignored:
+		return false, "gluetun is not reading the server data written here: " + snapshot.Servers.IgnoredReason
+	default:
+		return true, "ok"
 	}
-	return true, "ok"
 }

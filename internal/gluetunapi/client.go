@@ -221,6 +221,13 @@ type Settings struct {
 type Provider struct {
 	Name            string           `json:"name,omitempty"`
 	ServerSelection *ServerSelection `json:"server_selection,omitempty"`
+	PortForwarding  *PortForwarding  `json:"port_forwarding,omitempty"`
+}
+
+// PortForwarding reports whether Gluetun asks the provider to forward a port.
+// Without it, "no forwarded port" means "not requested" rather than "failed".
+type PortForwarding struct {
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // ServerSelection is Gluetun's server filter set.
@@ -294,14 +301,19 @@ func (c *Client) PinServer(ctx context.Context, target PinTarget) (outcome strin
 	return strings.TrimSpace(string(raw)), nil
 }
 
-// PublicIP is Gluetun's view of the current exit address.
+// PublicIP is Gluetun's view of the current exit address. Every field Gluetun
+// publishes is captured, because they are exactly what an operator wants to see
+// to confirm where traffic is actually coming out.
 type PublicIP struct {
-	IP       string `json:"public_ip"`
-	Region   string `json:"region"`
-	Country  string `json:"country"`
-	City     string `json:"city"`
-	Location string `json:"location"`
-	Org      string `json:"organization"`
+	IP           string `json:"public_ip"`
+	Region       string `json:"region,omitempty"`
+	Country      string `json:"country,omitempty"`
+	City         string `json:"city,omitempty"`
+	Hostname     string `json:"hostname,omitempty"`
+	Location     string `json:"location,omitempty"`
+	Organization string `json:"organization,omitempty"`
+	PostalCode   string `json:"postal_code,omitempty"`
+	Timezone     string `json:"timezone,omitempty"`
 }
 
 // GetPublicIP returns the current public IP as seen through the tunnel.
@@ -312,36 +324,61 @@ func (c *Client) GetPublicIP(ctx context.Context) (publicIP PublicIP, err error)
 	return publicIP, nil
 }
 
-// GetForwardedPort returns the port Proton forwarded, or 0 when there is none.
-func (c *Client) GetForwardedPort(ctx context.Context) (port uint16, err error) {
+// GetForwardedPorts returns every port Proton has forwarded.
+//
+// Gluetun has answered with a single "port" historically and a "ports" list more
+// recently, so both shapes are accepted.
+func (c *Client) GetForwardedPorts(ctx context.Context) (ports []uint16, err error) {
 	var response struct {
 		Port  uint16   `json:"port"`
 		Ports []uint16 `json:"ports"`
 	}
 	if err := c.request(ctx, http.MethodGet, "/v1/portforward", nil, &response); err != nil {
-		return 0, err
-	}
-	if response.Port != 0 {
-		return response.Port, nil
+		return nil, err
 	}
 	if len(response.Ports) > 0 {
-		return response.Ports[0], nil
+		return response.Ports, nil
 	}
-	return 0, nil
+	if response.Port != 0 {
+		return []uint16{response.Port}, nil
+	}
+	return nil, nil
 }
 
-// Version reports Gluetun's build information, which the dashboard shows and
-// which helps diagnose servers.json schema mismatches.
-func (c *Client) Version(ctx context.Context) (version string, err error) {
-	var response struct {
-		Version string `json:"version"`
-		Commit  string `json:"commit"`
-		Created string `json:"created"`
+// GetForwardedPort returns the first forwarded port, or 0 when there is none.
+func (c *Client) GetForwardedPort(ctx context.Context) (port uint16, err error) {
+	ports, err := c.GetForwardedPorts(ctx)
+	if err != nil || len(ports) == 0 {
+		return 0, err
 	}
-	if err := c.request(ctx, http.MethodGet, "/v1/version", nil, &response); err != nil {
+	return ports[0], nil
+}
+
+// DNSStatus reports whether Gluetun's built-in DNS-over-TLS resolver is running.
+func (c *Client) DNSStatus(ctx context.Context) (status string, err error) {
+	var response struct {
+		Status string `json:"status"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/v1/dns/status", nil, &response); err != nil {
 		return "", err
 	}
-	return response.Version, nil
+	return response.Status, nil
+}
+
+// BuildInfo is Gluetun's build information.
+type BuildInfo struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Created string `json:"created"`
+}
+
+// Version reports Gluetun's build information. It matters beyond display: the
+// version determines the storage layout and the servers schema version.
+func (c *Client) Version(ctx context.Context) (info BuildInfo, err error) {
+	if err := c.request(ctx, http.MethodGet, "/v1/version", nil, &info); err != nil {
+		return BuildInfo{}, err
+	}
+	return info, nil
 }
 
 // mutate performs a state-changing request using the longer timeout.
@@ -384,6 +421,9 @@ func (c *Client) requestRaw(ctx context.Context, method, path string, body any) 
 func (c *Client) do(ctx context.Context, httpClient *http.Client,
 	method, path string, body any,
 ) (raw []byte, err error) {
+	// Only a state-changing request has an outcome worth being uncertain about. A
+	// read that times out just means Gluetun is not answering.
+	isMutation := httpClient == c.mutationClient && method != http.MethodGet
 	var bodyReader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -411,7 +451,7 @@ func (c *Client) do(ctx context.Context, httpClient *http.Client,
 	if err != nil {
 		// A timeout on a state-changing request is not the same as "down":
 		// Gluetun may well have applied the change and simply not answered yet.
-		if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
+		if isMutation && (errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err)) {
 			return nil, fmt.Errorf("%w: %s %s: %w", ErrTimedOut, method, path, err)
 		}
 		// Any other transport error means Gluetun is down or unreachable.
@@ -458,6 +498,39 @@ func (s Settings) ProviderName() string {
 		return ""
 	}
 	return strings.ToLower(s.Provider.Name)
+}
+
+// PortForwardingEnabled reports whether Gluetun requests a forwarded port.
+func (s Settings) PortForwardingEnabled() (enabled, known bool) {
+	if s.Provider == nil || s.Provider.PortForwarding == nil || s.Provider.PortForwarding.Enabled == nil {
+		return false, false
+	}
+	return *s.Provider.PortForwarding.Enabled, true
+}
+
+// SelectionSummary renders Gluetun's active server filters for display, so the
+// dashboard can show what Gluetun itself is restricted to - which is often the
+// reason a switch was refused.
+func (s Settings) SelectionSummary() map[string][]string {
+	if s.Provider == nil || s.Provider.ServerSelection == nil {
+		return nil
+	}
+	selection := s.Provider.ServerSelection
+	summary := map[string][]string{}
+	for key, values := range map[string][]string{
+		"countries": selection.Countries,
+		"cities":    selection.Cities,
+		"names":     selection.Names,
+		"hostnames": selection.Hostnames,
+	} {
+		if len(values) > 0 {
+			summary[key] = values
+		}
+	}
+	if len(summary) == 0 {
+		return nil
+	}
+	return summary
 }
 
 // PinnedHostnames reports the hostnames Gluetun is currently restricted to.

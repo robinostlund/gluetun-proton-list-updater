@@ -43,9 +43,16 @@ services:
       HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: >-
         {"name":"updater","auth":"apikey","apikey":"${GLUETUN_API_KEY:?set GLUETUN_API_KEY in .env}"}
 
-      # Gluetun's own periodic updater would overwrite servers.json; the sidecar
-      # owns that file.
+      # Gluetun's own periodic updater would overwrite the server data; the
+      # sidecar owns it.
       UPDATER_PERIOD: "0"
+
+      # This is Gluetun's default, set explicitly because it matters here: with
+      # it off, Gluetun keeps no server data on disk and reads none, so the
+      # curated list this sidecar writes would be ignored. Server switching would
+      # still work, but only across the list Gluetun has built in. If you do turn
+      # it off, set SERVERS_WRITE_MODE=none below.
+      STORAGE_SERVERS_ENABLED: "yes"
 
       # Optional but recommended. Gluetun only reads servers.json at startup, so
       # a server Proton added since then cannot be selected. With these set, the
@@ -82,7 +89,11 @@ services:
       GLUETUN_URL: http://gluetun:8000
       GLUETUN_API_KEY: ${GLUETUN_API_KEY}
 
+      # Both of Gluetun's storage layouts are handled; which one is in use is
+      # detected at runtime. Current Gluetun reads SERVERS_DIR and ignores the
+      # legacy file entirely.
       SERVERS_FILE: /gluetun/servers.json
+      SERVERS_DIR: /gluetun/servers
       SERVERS_WRITE_MODE: update
 
       # Which countries the tunnel may use.

@@ -40,7 +40,19 @@ COPY --from=build /out/gluetun-proton-updater /usr/local/bin/gluetun-proton-upda
 # uses.
 RUN mkdir -p /data /gluetun && chown -R updater:updater /data
 
-USER updater
+# Runs as root by default, deliberately.
+#
+# This container has to replace servers.json inside Gluetun's own volume, and
+# Gluetun (which needs NET_ADMIN, so runs as root) creates that directory as
+# root:root 0755. A non-root process cannot create files there, so it would fail
+# to write the one file that makes this tool useful - and the same applies to a
+# bind mount owned by the host user.
+#
+# To run unprivileged instead, arrange ownership yourself and override the user:
+#   user: "1000:1000"           # in docker-compose.yml
+#   chown -R 1000:1000 <paths>  # on the host, for bind mounts
+# The image already contains a uid 1000 "updater" account for that purpose, and
+# a startup pre-flight check reports precisely which paths are not writable.
 WORKDIR /data
 
 ENV STATE_DIR=/data \

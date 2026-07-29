@@ -52,14 +52,18 @@ func TestIntegrationStatusAndVersion(t *testing.T) {
 	client := integrationClient(t)
 	ctx := context.Background()
 
-	version, err := client.Version(ctx)
+	build, err := client.Version(ctx)
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if !strings.HasPrefix(version, "v3.") {
-		t.Errorf("version = %q, want something like v3.41.1", version)
+	// A release reports v3.x; a master build reports "latest". Both are valid.
+	if build.Version == "" {
+		t.Error("version is empty")
 	}
-	t.Logf("gluetun version: %s", version)
+	if build.Commit == "" {
+		t.Error("commit is empty")
+	}
+	t.Logf("gluetun version: %s (commit %s, built %s)", build.Version, build.Commit, build.Created)
 
 	status, err := client.Status(ctx)
 	if err != nil {
@@ -262,18 +266,14 @@ func firstKnownServer(t *testing.T, client *Client) (hostname, country string) {
 		t.Fatalf("reading %s: %v", path, err)
 	}
 
-	var file struct {
-		Protonvpn struct {
-			Servers []struct {
-				VPN      string `json:"vpn"`
-				Country  string `json:"country"`
-				Hostname string `json:"hostname"`
-			} `json:"servers"`
-		} `json:"protonvpn"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
+	servers, err := decodeServers(data)
+	if err != nil {
 		t.Fatalf("decoding %s: %v", path, err)
 	}
+	file := struct {
+		Protonvpn struct{ Servers []serverEntry }
+	}{}
+	file.Protonvpn.Servers = servers
 
 	settings, err := client.GetSettings(context.Background())
 	if err != nil {
@@ -312,24 +312,45 @@ func serverOutsideCountry(t *testing.T, excluded string) (hostname, country stri
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	var file struct {
-		Protonvpn struct {
-			Servers []struct {
-				VPN      string `json:"vpn"`
-				Country  string `json:"country"`
-				Hostname string `json:"hostname"`
-			} `json:"servers"`
-		} `json:"protonvpn"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
+	servers, err := decodeServers(data)
+	if err != nil {
 		t.Fatalf("decoding %s: %v", path, err)
 	}
 
-	for _, server := range file.Protonvpn.Servers {
+	for _, server := range servers {
 		if server.Country != excluded && server.Hostname != "" && server.Country != "" {
 			return server.Hostname, server.Country
 		}
 	}
 	t.Fatalf("no server outside %s found in %s", excluded, path)
 	return "", ""
+}
+
+// serverEntry is the part of a Gluetun server entry these tests need.
+type serverEntry struct {
+	VPN      string `json:"vpn"`
+	Country  string `json:"country"`
+	Hostname string `json:"hostname"`
+}
+
+// decodeServers reads a server list from either Gluetun storage layout: a
+// per-provider file ({"version":..,"servers":[..]}) or the legacy fat file
+// ({"protonvpn":{"servers":[..]}}).
+func decodeServers(data []byte) (servers []serverEntry, err error) {
+	var providerFile struct {
+		Servers []serverEntry `json:"servers"`
+	}
+	if err := json.Unmarshal(data, &providerFile); err == nil && len(providerFile.Servers) > 0 {
+		return providerFile.Servers, nil
+	}
+
+	var legacy struct {
+		Protonvpn struct {
+			Servers []serverEntry `json:"servers"`
+		} `json:"protonvpn"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return nil, err
+	}
+	return legacy.Protonvpn.Servers, nil
 }

@@ -86,14 +86,40 @@ Dashboard: <http://localhost:8080>
 
 | Component | Minimum | Recommended | Why |
 |---|---|---|---|
-| **Gluetun** | `v3.31.0` | `v3.41.1` (tested) | `v3.31.0` introduced `/v1/vpn/*`, including `PUT /v1/vpn/settings` — the endpoint that makes a targeted reconnect possible. `v3.39.0` added the `secure_core` and `tor` fields to Gluetun's server model; on older versions those flags in `servers.json` are ignored, so Gluetun cannot filter on them. |
+| **Gluetun** | `v3.31.0` | `v3.41.1` or `latest` (both tested) | `v3.31.0` introduced `/v1/vpn/*`, including `PUT /v1/vpn/settings` — the endpoint that makes a targeted reconnect possible. `v3.39.0` added the `secure_core` and `tor` fields to Gluetun's server model; on older versions those flags are ignored, so Gluetun cannot filter on them. Both **storage layouts** are supported and detected automatically — see below. |
+| **Gluetun setting** | `STORAGE_SERVERS_ENABLED=yes` | (the default) | With server storage off, Gluetun keeps no server data on disk and reads none, so the curated list written here is ignored. |
 | **Proton account** | paid | paid | Proton's server list has required authentication since 2025 — an unauthenticated `/vpn/v1/logicals` answers `401`. There is no credential-free mode. |
 | **Docker Engine** | `20.10` | `24+` | `docker compose` v2 syntax; multi-arch images are `linux/amd64` and `linux/arm64`. |
 | **Go** (only to build from source) | `1.23` | `1.24` | The module targets 1.23; the container image builds with 1.24. |
 
-Verified against Gluetun `v3.41.1` by an integration test that runs against a real Gluetun
-container — see [Development](#development). Gluetun's ProtonVPN `servers.json` schema version has
-been `4` throughout `v3.31.0`–`v3.41.1`, and the tool detects it at runtime regardless.
+Verified against Gluetun `v3.41.1` and `latest` by integration tests that run against a real
+Gluetun container — see [Development](#development). The ProtonVPN schema version has been `4`
+throughout, and is detected at runtime regardless.
+
+### Gluetun changed where server data lives — both layouts are handled
+
+This is worth knowing, because getting it wrong is invisible:
+
+| Gluetun | Layout | What it reads |
+|---|---|---|
+| up to `v3.41.1` | **legacy** | one fat file, `/gluetun/servers.json` |
+| current `master` / `:latest` | **directory** | `/gluetun/servers/` with `manifest.json` plus one file per provider, e.g. `/gluetun/servers/protonvpn.json` |
+
+A Gluetun using the directory layout reads the legacy file **only when
+`/gluetun/servers/manifest.json` is absent**. So writing just `servers.json` to a current Gluetun
+has no effect at all — the tool would look healthy while being entirely ignored.
+
+The layout is therefore **detected on every write**, by looking for the artefacts Gluetun creates
+on startup, and the data goes wherever that Gluetun actually reads. On a fresh volume where Gluetun
+has not started yet, both are written. Confirmed against `:latest`, which then logs:
+
+```
+[storage] Using protonvpn servers from file (marked as preferred)
+```
+
+That `preferred` flag (`SERVERS_PREFERRED`, on by default) is what makes it deterministic: Gluetun
+uses our list regardless of timestamps. Older versions ignore the unknown field harmlessly and fall
+back to the timestamp comparison.
 
 ### Two settings on the Gluetun container that are not optional
 
@@ -121,6 +147,34 @@ useful as a first-connection default.
 
 Also required: the `/gluetun` volume shared between both containers.
 
+### `STORAGE_SERVERS_ENABLED=yes` is required
+
+It is Gluetun's default, so most setups already have it — but it is worth stating, because turning it
+off breaks this tool silently. With server storage disabled Gluetun keeps no server data on disk and
+reads none, so the curated list written here is ignored while everything else still looks fine.
+
+The requirement is enforced by observation rather than by trust. When Gluetun answers its control
+server but has written no server data of its own, the tool logs a warning, shows a dashboard banner,
+and reports itself **unhealthy**:
+
+```
+WARN gluetun is not reading the server data written here
+     hint="…has written no server data of its own… This tool requires STORAGE_SERVERS_ENABLED=yes
+           on the Gluetun container (its default), and requires the same /gluetun volume to be
+           mounted into both containers - one of those two is not the case."
+```
+
+That check cannot false-positive while Gluetun is down: it only triggers when Gluetun is answering,
+and Gluetun writes its server data before its control server starts listening. It also catches a
+much more common mistake — **the `/gluetun` volume not actually being shared** between the two
+containers, which is indistinguishable from the outside.
+
+If you genuinely want to run without server storage, that is supported: server *switching* does not
+need it (loads come from Proton's API, and the reconnect goes through the control server — verified
+against a Gluetun running with storage off). Gluetun then selects from the list embedded in its own
+build, so anything Proton added since that build is unusable. Set `SERVERS_WRITE_MODE=none` to stop
+writing data nothing reads, and the warning and health failure go away.
+
 ### Two-factor authentication
 
 - **Unattended:** set `PROTON_TOTP_SECRET` to the account's base32 TOTP secret. Codes are
@@ -130,6 +184,25 @@ Also required: the `/gluetun` volume shared between both containers.
 
 FIDO2/hardware-key-only accounts cannot be used; the tool says so explicitly rather than
 looping.
+
+### The container runs as root, deliberately
+
+Gluetun needs `NET_ADMIN`, so it runs as root and creates `/gluetun` as `root:root 0755`. A
+non-root process simply cannot create files in that directory — which means it cannot write the one
+file that makes this tool useful. The same applies to a bind mount owned by the host user.
+
+Running unprivileged is supported, it just needs ownership arranged first:
+
+```yaml
+user: "1000:1000"            # in docker-compose.yml
+```
+```bash
+chown -R 1000:1000 /your/gluetun /your/data    # on the host, for bind mounts
+```
+
+Either way a **startup pre-flight check** tests every directory by actually writing to it, and
+refuses to start with a message naming the paths, the uid it is running as and the `chown` that
+fixes it. Silently limping along without writing anything is the one outcome ruled out.
 
 ### Important: do not share Gluetun's network namespace
 
@@ -144,6 +217,14 @@ to evaluate, and the tool would lose contact whenever the tunnel drops.
 
 - **Current server** — name, country, load, latency, score, rank, public IP, forwarded port,
   and how the server was identified.
+- **Public IP (from Gluetun)** — the exit address Gluetun reports, with country, region, city,
+  organisation, timezone and reverse DNS, and a note when it matches the selected server's Proton
+  exit address (which is how the current server is identified).
+- **Forwarded port** — the port Proton forwarded, plus whether Gluetun is even *requesting* one, so
+  "no port" is never ambiguous.
+- **Gluetun's own view** — everything its control server reports: tunnel status, version, commit,
+  build date, protocol, provider, DNS state, its own updater state, and **the server filters
+  Gluetun is currently enforcing** (usually the reason a specific server was refused).
 - **Best candidate** — with the score gap and the reason a switch has or has not happened.
 - **Actions** — reconnect to best, refresh the server list, refresh loads, probe latency,
   re-evaluate, rewrite `servers.json`, toggle automatic switching.
@@ -312,7 +393,9 @@ secrets. Configuration is validated at startup and **all** problems are reported
 
 | Variable | Default | Description |
 |---|---|---|
-| `SERVERS_FILE` | `/gluetun/servers.json` | Where Gluetun reads its servers |
+| `SERVERS_FILE` | `/gluetun/servers.json` | Gluetun's **legacy** fat file (up to v3.41.1) |
+| `SERVERS_DIR` | `/gluetun/servers` | Gluetun's **directory** layout (current versions). Which one is used is detected automatically |
+| `SERVERS_PREFERRED` | `true` | Set Gluetun's `preferred` flag, making it use our list regardless of timestamps |
 | `SERVERS_WRITE_MODE` | `update` | `update` keeps other providers' sections, `replace` writes only ProtonVPN, `none` disables writing |
 | `SERVERS_SCHEMA_VERSION` | *auto* | Override the detected schema version |
 | `SERVERS_INCLUDE_IPV6` | `false` | Include Proton's IPv6 entry addresses |
@@ -348,7 +431,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `LATENCY_TIMEOUT` | `2s` | Per-dial timeout |
 | `LATENCY_CONCURRENCY` | `24` | Parallel dials |
 | `LATENCY_INTERVAL` | `30m` | Sweep interval |
-| `LATENCY_TOP_N` | `60` | Probe only the N best candidates (`0` = all) |
+| `LATENCY_TOP_N` | `150` | Probe only the N most promising candidates (`0` = all). Selection is by **load, never by score** — including latency would mean an unprobed server's assumed-latency penalty kept it out of the budget, so it could never become probed |
 | `LATENCY_SMOOTHING` | `0.5` | EWMA weight of a new measurement |
 
 ### Switching
@@ -402,6 +485,10 @@ The failure modes this was built around, and what happens:
 | **Crash mid-write** | All files are written to a temp file, `fsync`ed, then atomically renamed. A reader never sees a partial `servers.json`. |
 | **Latency probe blip** | A failed probe keeps the previous measurement; EWMA smoothing damps outliers. |
 | **Corrupt state files** | Logged and rebuilt from scratch instead of preventing startup. |
+| **Unwritable `/data` or `/gluetun`** | Refused at startup with the paths, the uid and the `chown` that fixes it — rather than running and never writing anything. |
+| **Gluetun storage layout changes** | Detected on every write, so a Gluetun upgrade cannot silently orphan the data. |
+| **`servers.json` write failure** | Reported as **unhealthy** by `/healthz`, because the tool's primary job is broken even if everything else looks fine. |
+| **Server data written but not read** | Also **unhealthy**: a requirement is unmet (`STORAGE_SERVERS_ENABLED`, or an unshared volume) and the tool would otherwise appear to work. |
 
 Other hardening: bounded history and log buffers, context timeouts on every request, credentials
 never logged (session UIDs are redacted), the session file is `0600`, and the container runs as a
@@ -503,6 +590,34 @@ an image that does not build or pass them. A failed publish can be re-run from t
 the *Release* workflow's `workflow_dispatch` input.
 
 Pin a version in production (`:1.2.3` or `:1.2`) rather than tracking `latest`.
+
+---
+
+## Troubleshooting
+
+**Requests to Gluetun time out (but DNS resolves).** Gluetun's firewall only accepts traffic from
+the subnets it detected at startup. A Docker network attached to the Gluetun container *after* it
+started (`docker network connect`) is not among them, and packets are dropped, so the control server
+appears to hang rather than refuse. Put both containers on the same network in the compose file, or
+add the subnet to Gluetun's `FIREWALL_OUTBOUND_SUBNETS`.
+
+**`401 Unauthorized` on every switch.** Gluetun's default control-server role does not include
+`/v1/vpn/settings`. See [the two required Gluetun settings](#two-settings-on-the-gluetun-container-that-are-not-optional).
+
+**"Gluetun is not reading the server data written here"** (and `/healthz` reporting unhealthy).
+Either `STORAGE_SERVERS_ENABLED` is off on Gluetun, or the `/gluetun` volume is not shared between
+the containers. See [above](#storage_servers_enabledyes-is-required).
+
+**"Gluetun rejected every candidate hostname".** Gluetun is working from a server list older than
+the one written here. See
+[Can Gluetun see a server it did not know at startup?](#can-gluetun-see-a-server-it-did-not-know-at-startup)
+
+**Servers show `not probed`.** They are outside `LATENCY_TOP_N`. Raise it, or set it to `0` to probe
+every candidate. Selection is unaffected by *which* servers are probed — probe targets are chosen by
+load, never by score.
+
+**Permission denied writing `/data` or `/gluetun`.** The pre-flight check names the paths and the
+`chown` that fixes it; see [the note on running as root](#the-container-runs-as-root-deliberately).
 
 ---
 
