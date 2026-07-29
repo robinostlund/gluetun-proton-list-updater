@@ -148,10 +148,22 @@ function renderAlerts() {
     </div>`);
   }
   if (selection.needs_gluetun_restart) {
+    // When Gluetun has disclosed how many servers it knows, say so: a few hundred
+    // against thousands written is the unmistakable signature of it running on its
+    // own built-in list, and it turns vague advice into a diagnosis.
+    const known = snapshot.gluetun.known_hostnames;
+    const counts = known
+      ? ` It reports knowing <strong>${known}</strong> servers, while
+          <strong>${snapshot.candidates_total}</strong> are being offered here.`
+      : '';
     alerts.push(`<div class="alert alert-bad"><div>
       <strong>Gluetun is running an older server list</strong>
-      It rejected every server offered, which means the servers.json written here has not been
-      loaded yet. Restart the Gluetun container to pick it up.
+      It rejected the server offered, which means the server data written here has not been
+      loaded yet.${counts}
+      Gluetun reads that data only when it starts, so <strong>restart the Gluetun container</strong>
+      to pick it up. Alternatively, set <code>UPDATER_PROTONVPN_EMAIL</code> and
+      <code>UPDATER_PROTONVPN_PASSWORD</code> on the Gluetun container so its own updater can
+      refresh the list without a restart.
     </div></div>`);
   }
   if (snapshot.gluetun.provider_mismatch) {

@@ -887,15 +887,29 @@ here. Two causes, in order of likelihood:
    are written whenever the layout is ambiguous, so this should not happen; if it does, please open
    an issue with that row and the Gluetun version.
 
+**A switch fails but names a server that would work.** When Gluetun refuses a hostname it
+enumerates every hostname it *would* accept — the only time it discloses the list it is actually
+running. That list is captured and used: remaining candidates outside it are skipped instead of
+being tried and refused one by one, and the error names the best-ranked server Gluetun can use right
+now. The list is discarded as soon as a switch succeeds, since that proves it is out of date.
+
 **Gluetun's own updater is triggered but nothing changes**, and Gluetun logs *"credentials missing:
 email is empty - skipping update"*. Refreshing Gluetun's in-memory list needs
 `UPDATER_PROTONVPN_EMAIL` and `UPDATER_PROTONVPN_PASSWORD` on the **Gluetun** container. Without
 them, restart Gluetun to pick up the list written here.
 
-**Gluetun is stuck at `[vpn] stopping`.** That is a Gluetun-side hang in its own VPN loop, not
-something this tool can clear — a pinned selection cannot be applied while the loop is wedged, so
-switches queue up behind it. Restart the Gluetun container. It is much more likely while Gluetun is
-cycling on a selection it cannot satisfy, so fix the rejection above first.
+**Gluetun is stuck at `[vpn] stopping`, and a switch times out after two minutes.** This is a
+Gluetun-side stall, not something this tool can clear. Gluetun applies a selection *synchronously* —
+it stops the VPN loop, applies the change, starts it again, and only then answers — so a stalled
+stop blocks the HTTP response for as long as it lasts. Two things make the collision likely rather
+than rare: Gluetun's health monitor restarts the loop on its own whenever the tunnel fails a check,
+so a struggling tunnel is in transition much of the time; and port forwarding on a server that
+cannot forward a port leaves that loop retrying, which is one more thing a stop has to tear down.
+
+Two mitigations are in place. The tool now **waits up to 45 s for the VPN loop to settle** before
+sending a selection change, and reports a clear stall rather than blocking for the full mutation
+timeout. And requiring P2P whenever port forwarding is on (above) stops the configuration that
+provokes it. If it still stalls, restart the Gluetun container.
 
 **Servers show `not probed`.** They are outside `LATENCY_TOP_N`. Raise it, or set it to `0` to probe
 every candidate. Selection is unaffected by *which* servers are probed — probe targets are chosen by

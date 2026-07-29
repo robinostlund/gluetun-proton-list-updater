@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +54,14 @@ type fakeGluetun struct {
 	// portForwardOnly mirrors Gluetun's PORT_FORWARD_ONLY, which it ANDs with any
 	// pinned hostname.
 	portForwardOnly bool
+	// knownHostnames is the list the fake claims to know, mirroring the list a real
+	// Gluetun loads at startup. Empty means "knows everything", so existing tests
+	// are unaffected.
+	//
+	// It matters because a real Gluetun *enumerates this list* when it refuses a
+	// hostname, and the engine mines that for recovery. A fake that refused with a
+	// bare "no server found" would leave that path untested.
+	knownHostnames []string
 	// portForwarding mirrors VPN_PORT_FORWARDING, a genuinely separate setting:
 	// Gluetun asks Proton for a port but does not refuse servers that cannot give
 	// one. Keeping it separate here is the whole point - a fake that reported both
@@ -162,9 +172,26 @@ func (f *fakeGluetun) handler() http.Handler {
 
 		f.mu.Lock()
 		defer f.mu.Unlock()
+
+		unknown := false
+		if len(f.knownHostnames) > 0 {
+			unknown = !slices.Contains(f.knownHostnames, hostnames[0])
+		}
+		if unknown {
+			// Word for word how Gluetun answers for a hostname missing from the list
+			// it loaded at startup - including the full enumeration of what it would
+			// have accepted, which the engine mines to recover.
+			http.Error(w, "provider settings: server selection: for VPN service provider "+
+				"protonvpn: the hostname specified is not valid: value is not one of the "+
+				"possible choices: none of "+hostnames[0]+" is one of the choices available "+
+				strings.Join(f.knownHostnames, ", "), http.StatusBadRequest)
+			return
+		}
 		if f.rejectHostnames || (f.rejectHostname != "" && hostnames[0] == f.rejectHostname) {
-			// This is how Gluetun answers for a hostname missing from the list
-			// it loaded at startup.
+			// A blanket refusal, with no list attached. Gluetun does this for
+			// rejections that are not about an unknown hostname, and it is also the
+			// honest shape for "reject everything": a fake that refused every
+			// hostname while claiming to know a specific one would be incoherent.
 			http.Error(w, "no server found for hostname", http.StatusBadRequest)
 			return
 		}
@@ -1836,5 +1863,177 @@ func TestExplicitPortForwardOnlyIsNeverGivenUp(t *testing.T) {
 	}
 	if adopted := snapshot.Gluetun.RequirementsAdopted; len(adopted) != 1 {
 		t.Errorf("adopted %v, want port_forward_only to be kept", adopted)
+	}
+}
+
+// Gluetun keeps its server list in memory from startup and offers no route to read
+// it back. The one moment it discloses that list is when it refuses a hostname, where
+// it enumerates every name it would have accepted. Mining that turns a dead end into
+// a working switch: instead of failing, the engine goes to the best server Gluetun
+// does know.
+func TestARejectionTeachesTheEngineWhichServersGluetunCanUse(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	// Gluetun is running on an older list: it knows the busier server but not the
+	// quiet one this tool would prefer.
+	harness.gluetun.knownHostnames = []string{"node-se-known.protonvpn.net"}
+
+	logicals := []proton.LogicalServer{
+		{
+			ID: "quiet", Name: "SE#QUIET", ExitCountry: "SE", Load: 1, Status: 1,
+			Tier: tierPtr(2), Features: 0,
+			Servers: []proton.PhysicalServer{{
+				EntryIP: netip.MustParseAddr("10.9.0.1"), ExitIP: netip.MustParseAddr("81.9.0.1"),
+				Domain: "node-se-unknown.protonvpn.net", Status: 1, X25519PublicKey: "k1",
+			}},
+		},
+		{
+			ID: "known", Name: "SE#KNOWN", ExitCountry: "SE", Load: 30, Status: 1,
+			Tier: tierPtr(2), Features: 0,
+			Servers: []proton.PhysicalServer{{
+				EntryIP: netip.MustParseAddr("10.9.0.2"), ExitIP: netip.MustParseAddr("81.9.0.2"),
+				Domain: "node-se-known.protonvpn.net", Status: 1, X25519PublicKey: "k2",
+			}},
+		},
+	}
+
+	// Reach a steady state first, then drive the switch directly: the run loop is
+	// stopped by harness.run, but the fake Gluetun stays up for the rest of the test.
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	harness.engine.applyLogicals(logicals, false)
+	harness.engine.evaluate(context.Background(), "manual", true)
+
+	snapshot := harness.engine.Snapshot()
+	if len(snapshot.History) == 0 {
+		t.Fatal("no switch was recorded")
+	}
+	// The quiet server ranks first but Gluetun cannot use it, so the switch has to
+	// land on the busier one it does know rather than failing.
+	if to := snapshot.History[0].To; to != "node-se-known.protonvpn.net" {
+		t.Errorf("switched to %q, want the server gluetun actually knows", to)
+	}
+	if !snapshot.History[0].Succeeded {
+		t.Errorf("the switch failed: %s", snapshot.History[0].Error)
+	}
+}
+
+// The learned list must be a stopgap, never a lasting restriction: it is a snapshot
+// of one moment, and a Gluetun that has restarted knows more. A successful pin proves
+// the snapshot is stale, so it is dropped.
+func TestTheLearnedListIsDiscardedOnceASwitchSucceeds(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	engine := harness.engine
+
+	rejection := &gluetunapi.RejectionError{
+		KnownHostnames: []string{"a.protonvpn.net", "b.protonvpn.net"},
+	}
+	engine.learnGluetunHostnames(rejection)
+	if len(engine.gluetunKnownHosts) != 2 {
+		t.Fatalf("learned %d hostnames, want 2", len(engine.gluetunKnownHosts))
+	}
+	if engine.gluetunMightKnow("c.protonvpn.net") {
+		t.Error("a hostname gluetun excluded should not be attempted")
+	}
+	if !engine.gluetunMightKnow("a.protonvpn.net") {
+		t.Error("a hostname gluetun listed should be attempted")
+	}
+
+	engine.forgetGluetunHostnames()
+	if !engine.gluetunMightKnow("c.protonvpn.net") {
+		t.Error("with nothing learned, every candidate must be attempted again")
+	}
+}
+
+// Knowing nothing must never narrow the candidate set - that would turn a missing
+// answer into a restriction.
+func TestNothingLearnedMeansEveryCandidateIsAttempted(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	if !harness.engine.gluetunMightKnow("anything.protonvpn.net") {
+		t.Error("gluetunMightKnow should default to true")
+	}
+	// A rejection with no list attached teaches nothing, and must not be read as
+	// "gluetun knows no servers".
+	harness.engine.learnGluetunHostnames(errors.New("no server found for hostname"))
+	if !harness.engine.gluetunMightKnow("anything.protonvpn.net") {
+		t.Error("a rejection without a list must not restrict anything")
+	}
+}
+
+// Gluetun applies a selection synchronously - stop, apply, start, then answer - so a
+// request sent while its VPN loop is already mid-transition is queued behind that
+// transition and the HTTP call blocks. Observed in a real deployment: the loop sat in
+// "stopping" for minutes, the settings request timed out after two of them, and
+// verification then failed on a tunnel that had never moved.
+//
+// Waiting for a stable state first turns a two-minute block into a fast, accurate
+// error that names the cause.
+func TestASwitchWaitsRatherThanPushingIntoAStallingTunnel(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+
+	// The engine switches once on startup, so count from there rather than from zero.
+	harness.gluetun.mu.Lock()
+	pinsBefore := len(harness.gluetun.pinned)
+	// Wedge the fake exactly as the real one wedged: permanently "stopping".
+	harness.gluetun.status = gluetunapi.StatusStopping
+	harness.gluetun.mu.Unlock()
+
+	target := harness.engine.ranked[0]
+	start := time.Now()
+	_, err := harness.engine.applyTarget(context.Background(), target)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("applying a target to a stalled vpn loop should fail rather than appear to work")
+	}
+	if !errors.Is(err, gluetunapi.ErrUnavailable) {
+		t.Errorf("error = %v, want it classified as unavailable so the engine keeps going", err)
+	}
+	for _, want := range []string{"stopping", "gluetun-side stall", "restart the gluetun"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+	// It must give up on its own rather than blocking for the mutation timeout.
+	if elapsed > stableTunnelWait+10*time.Second {
+		t.Errorf("waited %s, want it bounded by stableTunnelWait (%s)", elapsed, stableTunnelWait)
+	}
+	// And it must not have sent the doomed request.
+	harness.gluetun.mu.Lock()
+	sent := len(harness.gluetun.pinned) - pinsBefore
+	harness.gluetun.mu.Unlock()
+	if sent != 0 {
+		t.Errorf("%d pin requests were sent into a stalled loop; none should have been", sent)
+	}
+}
+
+// A transient transition must only delay the switch, never abandon it: Gluetun's own
+// health monitor restarts the loop routinely, so treating "starting" as fatal would
+// make switching unreliable on a busy tunnel.
+func TestASwitchProceedsOnceTheTunnelSettles(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+
+	harness.gluetun.mu.Lock()
+	pinsBefore := len(harness.gluetun.pinned)
+	harness.gluetun.status = gluetunapi.StatusStarting
+	harness.gluetun.mu.Unlock()
+
+	// Settle it shortly after the switch begins, the way a real transition ends.
+	go func() {
+		time.Sleep(3 * time.Second)
+		harness.gluetun.mu.Lock()
+		harness.gluetun.status = gluetunapi.StatusRunning
+		harness.gluetun.mu.Unlock()
+	}()
+
+	target := harness.engine.ranked[0]
+	if _, err := harness.engine.applyTarget(context.Background(), target); err != nil {
+		t.Fatalf("applyTarget should have waited and then succeeded: %v", err)
+	}
+	harness.gluetun.mu.Lock()
+	pinned := append([]string(nil), harness.gluetun.pinned[pinsBefore:]...)
+	harness.gluetun.mu.Unlock()
+	if len(pinned) != 1 || pinned[0] != target.Candidate.Hostname {
+		t.Errorf("pinned since the wait = %v, want just the target once the loop settled", pinned)
 	}
 }

@@ -648,3 +648,55 @@ func TestRejectionErrorsReachTheCallerSummarized(t *testing.T) {
 		t.Errorf("the choice count is missing from %q", err)
 	}
 }
+
+// A rejection is the only time Gluetun discloses the server list it is actually
+// using, so the hostnames have to survive on the error rather than be summarised
+// away. That list is what lets a caller pick a server that works instead of failing.
+func TestRejectionCarriesTheHostnamesGluetunWouldAccept(t *testing.T) {
+	body := "provider settings: server selection: the hostname specified is not valid: " +
+		"value is not one of the possible choices: none of mz-03.protonvpn.net is one of " +
+		"the choices available af-03.protonvpn.net, mz-01.protonvpn.net, node-se-20.protonvpn.net"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, body, http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := New(Options{BaseURL: server.URL, HTTPClient: server.Client()})
+	_, err := client.PinServer(context.Background(), PinTarget{Hostname: "mz-03.protonvpn.net"})
+
+	// The richer type must not break the sentinel every caller already checks.
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("errors.Is(err, ErrRejected) = false for %v", err)
+	}
+
+	known, found := KnownHostnames(err)
+	if !found {
+		t.Fatal("the hostnames Gluetun listed were not kept on the error")
+	}
+	want := []string{"af-03.protonvpn.net", "mz-01.protonvpn.net", "node-se-20.protonvpn.net"}
+	if strings.Join(known, ",") != strings.Join(want, ",") {
+		t.Errorf("KnownHostnames = %v, want %v", known, want)
+	}
+}
+
+// A rejection about something other than a hostname must not be mined for hostnames,
+// or a country list would be mistaken for a server list and narrow selection to
+// nothing.
+func TestNonHostnameRejectionsCarryNoHostnames(t *testing.T) {
+	for _, body := range []string{
+		"provider settings: server selection: value is not one of the possible choices: Sweden, Norway, Denmark",
+		"provider settings: something else entirely went wrong",
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, body, http.StatusBadRequest)
+		}))
+		client := New(Options{BaseURL: server.URL, HTTPClient: server.Client()})
+		_, err := client.PinServer(context.Background(), PinTarget{Hostname: "x.protonvpn.net"})
+		server.Close()
+
+		if known, found := KnownHostnames(err); found {
+			t.Errorf("body %q yielded hostnames %v; only hostname lists should be parsed", body, known)
+		}
+	}
+}

@@ -227,12 +227,22 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 		if havePrevious && target.Candidate.Hostname == previous.Candidate.Hostname {
 			continue
 		}
+		if !e.gluetunMightKnow(target.Candidate.Hostname) {
+			e.logger.Debug("skipping a server gluetun has said it does not know",
+				"hostname", target.Candidate.Hostname)
+			continue
+		}
 
 		outcome, err := e.applyTarget(ctx, target)
 		switch {
 		case errors.Is(err, gluetunapi.ErrRejected):
 			rejections++
 			refreshAfter = true
+			// The refusal enumerated everything Gluetun *would* accept. Remembering
+			// that turns the remaining attempts from guesswork into a lookup: every
+			// candidate outside the set is a wasted mutation request against a
+			// tunnel that is already being restarted.
+			e.learnGluetunHostnames(err)
 			e.logger.Warn("gluetun refused the server, trying the next candidate",
 				"hostname", target.Candidate.Hostname, "attempt", attempt+1, "error", err)
 			continue
@@ -252,8 +262,17 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 			return true
 		}
 
-		e.logger.Info("gluetun accepted the new server",
-			"hostname", target.Candidate.Hostname, "outcome", outcome)
+		if outcome == "" {
+			// Reached only via the ErrTimedOut case above: Gluetun took the request
+			// and never answered, so whether it applied is genuinely unknown.
+			// Calling that "accepted" was misleading in exactly the situation where
+			// the log matters most.
+			e.logger.Warn("gluetun never confirmed the change; verifying what actually happened",
+				"hostname", target.Candidate.Hostname)
+		} else {
+			e.logger.Info("gluetun accepted the new server",
+				"hostname", target.Candidate.Hostname, "outcome", outcome)
+		}
 
 		publicIP, verifyErr := e.verifyTunnel(ctx, target, previousIP)
 		if verifyErr != nil {
@@ -270,6 +289,8 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 		}
 
 		e.recordSwitch(previousHostname, previous, havePrevious, target, reason, publicIP, nil)
+		// A pin Gluetun accepted proves any list it disclosed earlier is out of date.
+		e.forgetGluetunHostnames()
 		e.mutateSnapshot(func(snapshot *Snapshot) {
 			snapshot.Selection.NeedsGluetunRestart = false
 			snapshot.Selection.LastError = ""
@@ -339,6 +360,10 @@ func (e *Engine) flagGluetunRestartNeeded(candidates int) {
 
 // applyTarget asks Gluetun to move to the target server.
 func (e *Engine) applyTarget(ctx context.Context, target scoring.Scored) (outcome string, err error) {
+	if err := e.waitForStableTunnel(ctx); err != nil {
+		return "", err
+	}
+
 	switch e.cfg.Switch.Mode {
 	case config.ReconnectSettings:
 		// The country and city travel with the hostname on purpose: Gluetun ANDs
@@ -580,10 +605,19 @@ func (e *Engine) switchTo(ctx context.Context, hostname string) (err error) {
 	if errors.Is(err, gluetunapi.ErrRejected) {
 		// The operator picked a specific server, so rather than silently
 		// choosing a different one, try to make Gluetun aware of this one.
+		e.learnGluetunHostnames(err)
 		e.logger.Warn("gluetun does not know this server yet, refreshing its list",
 			"hostname", hostname)
 		if e.refreshGluetunServerList(ctx) {
 			outcome, err = e.applyTarget(ctx, target)
+		}
+		if errors.Is(err, gluetunapi.ErrRejected) {
+			// Refreshing did not help - it needs UPDATER_PROTONVPN_EMAIL and
+			// UPDATER_PROTONVPN_PASSWORD on the Gluetun container, and is skipped
+			// silently without them. Say what to do instead of repeating Gluetun's
+			// complaint, and name the best server that would work right now.
+			e.flagGluetunRestartNeeded(1)
+			return fmt.Errorf("%w%s", err, e.knownAlternativeHint())
 		}
 	}
 	if err != nil {
@@ -598,10 +632,143 @@ func (e *Engine) switchTo(ctx context.Context, hostname string) (err error) {
 		return err
 	}
 
+	e.forgetGluetunHostnames()
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Gluetun.Exit.IP = publicIP
 		snapshot.Selection.LastError = ""
 	})
 	e.logger.Info("switched to requested server", "hostname", hostname, "public_ip", publicIP)
 	return nil
+}
+
+// learnGluetunHostnames records the server list Gluetun revealed in a rejection.
+//
+// Gluetun keeps its server list in memory from startup and offers no route to read
+// it. The one time it discloses that list is when it refuses a hostname, where it
+// enumerates every name it would have accepted. Capturing it turns the remaining
+// attempts from guesswork into a lookup, and makes the "restart Gluetun" advice
+// specific: we can say which server would work right now instead.
+//
+// The set is replaced rather than merged: it is a snapshot of Gluetun's current
+// state, and a Gluetun that has restarted has a different list. A later successful
+// switch clears it, since a working pin proves it is out of date.
+func (e *Engine) learnGluetunHostnames(err error) {
+	hostnames, found := gluetunapi.KnownHostnames(err)
+	if !found {
+		return
+	}
+
+	known := make(map[string]struct{}, len(hostnames))
+	for _, hostname := range hostnames {
+		known[hostname] = struct{}{}
+	}
+	if len(known) == len(e.gluetunKnownHosts) && e.gluetunMightKnowAll(known) {
+		return
+	}
+
+	e.gluetunKnownHosts = known
+	e.logger.Warn("gluetun disclosed the server list it is actually using",
+		"gluetun_knows", len(known),
+		"we_offer", len(e.candidates),
+		"consequence", "only servers in gluetun's list can be selected until it restarts")
+}
+
+// gluetunMightKnowAll reports whether the freshly disclosed set matches the one
+// already held, so an unchanged list is not re-logged on every rejection.
+func (e *Engine) gluetunMightKnowAll(known map[string]struct{}) bool {
+	for hostname := range known {
+		if _, present := e.gluetunKnownHosts[hostname]; !present {
+			return false
+		}
+	}
+	return true
+}
+
+// gluetunMightKnow reports whether a hostname is worth attempting.
+//
+// It answers "might" rather than "does" deliberately: with nothing learned yet the
+// answer is yes, because an unproven assumption must never narrow the candidate set.
+// Only a hostname Gluetun has explicitly excluded from its own list is skipped.
+func (e *Engine) gluetunMightKnow(hostname string) bool {
+	if len(e.gluetunKnownHosts) == 0 {
+		return true
+	}
+	_, known := e.gluetunKnownHosts[hostname]
+	return known
+}
+
+// forgetGluetunHostnames drops the learned set after a successful switch, since a
+// pin Gluetun accepted proves the snapshot is stale.
+func (e *Engine) forgetGluetunHostnames() {
+	e.gluetunKnownHosts = nil
+}
+
+// knownAlternativeHint names the best server that would work right now.
+//
+// "Restart Gluetun" is correct but unsatisfying advice. When Gluetun has disclosed
+// its list, there is usually a perfectly good server in it, and pointing at that
+// gives the operator something to do in the meantime.
+func (e *Engine) knownAlternativeHint() string {
+	if len(e.gluetunKnownHosts) == 0 {
+		return ""
+	}
+	for _, entry := range e.ranked {
+		if e.gluetunMightKnow(entry.Candidate.Hostname) {
+			return fmt.Sprintf(" - gluetun knows %d servers, of which %s (%s, %d%% load) "+
+				"ranks highest and can be used right now",
+				len(e.gluetunKnownHosts), entry.Candidate.ServerName,
+				entry.Candidate.Hostname, entry.Candidate.Load)
+		}
+	}
+	return fmt.Sprintf(" - none of the %d servers gluetun knows is an allowed candidate, "+
+		"so gluetun must be restarted to load the list written here",
+		len(e.gluetunKnownHosts))
+}
+
+// stableTunnelWait bounds how long to wait for Gluetun's VPN loop to settle before
+// asking it to change server.
+const stableTunnelWait = 45 * time.Second
+
+// waitForStableTunnel holds off a settings change while Gluetun is mid-transition.
+//
+// Gluetun applies a selection synchronously: it stops the VPN loop, applies the
+// change, starts it again and only then answers. So a request sent while the loop is
+// already stopping or starting is queued behind that transition, and the HTTP call
+// blocks for as long as it takes - up to the full mutation timeout, with nothing to
+// show for it. Worse, Gluetun's health monitor restarts the loop on its own whenever
+// the tunnel fails a check, so a struggling tunnel is in transition much of the time
+// and the collision is likely rather than rare.
+//
+// This has been observed to wedge: a stop that never completed left the loop in
+// "stopping" for minutes, the settings request timed out after two of them, and
+// verification then failed on a tunnel that had never moved. Waiting for a stable
+// state first turns that into either a clean switch or a fast, accurate error.
+func (e *Engine) waitForStableTunnel(ctx context.Context) (err error) {
+	const pollInterval = 2 * time.Second
+	deadline := time.Now().Add(stableTunnelWait)
+
+	var status string
+	for {
+		status, err = e.gluetun.Status(ctx)
+		switch {
+		case err != nil:
+			// Unreachable is the caller's problem to classify; do not let a failed
+			// pre-flight check become the reason a switch is abandoned.
+			return nil
+		case status != gluetunapi.StatusStopping && status != gluetunapi.StatusStarting:
+			return nil
+		case time.Now().After(deadline):
+			return fmt.Errorf("%w: gluetun's vpn loop has been %q for over %s, so it cannot "+
+				"apply a new server; this is a gluetun-side stall - restart the gluetun "+
+				"container if it persists", gluetunapi.ErrUnavailable, status, stableTunnelWait)
+		}
+
+		e.logger.Debug("waiting for gluetun's vpn loop to settle before switching",
+			"status", status)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
 }

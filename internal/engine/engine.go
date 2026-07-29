@@ -83,6 +83,13 @@ type Engine struct {
 	// Gluetun rather than configured here, because a candidate that fails one of
 	// them cannot be connected to at all.
 	requirements catalog.Requirements
+	// gluetunKnownHosts is the server list Gluetun disclosed the last time it
+	// refused a hostname, empty when it has not refused one.
+	//
+	// Gluetun loads its servers at startup and exposes no route to read them back,
+	// so this is the only way to know what it can actually be switched to. It is a
+	// snapshot, not a fact: it is dropped as soon as a switch succeeds.
+	gluetunKnownHosts map[string]struct{}
 	// portForwardReason names the Gluetun setting that made P2P a requirement,
 	// either "PORT_FORWARD_ONLY" or "VPN_PORT_FORWARDING". They are different
 	// settings with the same consequence here, and saying which one applies is the
@@ -695,6 +702,7 @@ func (e *Engine) publish() {
 		snapshot.Proton.NeedsTOTP = e.manual != nil && e.manual.Waiting()
 		snapshot.Gluetun.RequirementsAdopted = requirementLabels(e.requirements)
 		snapshot.Gluetun.PortForwardRequirementFrom = e.portForwardReason
+		snapshot.Gluetun.KnownHostnames = len(e.gluetunKnownHosts)
 		snapshot.Selection.AutoSwitch = e.autoSwitchEnabled()
 		snapshot.Selection.Mode = e.cfg.Switch.Mode
 		snapshot.Selection.Current = current

@@ -120,9 +120,14 @@ type GluetunStatus struct {
 	// restriction: "PORT_FORWARD_ONLY" when Gluetun enforces it, or
 	// "VPN_PORT_FORWARDING" when it only asked for a port and Proton forwards ports
 	// on P2P servers alone.
-	PortForwardRequirementFrom string    `json:"port_forward_requirement_from,omitempty"`
-	LastCheck                  time.Time `json:"last_check"`
-	LastError                  string    `json:"last_error,omitempty"`
+	PortForwardRequirementFrom string `json:"port_forward_requirement_from,omitempty"`
+	// KnownHostnames is how many servers Gluetun said it can actually use, the last
+	// time it refused one. Zero means it has not refused anything, not that it knows
+	// nothing. A value well below the candidate count means Gluetun is running on its
+	// own built-in list and has to be restarted to pick up the one written here.
+	KnownHostnames int       `json:"known_hostnames,omitempty"`
+	LastCheck      time.Time `json:"last_check"`
+	LastError      string    `json:"last_error,omitempty"`
 	// ProviderMismatch warns that Gluetun is not configured for ProtonVPN, in
 	// which case none of this tool's work can take effect.
 	ProviderMismatch bool `json:"provider_mismatch"`

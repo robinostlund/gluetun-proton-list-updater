@@ -576,12 +576,67 @@ func (c *Client) do(ctx context.Context, httpClient *http.Client,
 			"and that the control server role allows this route",
 			ErrRejected, method, path, response.StatusCode)
 	case response.StatusCode >= 400 && response.StatusCode < 500:
-		return nil, fmt.Errorf("%w: %s %s: HTTP %d: %s",
-			ErrRejected, method, path, response.StatusCode, summarizeError(raw))
+		// The rejection carries the full set of hostnames Gluetun would have
+		// accepted. That is far too useful to summarise away: keeping it on the
+		// error lets the caller choose a server Gluetun can actually reach instead
+		// of failing outright, without a second request.
+		return nil, &RejectionError{
+			message: fmt.Sprintf("%s: %s %s: HTTP %d: %s",
+				ErrRejected.Error(), method, path, response.StatusCode, summarizeError(raw)),
+			KnownHostnames: parseChoices(raw),
+		}
 	default:
 		return nil, fmt.Errorf("%w: %s %s: HTTP %d: %s",
 			ErrUnavailable, method, path, response.StatusCode, summarizeError(raw))
 	}
+}
+
+// RejectionError is a refusal from Gluetun that carries what it would have
+// accepted.
+//
+// It exists so a caller can recover rather than merely report. Gluetun validates a
+// pinned hostname against the list it loaded at startup, and when it refuses one it
+// enumerates every hostname in that list. Those names are the authoritative answer
+// to "what can this Gluetun actually be switched to right now?" - better than any
+// inference from files on disk, because it is Gluetun's own in-memory state.
+type RejectionError struct {
+	message string
+	// KnownHostnames is every hostname Gluetun listed as acceptable, nil when the
+	// refusal was about something else.
+	KnownHostnames []string
+}
+
+func (e *RejectionError) Error() string { return e.message }
+
+// Unwrap keeps errors.Is(err, ErrRejected) working, so existing callers are
+// unaffected by the richer type.
+func (e *RejectionError) Unwrap() error { return ErrRejected }
+
+// KnownHostnames extracts the hostnames Gluetun said it would accept, if the error
+// was that kind of rejection.
+func KnownHostnames(err error) (hostnames []string, found bool) {
+	var rejection *RejectionError
+	if !errors.As(err, &rejection) || len(rejection.KnownHostnames) == 0 {
+		return nil, false
+	}
+	return rejection.KnownHostnames, true
+}
+
+// parseChoices pulls the hostname list out of a rejection body.
+func parseChoices(raw []byte) (hostnames []string) {
+	match := choicesPattern.FindStringSubmatch(string(raw))
+	if match == nil {
+		return nil
+	}
+	for _, choice := range strings.Split(match[2], ",") {
+		choice = strings.TrimSpace(choice)
+		// Gluetun lists values for other fields the same way, so only accept
+		// something that looks like a hostname rather than, say, a country name.
+		if choice != "" && strings.Contains(choice, ".") && !strings.Contains(choice, " ") {
+			hostnames = append(hostnames, choice)
+		}
+	}
+	return hostnames
 }
 
 // choicesPattern matches the tail Gluetun appends when it rejects a value: the
