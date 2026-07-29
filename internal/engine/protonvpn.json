@@ -1,0 +1,81 @@
+{
+  "version": 4,
+  "timestamp": 1785308337,
+  "servers": [
+    {
+      "vpn": "openvpn",
+      "country": "Norway",
+      "city": "Oslo",
+      "server_name": "NO#1",
+      "hostname": "no-01.protonvpn.net",
+      "tcp": true,
+      "udp": true,
+      "port_forward": true,
+      "ips": [
+        "10.1.0.3"
+      ]
+    },
+    {
+      "vpn": "wireguard",
+      "country": "Norway",
+      "city": "Oslo",
+      "server_name": "NO#1",
+      "hostname": "no-01.protonvpn.net",
+      "wgpubkey": "k3",
+      "port_forward": true,
+      "ips": [
+        "10.1.0.3"
+      ]
+    },
+    {
+      "vpn": "openvpn",
+      "country": "Sweden",
+      "city": "Stockholm",
+      "server_name": "SE#1",
+      "hostname": "se-01.protonvpn.net",
+      "tcp": true,
+      "udp": true,
+      "port_forward": true,
+      "ips": [
+        "10.1.0.1"
+      ]
+    },
+    {
+      "vpn": "wireguard",
+      "country": "Sweden",
+      "city": "Stockholm",
+      "server_name": "SE#1",
+      "hostname": "se-01.protonvpn.net",
+      "wgpubkey": "k1",
+      "port_forward": true,
+      "ips": [
+        "10.1.0.1"
+      ]
+    },
+    {
+      "vpn": "openvpn",
+      "country": "Sweden",
+      "city": "Stockholm",
+      "server_name": "SE#2",
+      "hostname": "se-02.protonvpn.net",
+      "tcp": true,
+      "udp": true,
+      "port_forward": true,
+      "ips": [
+        "10.1.0.2"
+      ]
+    },
+    {
+      "vpn": "wireguard",
+      "country": "Sweden",
+      "city": "Stockholm",
+      "server_name": "SE#2",
+      "hostname": "se-02.protonvpn.net",
+      "wgpubkey": "k2",
+      "port_forward": true,
+      "ips": [
+        "10.1.0.2"
+      ]
+    }
+  ]
+}
