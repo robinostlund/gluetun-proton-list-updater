@@ -63,7 +63,6 @@ function render() {
   renderBest();
   renderGluetun();
   renderExit();
-  renderPort();
   renderGluetunDetail();
   renderProton();
   renderServersFile();
@@ -129,9 +128,14 @@ function renderAlerts() {
     </div></div>`);
   }
   if (snapshot.proton.from_cache) {
-    alerts.push(`<div class="alert alert-warn"><div>
-      <strong>Using the cached server list</strong>
-      Proton could not be reached, so loads and scores may be stale.
+    const stale = snapshot.proton.cache_stale;
+    alerts.push(`<div class="alert alert-${stale ? 'bad' : 'warn'}"><div>
+      <strong>Using the cached server list${stale ? ' — and it is old' : ''}</strong>
+      Proton could not be reached, so this list came from disk (fetched
+      ${escapeHTML(timeAgo(snapshot.proton.last_fetch))}).
+      ${stale
+        ? 'Utilisation figures that old may no longer reflect reality, so the ranking is a best guess.'
+        : 'Utilisation is still reasonably recent; the list is corrected as soon as Proton answers.'}
       ${escapeHTML(snapshot.proton.last_fetch_error || '')}
     </div></div>`);
   }
@@ -161,8 +165,12 @@ function renderCurrent() {
     ? `#${current.rank} of ${snapshot.candidates_total}`
     : current && current.excluded ? 'not in allowed set' : '–');
   text('current-ip', (gluetun.exit && gluetun.exit.ip) || '–');
+  // Whether Gluetun even asks for a port distinguishes "not yet" from "never".
   const ports = gluetun.forwarded_ports || [];
-  text('current-port', ports.length ? ports.join(', ') : 'none');
+  const requested = gluetun.port_forwarding_enabled;
+  text('current-port', ports.length
+    ? ports.join(', ')
+    : requested === false ? 'not requested' : 'none');
 
   const sources = {
     'pinned': 'Identified by the hostname this tool pinned in Gluetun.',
@@ -238,31 +246,6 @@ function renderExit() {
   text('exit-note', note);
 }
 
-// Proton only forwards ports on P2P servers, and only when Gluetun asks. Showing
-// whether it was requested separates "not yet" from "never will be".
-function renderPort() {
-  const gluetun = snapshot.gluetun;
-  const ports = gluetun.forwarded_ports || [];
-  const requested = gluetun.port_forwarding_enabled;
-
-  text('port-value', ports.length ? String(ports[0]) : 'none');
-  el('port-enabled').innerHTML = requested === undefined || requested === null
-    ? '<span class="muted">unknown</span>'
-    : boolMark(requested);
-  text('port-all', ports.length ? ports.join(', ') : '–');
-
-  let note = '';
-  if (requested === false) {
-    note = 'Gluetun is not requesting a forwarded port (VPN_PORT_FORWARDING is off).';
-  } else if (!ports.length && gluetun.status === 'running') {
-    const current = snapshot.selection.current;
-    note = current && !current.p2p
-      ? 'The current server is not P2P-enabled, and Proton only forwards ports on those.'
-      : 'No port forwarded yet; Proton can take a moment after connecting.';
-  }
-  text('port-note', note);
-}
-
 // Everything else Gluetun's API reports, including the filters it is enforcing -
 // which is usually the reason a specific server was refused.
 function renderGluetunDetail() {
@@ -301,7 +284,7 @@ function renderProton() {
   const proton = snapshot.proton;
   text('proton-count', `${proton.logicals_count} logical servers`);
   el('proton-login').innerHTML = boolMark(proton.logged_in);
-  text('proton-fetch', timeAgo(proton.last_fetch));
+  text('proton-fetch', timeAgo(proton.last_fetch) + (proton.from_cache ? ' (from cache)' : ''));
   text('proton-loads', timeAgo(proton.last_load_refresh));
   text('proton-next', snapshot.next_runs.server_list || '–');
   text('candidate-count', String(snapshot.candidates_total));

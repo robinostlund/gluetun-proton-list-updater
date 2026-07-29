@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -496,5 +497,27 @@ func TestHasGluetunDataDetectsOtherProviders(t *testing.T) {
 	}
 	if !HasGluetunData(paths) {
 		t.Error("a provider other than protonvpn can only have come from Gluetun")
+	}
+}
+
+// A relative path writes into the working directory rather than Gluetun's volume,
+// where it does nothing and is easy not to notice - a stray protonvpn.json once
+// appeared in the source tree exactly this way.
+func TestWriteRejectsRelativePaths(t *testing.T) {
+	t.Parallel()
+
+	_, err := Write(sampleServers(), Options{
+		Paths:         Paths{Directory: "servers", LegacyFile: "servers.json"},
+		SchemaVersion: 4,
+	})
+	if err == nil {
+		t.Fatal("expected a relative path to be refused")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("error should explain the requirement, got %v", err)
+	}
+
+	if _, err := Write(sampleServers(), Options{SchemaVersion: 4}); err == nil {
+		t.Error("expected an error when no path is configured at all")
 	}
 }

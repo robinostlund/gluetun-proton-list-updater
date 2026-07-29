@@ -87,6 +87,11 @@ type Proton struct {
 	LoadRefreshInterval time.Duration
 	// RequestTimeout bounds a single HTTP request to the Proton API.
 	RequestTimeout time.Duration
+	// CacheMaxAge is how old the cached server list may be before the tool says
+	// so. The cache is still used past it, because a stale list beats no list at
+	// all; the age is simply reported rather than hidden. Zero disables the
+	// warning.
+	CacheMaxAge time.Duration
 }
 
 // Gluetun describes how to reach the Gluetun control server.
@@ -281,6 +286,7 @@ func Load() (cfg Config, err error) {
 		RefreshInterval:     r.duration("PROTON_REFRESH_INTERVAL", 12*time.Hour),
 		LoadRefreshInterval: r.duration("PROTON_LOAD_REFRESH_INTERVAL", 15*time.Minute),
 		RequestTimeout:      r.duration("PROTON_REQUEST_TIMEOUT", 30*time.Second),
+		CacheMaxAge:         r.duration("PROTON_CACHE_MAX_AGE", 72*time.Hour),
 	}
 
 	cfg.Gluetun = Gluetun{

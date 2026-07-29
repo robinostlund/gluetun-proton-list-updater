@@ -88,10 +88,67 @@ func TestPinHostnameSendsMinimalPatch(t *testing.T) {
 	if len(cities) != 1 || cities[0] != "Stockholm" {
 		t.Errorf("cities = %v, want [Stockholm]", selection["cities"])
 	}
+	// The "only" filters must be cleared explicitly. Gluetun ANDs them with the
+	// pinned hostname, and its built-in view of a server's features can disagree
+	// with Proton's current data - one disagreement leaves nothing matching and
+	// crashes Gluetun's VPN loop. Clearing them is safe because pinning a single
+	// hostname is already the most specific selection possible.
+	for _, flag := range []string{
+		"port_forward_only", "secure_core_only", "tor_only", "stream_only",
+		"free_only", "premium_only", "multi_hop_only", "owned_only",
+	} {
+		value, present := selection[flag]
+		if !present {
+			t.Errorf("%s must be sent so the filter is cleared, not left in force", flag)
+			continue
+		}
+		if value != false {
+			t.Errorf("%s = %v, want false", flag, value)
+		}
+	}
+
 	// Still nothing beyond the server selection: the patch must not disturb any
 	// other Gluetun setting.
-	if len(body) != 1 || len(provider) != 1 || len(selection) != 3 {
+	const wantSelectionFields = 3 + 8 // hostname, country, city + the cleared flags
+	if len(body) != 1 || len(provider) != 1 || len(selection) != wantSelectionFields {
 		t.Errorf("patch carries unexpected fields: %v", body)
+	}
+}
+
+// Reading back what Gluetun enforces is what lets the tool choose a server that
+// satisfies it, rather than pinning one Gluetun will refuse.
+func TestRequirementsFromSettings(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"provider":{"name":"protonvpn","server_selection":{
+				"port_forward_only":true,"secure_core_only":false,"tor_only":false,
+				"stream_only":true,"free_only":false,"premium_only":false,
+				"multi_hop_only":true,"owned_only":false}}}`)
+	})
+
+	settings, err := client.GetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requirements := settings.Requirements()
+	switch {
+	case !requirements.PortForward:
+		t.Error("port_forward_only should be reported")
+	case !requirements.Stream:
+		t.Error("stream_only should be reported")
+	case !requirements.MultiHop:
+		t.Error("multi_hop_only should be reported")
+	case requirements.SecureCore || requirements.Tor || requirements.Free || requirements.Premium || requirements.Owned:
+		t.Errorf("unset filters must not be reported: %+v", requirements)
+	}
+
+	// A zero Settings must not claim anything is required.
+	var empty Settings
+	if (empty.Requirements() != Requirements{}) {
+		t.Error("empty settings must report no requirements")
 	}
 }
 

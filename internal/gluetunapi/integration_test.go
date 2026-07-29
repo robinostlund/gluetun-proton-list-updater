@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -167,6 +168,55 @@ func TestIntegrationCrossCountryPinDoesNotCrashTheTunnel(t *testing.T) {
 	}
 }
 
+// Regression test for a crash observed in production.
+//
+// Gluetun ANDs every selection filter, including the boolean "only" ones. With
+// PORT_FORWARD_ONLY=on, pinning a server that Gluetun's own data does not mark as
+// port-forward-capable leaves nothing matching: it logs
+//
+//	no server found: … hostname node-se-07.protonvpn.net; port forwarding only
+//
+// and its VPN loop crashes, taking the tunnel down until the selection is fixed.
+// Clearing the "only" filters alongside the pin is what prevents it - the pin is
+// already the most specific selection possible, so they are redundant.
+func TestIntegrationPinIsNotBlockedByOnlyFilters(t *testing.T) {
+	client := integrationClient(t)
+	ctx := context.Background()
+
+	hostname, country := serverFailingRequirement(t, client)
+	t.Logf("pinning %s in %s, which does not satisfy Gluetun's active only-filters",
+		hostname, country)
+
+	if _, err := client.PinServer(ctx, PinTarget{Hostname: hostname, Country: country}); err != nil {
+		t.Fatalf("PinServer: %v", err)
+	}
+
+	// Watch for the crash the filter conflict used to cause.
+	deadline := time.Now().Add(40 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := client.Status(ctx)
+		if err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		if status == StatusCrashed {
+			t.Fatalf("the tunnel crashed after pinning %s: Gluetun's only-filters were "+
+				"not cleared, so nothing matched both them and the hostname", hostname)
+		}
+		if status == StatusRunning {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	settings, err := client.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if requirements := settings.Requirements(); requirements != (Requirements{}) {
+		t.Errorf("only-filters should have been cleared, still have %+v", requirements)
+	}
+}
+
 // A hostname Gluetun does not know must be a distinguishable rejection, not an
 // outage: that difference is what lets the engine try the next candidate rather
 // than give up.
@@ -294,6 +344,69 @@ func firstKnownServer(t *testing.T, client *Client) (hostname, country string) {
 	}
 	t.Fatalf("no %s server found in %s", wantVPN, path)
 	return "", ""
+}
+
+// serverFailingRequirement finds a server Gluetun knows but which fails one of the
+// "only" filters it is enforcing - the combination that used to crash the tunnel.
+func serverFailingRequirement(t *testing.T, client *Client) (hostname, country string) {
+	t.Helper()
+
+	// Earlier tests pin servers, and pinning clears the only-filters - so restore
+	// the one under test rather than depending on test order.
+	yes := true
+	patch := Settings{Provider: &Provider{
+		ServerSelection: &ServerSelection{PortForwardOnly: &yes},
+	}}
+	if _, err := client.mutateRaw(context.Background(), http.MethodPut, "/v1/vpn/settings", patch); err != nil {
+		t.Fatalf("re-enabling port_forward_only: %v", err)
+	}
+
+	settings, err := client.GetSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if !settings.Requirements().PortForward {
+		t.Skip("Gluetun did not accept port_forward_only, so there is no conflict to test")
+	}
+
+	path := os.Getenv("GLUETUN_ITEST_SERVERS_FILE")
+	if path == "" {
+		t.Skip("GLUETUN_ITEST_SERVERS_FILE is not set")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	var file struct {
+		Servers   []portForwardEntry `json:"servers"`
+		Protonvpn struct {
+			Servers []portForwardEntry `json:"servers"`
+		} `json:"protonvpn"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("decoding %s: %v", path, err)
+	}
+	servers := file.Servers
+	if len(servers) == 0 {
+		servers = file.Protonvpn.Servers
+	}
+
+	wantVPN := settings.VPNType()
+	for _, server := range servers {
+		if server.VPN == wantVPN && !server.PortForward && server.Hostname != "" {
+			return server.Hostname, server.Country
+		}
+	}
+	t.Skip("Gluetun's server list has no server lacking port forwarding")
+	return "", ""
+}
+
+type portForwardEntry struct {
+	VPN         string `json:"vpn"`
+	Country     string `json:"country"`
+	Hostname    string `json:"hostname"`
+	PortForward bool   `json:"port_forward"`
 }
 
 // serverOutsideCountry finds a server in some country other than the one given.

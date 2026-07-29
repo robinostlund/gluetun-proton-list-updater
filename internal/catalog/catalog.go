@@ -99,6 +99,41 @@ type Options struct {
 	VPNType string
 	// IncludeIPv6 keeps Proton's IPv6 entry addresses.
 	IncludeIPv6 bool
+	// Require narrows candidates to those satisfying filters Gluetun itself is
+	// enforcing. Gluetun ANDs its "only" filters with a pinned hostname, so a
+	// server that fails one of them cannot be connected to - it leaves Gluetun
+	// with nothing matching, which crashes its VPN loop.
+	Require Requirements
+}
+
+// Requirements mirrors the "only" filters a Gluetun instance is enforcing.
+type Requirements struct {
+	PortForward bool
+	SecureCore  bool
+	Tor         bool
+	Stream      bool
+	Free        bool
+	Premium     bool
+}
+
+// satisfied reports whether a logical server meets every requirement.
+func (r Requirements) satisfied(logical proton.LogicalServer) bool {
+	switch {
+	case r.PortForward && !logical.P2P():
+		return false
+	case r.SecureCore && !logical.SecureCore():
+		return false
+	case r.Tor && !logical.Tor():
+		return false
+	case r.Stream && !logical.Streaming():
+		return false
+	case r.Free && !logical.Free():
+		return false
+	case r.Premium && logical.Free():
+		return false
+	default:
+		return true
+	}
 }
 
 // secureCoreNamePattern extracts the exit country from a Secure Core server
@@ -163,6 +198,9 @@ func Build(logicals []proton.LogicalServer, opts Options) (candidates []Candidat
 			continue
 		}
 		if opts.MaxLoad > 0 && int(logical.Load) > opts.MaxLoad {
+			continue
+		}
+		if !opts.Require.satisfied(logical) {
 			continue
 		}
 

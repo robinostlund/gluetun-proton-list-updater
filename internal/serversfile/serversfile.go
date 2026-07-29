@@ -99,6 +99,22 @@ type Paths struct {
 	LegacyFile string
 }
 
+// validate rejects paths that would not land where Gluetun reads.
+func (p Paths) validate() (err error) {
+	for name, path := range map[string]string{
+		"servers directory": p.Directory,
+		"legacy file":       p.LegacyFile,
+	} {
+		if path != "" && !filepath.IsAbs(path) {
+			return fmt.Errorf("%s path %q must be absolute", name, path)
+		}
+	}
+	if p.Directory == "" && p.LegacyFile == "" {
+		return fmt.Errorf("no servers path configured")
+	}
+	return nil
+}
+
 // ManifestPath is the file whose presence means the directory layout is in use.
 func (p Paths) ManifestPath() string { return filepath.Join(p.Directory, manifestFilename) }
 
@@ -267,6 +283,11 @@ func Write(servers []Server, opts Options) (result WriteResult, err error) {
 		return result, fmt.Errorf("refusing to write an empty server list")
 	case opts.SchemaVersion == 0:
 		return result, fmt.Errorf("refusing to write without a schema version")
+	}
+	// A relative path would be written into the working directory rather than
+	// Gluetun's volume, where it does nothing and is easy not to notice.
+	if err := opts.Paths.validate(); err != nil {
+		return result, err
 	}
 
 	now := opts.Now

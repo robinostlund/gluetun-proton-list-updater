@@ -231,12 +231,64 @@ type PortForwarding struct {
 }
 
 // ServerSelection is Gluetun's server filter set.
+//
+// The boolean filters are pointers for a reason: Gluetun's patch semantics
+// override a pointer field whenever it is non-nil, so a pointer to false is the
+// only way to *clear* one. An empty slice, by contrast, means "leave unchanged" -
+// which is why a list filter can never be cleared through this API.
 type ServerSelection struct {
 	VPN       string   `json:"vpn,omitempty"`
 	Countries []string `json:"countries,omitempty"`
 	Cities    []string `json:"cities,omitempty"`
 	Names     []string `json:"names,omitempty"`
 	Hostnames []string `json:"hostnames,omitempty"`
+
+	PortForwardOnly *bool `json:"port_forward_only,omitempty"`
+	SecureCoreOnly  *bool `json:"secure_core_only,omitempty"`
+	TorOnly         *bool `json:"tor_only,omitempty"`
+	StreamOnly      *bool `json:"stream_only,omitempty"`
+	FreeOnly        *bool `json:"free_only,omitempty"`
+	PremiumOnly     *bool `json:"premium_only,omitempty"`
+	MultiHopOnly    *bool `json:"multi_hop_only,omitempty"`
+	OwnedOnly       *bool `json:"owned_only,omitempty"`
+}
+
+// Requirements are the "only" filters Gluetun is enforcing.
+//
+// They matter because Gluetun ANDs them with a pinned hostname: pin a server that
+// does not satisfy one and nothing matches, so Gluetun's VPN loop crashes and the
+// tunnel stays down. Reading them lets a caller choose a server that satisfies
+// them in the first place.
+type Requirements struct {
+	PortForward bool
+	SecureCore  bool
+	Tor         bool
+	Stream      bool
+	Free        bool
+	Premium     bool
+	// MultiHop and Owned are reported for completeness; ProtonVPN exposes no
+	// equivalent, so they cannot be satisfied deliberately.
+	MultiHop bool
+	Owned    bool
+}
+
+// Requirements reports the "only" filters currently in force.
+func (s Settings) Requirements() (requirements Requirements) {
+	if s.Provider == nil || s.Provider.ServerSelection == nil {
+		return requirements
+	}
+	selection := s.Provider.ServerSelection
+	isSet := func(flag *bool) bool { return flag != nil && *flag }
+	return Requirements{
+		PortForward: isSet(selection.PortForwardOnly),
+		SecureCore:  isSet(selection.SecureCoreOnly),
+		Tor:         isSet(selection.TorOnly),
+		Stream:      isSet(selection.StreamOnly),
+		Free:        isSet(selection.FreeOnly),
+		Premium:     isSet(selection.PremiumOnly),
+		MultiHop:    isSet(selection.MultiHopOnly),
+		Owned:       isSet(selection.OwnedOnly),
+	}
 }
 
 // Wireguard carries WireGuard specifics; only present so decoding a full
@@ -279,7 +331,27 @@ func (c *Client) PinServer(ctx context.Context, target PinTarget) (outcome strin
 		return "", errors.New("gluetunapi: empty hostname")
 	}
 
-	selection := &ServerSelection{Hostnames: []string{target.Hostname}}
+	// Clearing the "only" filters is what keeps the selection satisfiable.
+	//
+	// Pinning one hostname is already the most specific selection possible, so
+	// every other filter is redundant - but not harmless: Gluetun ANDs them, and
+	// its built-in view of a server's features can disagree with Proton's current
+	// data. A single disagreement (a server Proton marks P2P that Gluetun does
+	// not) leaves nothing matching, and Gluetun's VPN loop crashes rather than
+	// connecting. The operator's intent is honoured on our side instead, by only
+	// ever choosing servers that satisfy what Gluetun asked for.
+	no := false
+	selection := &ServerSelection{
+		Hostnames:       []string{target.Hostname},
+		PortForwardOnly: &no,
+		SecureCoreOnly:  &no,
+		TorOnly:         &no,
+		StreamOnly:      &no,
+		FreeOnly:        &no,
+		PremiumOnly:     &no,
+		MultiHopOnly:    &no,
+		OwnedOnly:       &no,
+	}
 	if target.Country != "" {
 		selection.Countries = []string{target.Country}
 	}

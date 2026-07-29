@@ -383,3 +383,40 @@ func TestBuildIncludesIPv6WhenAsked(t *testing.T) {
 		t.Error("EntryIPv6 should be dropped when IncludeIPv6 is false")
 	}
 }
+
+// Gluetun ANDs its "only" filters with a pinned hostname, so a candidate that
+// fails one of them cannot be connected to: Gluetun ends up with nothing matching
+// and its VPN loop crashes. Adopting those filters as requirements is what keeps
+// the choice connectable.
+func TestBuildAppliesGluetunRequirements(t *testing.T) {
+	t.Parallel()
+
+	logicals := []proton.LogicalServer{
+		logical("p2p", "SE", 10, proton.FeatureP2P),
+		logical("plain", "SE", 5, 0, withEntryIP("10.0.0.2")),
+		logical("stream", "SE", 8, proton.FeatureStreaming, withEntryIP("10.0.0.3")),
+	}
+
+	// Without requirements the quietest server wins on merit.
+	candidates, _ := Build(logicals, Options{})
+	if len(candidates) != 3 {
+		t.Fatalf("got %d candidates, want 3", len(candidates))
+	}
+
+	// PORT_FORWARD_ONLY on Gluetun means only P2P servers are usable at all.
+	candidates, _ = Build(logicals, Options{Require: Requirements{PortForward: true}})
+	if len(candidates) != 1 || candidates[0].ServerName != "p2p" {
+		t.Fatalf("got %+v, want only the P2P server", candidates)
+	}
+
+	candidates, _ = Build(logicals, Options{Require: Requirements{Stream: true}})
+	if len(candidates) != 1 || candidates[0].ServerName != "stream" {
+		t.Fatalf("got %+v, want only the streaming server", candidates)
+	}
+
+	// Free and premium are opposites, so requiring both can only be empty.
+	candidates, _ = Build(logicals, Options{Require: Requirements{Free: true, Premium: true}})
+	if len(candidates) != 0 {
+		t.Errorf("got %d candidates, want none", len(candidates))
+	}
+}

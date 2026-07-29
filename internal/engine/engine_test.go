@@ -46,6 +46,13 @@ type fakeGluetun struct {
 	// settingsDelay makes PUT /v1/vpn/settings answer slowly while still applying
 	// the change, which is how a real Gluetun behaves while its VPN loop restarts.
 	settingsDelay time.Duration
+	// portForwardOnly mirrors Gluetun's PORT_FORWARD_ONLY, which it ANDs with any
+	// pinned hostname.
+	portForwardOnly bool
+	// applyOutcome overrides the answer to PUT /v1/vpn/settings. Gluetun answers
+	// "already crashed" when its VPN loop was not running, meaning it stored the
+	// selection without restarting.
+	applyOutcome string
 }
 
 func newFakeGluetun(publicIP string, exitIPs map[string]string) *fakeGluetun {
@@ -103,7 +110,12 @@ func (f *fakeGluetun) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]string{"outcome": body.Status})
 	})
 	mux.HandleFunc("GET /v1/vpn/settings", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"type":"wireguard","provider":{"name":"protonvpn","server_selection":{"vpn":"wireguard"}}}`)
+		f.mu.Lock()
+		portForwardOnly := f.portForwardOnly
+		f.mu.Unlock()
+		fmt.Fprintf(w, `{"type":"wireguard","provider":{"name":"protonvpn",`+
+			`"server_selection":{"vpn":"wireguard","port_forward_only":%t},`+
+			`"port_forwarding":{"enabled":%t}}}`, portForwardOnly, portForwardOnly)
 	})
 	mux.HandleFunc("PUT /v1/vpn/settings", func(w http.ResponseWriter, r *http.Request) {
 		var patch gluetunapi.Settings
@@ -135,6 +147,10 @@ func (f *fakeGluetun) handler() http.Handler {
 		f.pinned = append(f.pinned, hostnames[0])
 		if ip, ok := f.exitIPByHostname[hostnames[0]]; ok {
 			f.publicIP = ip
+		}
+		if f.applyOutcome != "" {
+			_, _ = io.WriteString(w, f.applyOutcome)
+			return
 		}
 		_, _ = io.WriteString(w, "VPN settings updated")
 	})
@@ -1060,5 +1076,170 @@ func TestHealthyReportsAWriteFailure(t *testing.T) {
 	}
 	if !strings.Contains(reason, "permission denied") {
 		t.Errorf("reason = %q, want the underlying error", reason)
+	}
+}
+
+// Gluetun ANDs PORT_FORWARD_ONLY with any pinned hostname, so pinning a server
+// that does not support port forwarding leaves nothing matching and crashes its
+// VPN loop. The requirement has to be adopted into the selection.
+func TestEngineAdoptsGluetunPortForwardRequirement(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.portForwardOnly = true
+
+	harness.run(t, func() bool { return harness.engine.Snapshot().CandidatesTotal > 0 })
+
+	if got := harness.engine.requirements.PortForward; !got {
+		t.Error("the engine should have adopted port_forward_only from Gluetun")
+	}
+	// The fake Proton list marks every server P2P (Features: 4), so all survive -
+	// what matters is that the requirement reached the catalog options.
+	if got := harness.engine.catalogOptions().Require.PortForward; !got {
+		t.Error("the requirement should be applied when building the catalog")
+	}
+}
+
+// Gluetun stores a new selection even when its VPN loop is not running, but then
+// answers "already crashed" and does not restart - leaving the change unused. An
+// explicit restart is needed, or the tunnel stays down.
+func TestEngineRestartsWhenGluetunDidNotApplyTheSelection(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.gluetun.applyOutcome = "already crashed"
+
+	harness.run(t, func() bool {
+		return len(harness.gluetun.statusWrites()) >= 2
+	})
+
+	writes := harness.gluetun.statusWrites()
+	if writes[0] != gluetunapi.StatusStopped || writes[1] != gluetunapi.StatusRunning {
+		t.Errorf("status writes = %v, want an explicit [stopped running] restart", writes)
+	}
+	if pinned := harness.gluetun.pinnedHostnames(); len(pinned) == 0 {
+		t.Error("the selection should still have been sent")
+	}
+}
+
+func TestOutcomeMeansNotRestarted(t *testing.T) {
+	t.Parallel()
+
+	for outcome, want := range map[string]bool{
+		"already crashed":      true,
+		"already stopped":      true,
+		"ALREADY CRASHED":      true,
+		" already stopped ":    true,
+		"running":              false,
+		"VPN settings updated": false,
+		"":                     false,
+	} {
+		if got := outcomeMeansNotRestarted(outcome); got != want {
+			t.Errorf("outcomeMeansNotRestarted(%q) = %v, want %v", outcome, got, want)
+		}
+	}
+}
+
+// Utilisation is what the whole ranking rests on, so a restart during a Proton
+// outage should resume with the figures from the last cheap refresh rather than
+// whichever ones the last full fetch happened to see.
+func TestEngineAppliesCachedLoadsAfterRestart(t *testing.T) {
+	// First run: fetch the list and let a loads refresh persist fresher figures.
+	warm := newHarness(t, false, nil)
+	warm.run(t, func() bool { return warm.engine.Snapshot().CandidatesTotal > 0 })
+
+	// Persist load figures that differ markedly from the list's own.
+	if err := warm.engine.loads.save(cachedLoads{
+		UpdatedAt: time.Now(),
+		Loads: []proton.ServerLoad{
+			{ID: "l1", Load: 3, Status: 1},  // SE#1 was 80% in the list
+			{ID: "l2", Load: 91, Status: 1}, // SE#2 was 5%
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second run against a failing Proton, reusing the same state directory.
+	cold := newHarness(t, true, nil)
+	for _, name := range []string{logicalsFileName, loadsFileName} {
+		if err := os.Rename(filepath.Join(warm.stateDir, name),
+			filepath.Join(cold.stateDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cold.run(t, func() bool { return cold.engine.Snapshot().CandidatesTotal > 0 })
+
+	// The cached loads must have overridden the list's own figures, which flips
+	// the ranking.
+	best := cold.engine.Snapshot().Selection.Best
+	if best == nil {
+		t.Fatal("no best candidate")
+	}
+	if best.ServerName != "SE#1" {
+		t.Errorf("best = %s (load %d%%), want SE#1 at 3%% from the cached loads",
+			best.ServerName, best.Load)
+	}
+}
+
+// A cached list past PROTON_CACHE_MAX_AGE is still used - stale beats nothing -
+// but the staleness has to be reported rather than hidden.
+func TestEngineReportsAStaleCache(t *testing.T) {
+	warm := newHarness(t, false, nil)
+	warm.run(t, func() bool { return warm.engine.Snapshot().CandidatesTotal > 0 })
+
+	// Age the cached list well past the threshold.
+	cached, found, err := warm.engine.logicals.load()
+	if err != nil || !found {
+		t.Fatalf("expected a cached list: %v", err)
+	}
+	cached.FetchedAt = time.Now().Add(-30 * 24 * time.Hour)
+	if err := warm.engine.logicals.save(cached); err != nil {
+		t.Fatal(err)
+	}
+
+	cold := newHarness(t, true, func(cfg *config.Config) {
+		cfg.Proton.CacheMaxAge = 72 * time.Hour
+	})
+	if err := os.Rename(filepath.Join(warm.stateDir, logicalsFileName),
+		filepath.Join(cold.stateDir, logicalsFileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	cold.run(t, func() bool { return cold.engine.Snapshot().CandidatesTotal > 0 })
+
+	snapshot := cold.engine.Snapshot()
+	if !snapshot.Proton.CacheStale {
+		t.Error("a month-old cache should be reported as stale")
+	}
+	// Still used, because stale data beats no data.
+	if snapshot.CandidatesTotal == 0 {
+		t.Error("the stale cache should still have been used")
+	}
+}
+
+// A rebuild of the catalog must not discard utilisation updates. The catalog is
+// rebuilt from the cached Proton list whenever the VPN protocol or Gluetun's
+// filters change, and that list can be hours older than the last loads refresh -
+// so a naive rebuild silently reverts every load.
+func TestRebuildKeepsTheLatestLoads(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().CandidatesTotal > 0 })
+	engine := harness.engine
+
+	// Fresher figures than the list carries, as a loads refresh would produce.
+	engine.latestLoads = []proton.ServerLoad{
+		{ID: "l1", Load: 7, Status: 1},  // SE#1 is 80% in the list
+		{ID: "l2", Load: 88, Status: 1}, // SE#2 is 5%
+	}
+
+	engine.rebuildFromCache("test")
+
+	byName := map[string]uint8{}
+	for _, candidate := range engine.candidates {
+		byName[candidate.ServerName] = candidate.Load
+	}
+	if byName["SE#1"] != 7 || byName["SE#2"] != 88 {
+		t.Errorf("loads after rebuild = %v, want SE#1 at 7%% and SE#2 at 88%%", byName)
+	}
+	// And the ranking must follow.
+	if best := engine.ranked[0].Candidate.ServerName; best != "SE#1" {
+		t.Errorf("best after rebuild = %s, want SE#1", best)
 	}
 }

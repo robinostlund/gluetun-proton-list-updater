@@ -74,6 +74,8 @@ integration-up: ## Start a throwaway Gluetun container for integration tests
 		-e HTTP_CONTROL_SERVER_ADDRESS=":8000" \
 		-e HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE='{"name":"itest","auth":"apikey","apikey":"$(ITEST_APIKEY)"}' \
 		-e UPDATER_PERIOD=0 \
+		-e PORT_FORWARD_ONLY=on \
+		-e VPN_PORT_FORWARDING=on \
 		-e HEALTH_VPN_DURATION_INITIAL=6h \
 		qmcgaw/gluetun:$(GLUETUN_VERSION)
 	@echo "waiting for the control server..."

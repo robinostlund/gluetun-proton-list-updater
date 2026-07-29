@@ -45,6 +45,7 @@ type Engine struct {
 
 	state    *stateStore
 	logicals *logicalsCache
+	loads    *loadsCache
 
 	// commands carries dashboard-initiated work into the run loop.
 	commands chan command
@@ -66,11 +67,24 @@ type Engine struct {
 	ranked         []scoring.Scored
 	stats          catalog.Stats
 	vpnType        string
-	schemaVersion  uint16
+	// requirements are the "only" filters Gluetun is enforcing. They are read from
+	// Gluetun rather than configured here, because a candidate that fails one of
+	// them cannot be connected to at all.
+	requirements  catalog.Requirements
+	schemaVersion uint16
 	// layout is which storage layout the running Gluetun uses. It is detected
 	// rather than configured, and re-detected on each write because Gluetun can
 	// be upgraded underneath us.
 	layout serversfile.Layout
+	// latestLoads is the most recent utilisation figures seen, from either a
+	// refresh or the cache.
+	//
+	// It exists because the catalog is rebuilt from the cached Proton list whenever
+	// something outside that list changes what counts as a candidate - the VPN
+	// protocol, or the filters Gluetun enforces. A rebuild would otherwise revert
+	// every load to whatever the last full fetch saw, silently undoing up to a
+	// refresh interval of updates.
+	latestLoads []proton.ServerLoad
 	// gluetunWroteServerData records whether Gluetun had written any server data
 	// of its own before this process wrote anything.
 	//
@@ -124,6 +138,7 @@ func New(opts Options) (engine *Engine, err error) {
 		}),
 		state:       newStateStore(opts.Config.StateDir),
 		logicals:    newLogicalsCache(opts.Config.StateDir),
+		loads:       newLoadsCache(opts.Config.StateDir),
 		commands:    make(chan command, 16),
 		subscribers: newSubscriberSet(),
 		startedAt:   time.Now(),
@@ -326,16 +341,61 @@ func (e *Engine) loadCachedLogicals() {
 	}
 
 	e.applyLogicals(cached.Servers, true)
+
+	age := time.Since(cached.FetchedAt)
+	stale := e.cfg.Proton.CacheMaxAge > 0 && age > e.cfg.Proton.CacheMaxAge
+
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Proton.FromCache = true
 		snapshot.Proton.LastFetch = cached.FetchedAt
 		snapshot.Proton.ListLastModified = cached.LastModified
 		snapshot.Proton.LogicalsCount = len(cached.Servers)
+		snapshot.Proton.CacheStale = stale
 	})
+
+	if stale {
+		// Still used: a stale list beats no list, and it is corrected as soon as
+		// Proton answers. But choosing on week-old utilisation figures deserves
+		// saying out loud rather than being buried in a startup line.
+		e.logger.Warn("the cached server list is old; utilisation figures may be well out of date",
+			"age", age.Truncate(time.Minute), "max_age", e.cfg.Proton.CacheMaxAge)
+	}
 	e.logger.Info("loaded server list from cache",
 		"logicals", len(cached.Servers),
 		"candidates", len(e.candidates),
-		"age", time.Since(cached.FetchedAt).Truncate(time.Second))
+		"age", age.Truncate(time.Second))
+
+	// Utilisation is cached separately and refreshed far more often, so applying
+	// it here recovers most of what a restart would otherwise lose.
+	e.applyCachedLoads(cached.FetchedAt)
+}
+
+// applyCachedLoads overlays utilisation figures newer than the cached list.
+func (e *Engine) applyCachedLoads(listFetchedAt time.Time) {
+	cached, found, err := e.loads.load()
+	switch {
+	case err != nil:
+		e.logger.Warn("could not read cached server loads", "error", err)
+		return
+	case !found:
+		return
+	case !cached.UpdatedAt.After(listFetchedAt):
+		return // the list itself is at least as fresh
+	}
+
+	e.latestLoads = cached.Loads
+	updated, disabled := catalog.ApplyLoads(e.candidates, cached.Loads)
+	if len(disabled) > 0 {
+		e.dropDisabled(disabled)
+	}
+	e.rerank()
+
+	e.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Proton.LastLoadRefresh = cached.UpdatedAt
+	})
+	e.logger.Info("applied cached server loads",
+		"updated", updated,
+		"age", time.Since(cached.UpdatedAt).Truncate(time.Second))
 }
 
 // applyLogicals rebuilds the catalog and ranking from a logical server list.
@@ -344,6 +404,16 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 	e.candidates = candidates
 	e.stats = stats
 	e.fileCandidates, _ = catalog.Build(logicals, e.fileCatalogOptions())
+
+	// Re-apply the newest utilisation figures over the freshly built candidates:
+	// the list they came from can be hours older than the last loads refresh.
+	if len(e.latestLoads) > 0 {
+		updated, disabled := catalog.ApplyLoads(e.candidates, e.latestLoads)
+		if len(disabled) > 0 {
+			e.dropDisabled(disabled)
+		}
+		e.logger.Debug("re-applied the latest loads after rebuilding", "updated", updated)
+	}
 	e.rerank()
 
 	if len(stats.UnknownCountries) > 0 {
@@ -371,6 +441,7 @@ func (e *Engine) catalogOptions() catalog.Options {
 		Free:             e.cfg.Filter.Free,
 		VPNType:          e.effectiveVPNType(),
 		IncludeIPv6:      e.cfg.Servers.IncludeIPv6,
+		Require:          e.requirements,
 	}
 }
 
@@ -386,6 +457,9 @@ func (e *Engine) fileCatalogOptions() catalog.Options {
 	opts.ExcludeCountries = nil
 	opts.Cities = nil
 	opts.MaxLoad = 0
+	// Gluetun applies its own "only" filters when choosing from this list, so it
+	// should receive every server rather than a pre-narrowed set.
+	opts.Require = catalog.Requirements{}
 	return opts
 }
 

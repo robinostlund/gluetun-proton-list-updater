@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/config"
@@ -344,6 +345,21 @@ func (e *Engine) applyTarget(ctx context.Context, target scoring.Scored) (outcom
 		}); updateErr != nil {
 			e.logger.Warn("could not persist pinned hostname", "error", updateErr)
 		}
+
+		// Gluetun stores the new selection but only restarts the VPN loop if it
+		// was running. On a crashed or stopped loop it answers "already crashed" /
+		// "already stopped" and the change sits unused until something restarts
+		// it - so restart it explicitly rather than waiting out a retry backoff,
+		// or worse, leaving the tunnel down.
+		if outcomeMeansNotRestarted(outcome) {
+			e.logger.Info("gluetun stored the selection without restarting, restarting explicitly",
+				"outcome", outcome)
+			restarted, err := e.gluetun.Reconnect(ctx)
+			if err != nil {
+				return "", fmt.Errorf("restarting after %q: %w", outcome, err)
+			}
+			outcome = restarted
+		}
 		return outcome, nil
 
 	case config.ReconnectStatus:
@@ -362,6 +378,18 @@ func (e *Engine) applyTarget(ctx context.Context, target scoring.Scored) (outcom
 
 	default:
 		return "", fmt.Errorf("reconnect mode %q does not change the tunnel", e.cfg.Switch.Mode)
+	}
+}
+
+// outcomeMeansNotRestarted reports whether Gluetun's answer indicates it kept the
+// VPN loop as it was. Its outcome strings for those cases are of the form
+// "already <status>".
+func outcomeMeansNotRestarted(outcome string) bool {
+	switch strings.TrimSpace(strings.ToLower(outcome)) {
+	case "already crashed", "already stopped":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -114,15 +114,24 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 		return
 	}
 
+	e.latestLoads = loads
 	updated, disabled := catalog.ApplyLoads(e.candidates, loads)
 	if len(disabled) > 0 {
 		e.dropDisabled(disabled)
 	}
 	e.rerank()
 
+	// Persisted separately from the server list: a few kilobytes rewritten every
+	// refresh, so a restart during a Proton outage resumes with recent
+	// utilisation instead of whatever the last full fetch saw.
+	if err := e.loads.save(cachedLoads{UpdatedAt: time.Now(), Loads: loads}); err != nil {
+		e.logger.Warn("could not cache server loads", "error", err)
+	}
+
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Proton.LastLoadRefresh = time.Now()
 		snapshot.Proton.LastLoadError = ""
+		snapshot.Proton.CacheStale = false
 	})
 	e.logger.Debug("refreshed server loads",
 		"trigger", trigger, "updated", updated, "disabled", len(disabled))
@@ -277,6 +286,7 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 		if vpnType := settings.VPNType(); vpnType != "" {
 			e.updateVPNType(vpnType)
 		}
+		e.updateRequirements(settings.Requirements())
 	}
 
 	// The public IP is only meaningful while the tunnel is up, and asking for it
@@ -398,6 +408,53 @@ func (e *Engine) checkServerDataIsRead() {
 		"hint", reason)
 }
 
+// updateRequirements adopts the "only" filters Gluetun is enforcing.
+//
+// Without this, the tool can pick a server Gluetun refuses to use: with
+// PORT_FORWARD_ONLY=on, pinning a server that does not support port forwarding
+// leaves Gluetun's filters matching nothing, and its VPN loop crashes instead of
+// connecting. Adopting the requirements means the operator's intent is satisfied
+// by the choice rather than fought over.
+func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
+	requirements := catalog.Requirements{
+		PortForward: from.PortForward,
+		SecureCore:  from.SecureCore,
+		Tor:         from.Tor,
+		Stream:      from.Stream,
+		Free:        from.Free,
+		Premium:     from.Premium,
+	}
+	if requirements == e.requirements {
+		return
+	}
+
+	e.logger.Info("adopting the server requirements gluetun is enforcing",
+		"port_forward_only", requirements.PortForward,
+		"secure_core_only", requirements.SecureCore,
+		"tor_only", requirements.Tor,
+		"stream_only", requirements.Stream,
+		"free_only", requirements.Free,
+		"premium_only", requirements.Premium)
+	if from.MultiHop || from.Owned {
+		e.logger.Warn("gluetun enforces a filter ProtonVPN does not express, so it cannot be satisfied",
+			"multi_hop_only", from.MultiHop, "owned_only", from.Owned)
+	}
+
+	e.requirements = requirements
+	e.rebuildFromCache("gluetun requirements changed")
+}
+
+// rebuildFromCache re-derives the catalog from the cached Proton list, used when
+// something outside the list itself changes what counts as a candidate.
+func (e *Engine) rebuildFromCache(reason string) {
+	cached, found, err := e.logicals.load()
+	if err != nil || !found {
+		return
+	}
+	e.logger.Info("rebuilding candidate list", "reason", reason)
+	e.applyLogicals(cached.Servers, true)
+}
+
 // updateVPNType reacts to Gluetun's configured protocol. When VPN_TYPE is auto
 // and the protocol turns out to be WireGuard, candidates without a WireGuard key
 // must be dropped, so the catalog is rebuilt.
@@ -411,12 +468,7 @@ func (e *Engine) updateVPNType(vpnType string) {
 		return
 	}
 
-	e.logger.Info("gluetun protocol detected, rebuilding candidate list", "vpn", vpnType)
-	cached, found, err := e.logicals.load()
-	if err != nil || !found {
-		return
-	}
-	e.applyLogicals(cached.Servers, true)
+	e.rebuildFromCache("gluetun protocol detected: " + vpnType)
 }
 
 // currentHostname determines which server the tunnel is on.

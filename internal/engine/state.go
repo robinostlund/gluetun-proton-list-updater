@@ -15,6 +15,7 @@ const (
 	stateFileName    = "state.json"
 	sessionFileName  = "session.json"
 	logicalsFileName = "logicals.json"
+	loadsFileName    = "loads.json"
 )
 
 // maxHistory bounds the persisted switch history.
@@ -124,6 +125,47 @@ type cachedLogicals struct {
 type logicalsCache struct {
 	path string
 	mu   sync.Mutex
+}
+
+// cachedLoads is the on-disk copy of Proton's utilisation figures.
+//
+// It is deliberately separate from the server list. The list is several megabytes
+// and changes twice a day; the loads are a few kilobytes and change every few
+// minutes. Keeping them apart means a restart during a Proton outage resumes with
+// utilisation figures minutes old rather than hours old - which matters for a tool
+// whose entire purpose is picking the least utilised server.
+type cachedLoads struct {
+	UpdatedAt time.Time           `json:"updated_at"`
+	Loads     []proton.ServerLoad `json:"loads"`
+}
+
+type loadsCache struct {
+	path string
+	mu   sync.Mutex
+}
+
+func newLoadsCache(directory string) *loadsCache {
+	return &loadsCache{path: filepath.Join(directory, loadsFileName)}
+}
+
+func (c *loadsCache) load() (cached cachedLoads, found bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	found, err = atomicfile.ReadJSON(c.path, &cached)
+	if err != nil {
+		return cachedLoads{}, false, err
+	}
+	if !found || len(cached.Loads) == 0 {
+		return cachedLoads{}, false, nil
+	}
+	return cached, true, nil
+}
+
+func (c *loadsCache) save(cached cachedLoads) (err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return atomicfile.WriteJSON(c.path, cached, 0o600)
 }
 
 func newLogicalsCache(directory string) *logicalsCache {

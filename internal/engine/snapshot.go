@@ -52,6 +52,10 @@ type ProtonStatus struct {
 	// FromCache is true when the current list came from disk because Proton
 	// could not be reached.
 	FromCache bool `json:"from_cache"`
+	// CacheStale is true when that cached list is older than
+	// PROTON_CACHE_MAX_AGE. It is still used - a stale list beats none - but the
+	// utilisation figures behind every decision may be well out of date.
+	CacheStale bool `json:"cache_stale"`
 }
 
 // GluetunStatus is everything this tool reads from Gluetun's control server,

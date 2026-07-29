@@ -138,14 +138,62 @@ needs no key, but leaves the control server open to anything on that Docker netw
 the tool falls back to `RECONNECT_MODE=status`-style behaviour only if you configure it — otherwise
 every switch is refused and the dashboard says so.
 
-**2. Do not set `SERVER_CITIES` or `SERVER_NAMES` on Gluetun.** Gluetun combines every
-server-selection filter with **AND**. The tool overwrites `countries` and `cities` when it pins a
-server, so those stay consistent — but a filter it cannot overwrite can leave *no* server matching
-both, and Gluetun then logs `no server found`, crashes its VPN loop and the tunnel stays down. Do
-the filtering here (`COUNTRIES`, `CITIES`) instead. `SERVER_COUNTRIES` on Gluetun is fine and
-useful as a first-connection default.
+**2. Do not set `SERVER_NAMES` or `SERVER_NUMBERS` on Gluetun.** Gluetun combines every
+server-selection filter with **AND**, and a *list* filter cannot be cleared through its API (an empty
+list means "leave unchanged"). A filter this tool cannot overwrite can leave **no** server matching,
+and Gluetun then logs `no server found`, crashes its VPN loop, and the tunnel stays down. Do that
+filtering here instead.
+
+`SERVER_COUNTRIES`, `SERVER_CITIES` and the `*_ONLY` flags are all fine:
+
+- `countries` and `cities` are overwritten with the chosen server's own values on every pin.
+- the boolean `*_ONLY` filters (`PORT_FORWARD_ONLY`, `SECURE_CORE_ONLY`, `TOR_ONLY`, `STREAM_ONLY`, …)
+  are **read** from Gluetun and adopted as selection requirements — so a server that satisfies them
+  is chosen in the first place — and then **cleared** on the pin, because pinning one hostname is
+  already more specific than any of them and Gluetun's built-in view of a server's features can
+  disagree with Proton's current data. One disagreement was enough to crash a real tunnel:
+
+  ```
+  no server found: … hostname node-se-07.protonvpn.net; port forwarding only
+  ```
+
+  There is an integration test for exactly that, verified to fail without the fix.
 
 Also required: the `/gluetun` volume shared between both containers.
+
+### Do not set `STORAGE_FILEPATH` on Gluetun
+
+It is the old name for a setting that no longer means what it looks like, and it has two traps:
+
+```go
+// gluetun's own settings reader
+filePath := r.Get("STORAGE_FILEPATH", …)
+if filePath != nil {
+    if *filePath == "" {
+        s.ServersEnabled = ptrTo(false)      // an empty value DISABLES storage
+    } else {
+        s.LegacyServersFilepath = *filePath  // only sets the LEGACY path
+    }
+} else {
+    s.ServersEnabled, … = r.BoolPtr("STORAGE_SERVERS_ENABLED")
+    s.ServersPath = r.String("STORAGE_SERVERS_DIRECTORY_PATH")
+}
+```
+
+1. **It does not switch Gluetun to the legacy layout.** `STORAGE_FILEPATH=/gluetun/servers.json` only
+   tells Gluetun where the legacy file to *migrate from* lives. Current Gluetun still uses
+   `/gluetun/servers/`, and reads the legacy file only when that directory's `manifest.json` is
+   absent — which it never is after Gluetun has started. Verified: with it set, Gluetun still logs
+   `Servers directory path: /gluetun/servers/`.
+2. **Setting it makes `STORAGE_SERVERS_ENABLED` be ignored entirely** — they are the two branches of
+   one `if`. And an *empty* value silently disables server storage, which is easy to do by accident
+   with `STORAGE_FILEPATH:` and nothing after it in a compose file. Verified: with
+   `STORAGE_FILEPATH=` **and** `STORAGE_SERVERS_ENABLED=yes`, Gluetun logs
+   `Storage settings: disabled`.
+
+Leave both unset (the defaults are what this tool expects), or use the current names:
+`STORAGE_SERVERS_ENABLED` and `STORAGE_SERVERS_DIRECTORY_PATH`. If you do move the directory, set
+`SERVERS_DIR` here to match. Trap 2 is caught by the check described next.
 
 ### `STORAGE_SERVERS_ENABLED=yes` is required
 
@@ -375,6 +423,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `PROTON_API_URL` | `https://vpn-api.proton.me` | API base URL |
 | `PROTON_APP_VERSION` | `linux-vpn-cli@4.15.2` | `x-pm-appversion` header; Proton rejects versions it deems too old |
 | `PROTON_REQUEST_TIMEOUT` | `30s` | Per-request timeout |
+| `PROTON_CACHE_MAX_AGE` | `72h` | How old the cached list may be before it is reported as stale. It is still used past this — a stale list beats none. `0` disables the warning |
 
 ### Gluetun
 
@@ -455,7 +504,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `DASHBOARD_ENABLED` | `true` | Serve the web UI |
 | `DASHBOARD_ADDRESS` | `:8080` | Listen address |
 | `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | – | Basic auth (set both) |
-| `STATE_DIR` | `/data` | Session, cached list and history |
+| `STATE_DIR` | `/data` | Proton session (`session.json`), cached server list (`logicals.json`), cached utilisation (`loads.json`) and switch history (`state.json`). Should be a volume: without it every restart re-authenticates, and Proton rate-limits logins |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FORMAT` | `text` | `text` or `json` |
 | `TZ` | – | Timezone for log timestamps |
@@ -469,6 +518,7 @@ The failure modes this was built around, and what happens:
 | Failure | Behaviour |
 |---|---|
 | **Proton unreachable** | Falls back to the server list cached in `STATE_DIR`, flags it on the dashboard, keeps managing the tunnel. `servers.json` is left untouched rather than emptied. |
+| **Proton unreachable across a restart** | The cached list is reloaded from disk at startup, and the separately cached utilisation figures are applied over it — so a restart resumes with loads minutes old rather than hours old. Past `PROTON_CACHE_MAX_AGE` the list is still used (stale beats nothing) but reported as stale. |
 | **Proton rate limits (429)** | Retried up to 3 times, honouring `Retry-After`. |
 | **Proton session expires** | Refresh token used automatically; a dead refresh token triggers a fresh login. The session is persisted, so restarts do not re-authenticate — Proton rate-limits logins hard. |
 | **Wrong credentials** | Reported once, distinctly, without a retry storm. |
