@@ -224,21 +224,54 @@ func (e *Engine) transferBlocksSwitch() (blocked bool, reason string) {
 
 // preferencesInterval is how often the port settings are re-read. They change only
 // when an operator changes them, so polling them as often as the rates would be waste.
-const preferencesInterval = 5 * time.Minute
+//
+// preferencesRetryInterval applies after a failure instead. The slow interval is right
+// for a value that rarely changes but wrong for one that is missing: a single blip -
+// qBittorrent still starting up when this tool polls it, say - would otherwise leave
+// the listen port unknown, and the mismatch check unable to run, for five minutes.
+const (
+	preferencesInterval      = 5 * time.Minute
+	preferencesRetryInterval = 20 * time.Second
+)
 
 // refreshQBittorrentPreferences re-reads the port settings when they are stale.
 //
-// A failure here is not worth surfacing: the rates - the thing the feature exists for -
-// are already in hand, and the port verdict simply stays as "unknown" until it works.
+// A failure here is not fatal - the rates, the thing the feature exists for, are
+// already in hand - but it is not silent either. Without these settings the listen
+// port is unknown and the mismatch check cannot run, which is exactly the failure
+// this tool exists to catch, so the reason is kept and reported rather than dropped
+// at debug level where nobody would ever see it.
 func (e *Engine) refreshQBittorrentPreferences(ctx context.Context) {
-	if !e.qbPreferencesAt.IsZero() && time.Since(e.qbPreferencesAt) < preferencesInterval {
+	interval := preferencesInterval
+	if e.qbPreferencesErr != "" || e.qbPreferences.ListenPort == 0 {
+		interval = preferencesRetryInterval
+	}
+	if !e.qbPreferencesAt.IsZero() && time.Since(e.qbPreferencesAt) < interval {
 		return
 	}
 
 	preferences, err := e.qbittorrent.Preferences(ctx)
 	if err != nil {
-		e.logger.Debug("could not read qbittorrent's port settings", "error", err)
+		// Warned once, then kept quiet: this is polled every few minutes and a
+		// permission problem does not change between polls.
+		if e.qbPreferencesErr == "" {
+			e.logger.Warn("could not read qbittorrent's port settings",
+				"error", err,
+				"consequence", "the listen port is unknown, so a forwarded port that "+
+					"does not reach qBittorrent cannot be detected")
+		} else {
+			e.logger.Debug("qbittorrent's port settings are still unreadable", "error", err)
+		}
+		e.qbPreferencesErr = err.Error()
+		// Stamped even on failure, so the retry is paced rather than attempted on
+		// every rate poll.
+		e.qbPreferencesAt = time.Now()
 		return
+	}
+	if e.qbPreferencesErr != "" {
+		e.logger.Info("qbittorrent's port settings are readable again",
+			"listen_port", preferences.ListenPort)
+		e.qbPreferencesErr = ""
 	}
 	if preferences.ListenPort != e.qbPreferences.ListenPort && e.qbPreferences.ListenPort != 0 {
 		e.logger.Info("qbittorrent's listen port changed",
@@ -269,6 +302,16 @@ func (e *Engine) portForwardingVerdict(gluetun GluetunStatus) (verdict, detail s
 
 	listen := e.qbPreferences.ListenPort
 	forwarded := gluetun.ForwardedPorts
+
+	// Without the listen port the mismatch check below cannot run, so a "working"
+	// verdict from peer connectivity alone would be overstating what is known.
+	if listen == 0 && e.qbPreferencesErr != "" {
+		return "unknown", fmt.Sprintf(
+			"qBittorrent's listening port could not be read, so it cannot be compared "+
+				"with the forwarded port%s: %s",
+			map[bool]string{true: " " + joinPorts(forwarded)}[len(forwarded) > 0],
+			e.qbPreferencesErr)
+	}
 
 	// A mismatch is decisive, and takes precedence over anything qBittorrent reports
 	// about peers: it explains the symptom and names the fix.
@@ -361,6 +404,7 @@ func (e *Engine) transferView() TransferStatus {
 		UploadLimit:           e.transfer.UploadLimit,
 		ConnectionStatus:      e.transfer.ConnectionStatus,
 		ListenPort:            e.qbPreferences.ListenPort,
+		ListenPortError:       e.qbPreferencesErr,
 		RandomPort:            e.qbPreferences.RandomPort,
 		PortForwarding:        verdict,
 		PortForwardingDetail:  detail,

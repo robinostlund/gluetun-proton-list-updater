@@ -2284,13 +2284,18 @@ func TestWaitingForTheTunnelToSettleIsVisible(t *testing.T) {
 // fakeQBittorrent stands in for a qBittorrent Web API, so the busy/idle transitions
 // can be driven precisely.
 type fakeQBittorrent struct {
-	mu         sync.Mutex
-	down, up   uint64
-	failing    bool
-	requests   int
-	listenPort uint16
-	randomPort bool
-	connection string
+	mu       sync.Mutex
+	down, up uint64
+	failing  bool
+	// prefsFailing fails only the port-settings call. The two are separate requests
+	// and fail independently in practice - a key refused for /api/v2/app/preferences
+	// while the rates keep arriving - so the fake has to be able to do that too.
+	prefsFailing bool
+	prefsCalls   int
+	requests     int
+	listenPort   uint16
+	randomPort   bool
+	connection   string
 }
 
 func (f *fakeQBittorrent) handler() http.Handler {
@@ -2300,8 +2305,13 @@ func (f *fakeQBittorrent) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /api/v2/app/preferences", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		listen, random := f.listenPort, f.randomPort
+		listen, random, failing := f.listenPort, f.randomPort, f.prefsFailing
+		f.prefsCalls++
 		f.mu.Unlock()
+		if failing {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		fmt.Fprintf(w, `{"listen_port":%d,"random_port":%t,"upnp":false}`, listen, random)
 	})
 	mux.HandleFunc("GET /api/v2/transfer/info", func(w http.ResponseWriter, r *http.Request) {
@@ -3278,5 +3288,154 @@ func TestTheLoadTraceSurvivesARestart(t *testing.T) {
 	if !restored.LastSwitchAt.Equal(now.Add(-2*time.Hour).Truncate(0)) &&
 		restored.LastSwitchAt.Sub(now.Add(-2*time.Hour)).Abs() > time.Second {
 		t.Errorf("LastSwitchAt = %v, want it preserved", restored.LastSwitchAt)
+	}
+}
+
+// The dashboard shows the listen port as its own row, so it has to survive the trip
+// into the published snapshot - not just be readable inside portForwardingVerdict,
+// which is all the verdict tests above prove.
+func TestTheListenPortReachesThePublishedSnapshot(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+	})
+	fake.mu.Lock()
+	fake.listenPort, fake.randomPort, fake.connection = 46566, false, "connected"
+	fake.mu.Unlock()
+
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+
+	transfer := harness.engine.Snapshot().Transfer
+	if transfer.ListenPort != 46566 {
+		t.Errorf("ListenPort = %d, want 46566", transfer.ListenPort)
+	}
+
+	// And it has to survive JSON encoding under the name the script reads.
+	encoded, err := json.Marshal(transfer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if port, ok := decoded["listen_port"]; !ok {
+		t.Errorf("listen_port is absent from the JSON: %s", encoded)
+	} else if port != float64(46566) {
+		t.Errorf("listen_port = %v, want 46566", port)
+	}
+}
+
+// failPreferences switches the port-settings call on or off independently of the rates.
+func (f *fakeQBittorrent) failPreferences(failing bool) {
+	f.mu.Lock()
+	f.prefsFailing = failing
+	f.mu.Unlock()
+}
+
+func (f *fakeQBittorrent) preferenceCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prefsCalls
+}
+
+// The port settings are a separate request from the rates and can fail on their own.
+// When they do, the listen port is unknown - and an unexplained "unknown" is not
+// something an operator can act on, so the reason has to survive into the snapshot
+// instead of being dropped at debug level.
+func TestAnUnreadableListenPortCarriesItsReason(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+	})
+	fake.failPreferences(true)
+	fake.mu.Lock()
+	fake.connection = "connected"
+	fake.mu.Unlock()
+
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.ListenPortError != "" })
+	engine := harness.engine
+
+	transfer := engine.Snapshot().Transfer
+	// The rates still work: only the settings failed, and the feature's actual job is
+	// unaffected.
+	if !transfer.Reachable || !transfer.HasReading {
+		t.Errorf("the rates should still be read: %+v", transfer)
+	}
+	if transfer.ListenPort != 0 {
+		t.Errorf("ListenPort = %d, want 0 when the settings could not be read", transfer.ListenPort)
+	}
+	if !strings.Contains(transfer.ListenPortError, "QBITTORRENT_API_KEY") {
+		t.Errorf("ListenPortError = %q, want the reason from qBittorrent", transfer.ListenPortError)
+	}
+
+	// And the verdict must not claim "working" off peer connectivity alone: without the
+	// listen port, the mismatch it exists to catch cannot be ruled out.
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		enabled := true
+		snapshot.Gluetun.ForwardedPorts = []uint16{55019}
+		snapshot.Gluetun.PortForwardingEnabled = &enabled
+	})
+	verdict, detail := engine.portForwardingVerdict(engine.Snapshot().Gluetun)
+	if verdict != "unknown" {
+		t.Errorf("verdict = %q, want unknown while the listen port is unreadable", verdict)
+	}
+	for _, want := range []string{"could not be read", "55019"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail = %q, want it to mention %q", detail, want)
+		}
+	}
+}
+
+// A blip must not cost five minutes of unknown port. The steady-state interval is
+// right for a value that rarely changes and wrong for one that is missing, so a
+// failure is retried on a much shorter cycle.
+func TestTheListenPortIsRetriedQuicklyAfterAFailure(t *testing.T) {
+	if preferencesRetryInterval >= preferencesInterval {
+		t.Fatalf("the retry interval (%s) must be shorter than the steady-state one (%s)",
+			preferencesRetryInterval, preferencesInterval)
+	}
+
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+	})
+	fake.failPreferences(true)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.ListenPortError != "" })
+	engine := harness.engine
+
+	// A failed read is stamped, so the retry is paced rather than attempted on every
+	// rate poll - otherwise a refused key would be hammered several times a minute.
+	if engine.qbPreferencesAt.IsZero() {
+		t.Error("a failed read should still be stamped, or the retry becomes a hot loop")
+	}
+	before := fake.preferenceCalls()
+
+	// Pretend the retry interval has elapsed and let qBittorrent answer again.
+	engine.qbPreferencesAt = time.Now().Add(-preferencesRetryInterval - time.Second)
+	fake.failPreferences(false)
+	fake.mu.Lock()
+	fake.listenPort = 46566
+	fake.mu.Unlock()
+
+	engine.refreshQBittorrentPreferences(context.Background())
+
+	if fake.preferenceCalls() == before {
+		t.Fatal("the settings were not retried after the short interval")
+	}
+	if engine.qbPreferences.ListenPort != 46566 {
+		t.Errorf("ListenPort = %d, want 46566 after the retry succeeded", engine.qbPreferences.ListenPort)
+	}
+	if engine.qbPreferencesErr != "" {
+		t.Errorf("the error should be cleared once it works: %q", engine.qbPreferencesErr)
+	}
+
+	// Having succeeded, it must fall back to the slow interval rather than polling
+	// qBittorrent every twenty seconds forever.
+	settled := fake.preferenceCalls()
+	engine.qbPreferencesAt = time.Now().Add(-preferencesRetryInterval - time.Second)
+	engine.refreshQBittorrentPreferences(context.Background())
+	if fake.preferenceCalls() != settled {
+		t.Error("a successful read should go back to the slow interval")
 	}
 }

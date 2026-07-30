@@ -101,9 +101,13 @@ type Engine struct {
 	transfer           qbittorrent.Transfer
 	// transferSamples is the recent rate history, used to average over
 	// SWITCH_BUSY_WINDOW rather than deciding on one reading.
-	transferSamples   []transferSample
-	qbPreferences     qbittorrent.Preferences
-	qbPreferencesAt   time.Time
+	transferSamples []transferSample
+	qbPreferences   qbittorrent.Preferences
+	qbPreferencesAt time.Time
+	// qbPreferencesErr is why the port settings could not be read. Kept rather than
+	// discarded: without them the listen port is simply unknown, and an unexplained
+	// "unknown" on the dashboard is not something an operator can act on.
+	qbPreferencesErr  string
 	transferReachable bool
 	transferErr       string
 	transferCheckedAt time.Time

@@ -761,7 +761,14 @@ function renderTransfer() {
 
 
   text('transfer-version', transfer.version || '–');
+  // The port settings are read separately from the rates and can fail on their own, so
+  // an unknown port carries the reason rather than leaving it to be guessed at.
   text('transfer-listen', transfer.listen_port ? String(transfer.listen_port) : 'unknown');
+  el('transfer-listen').title = transfer.listen_port
+    ? 'The port qBittorrent accepts incoming peer connections on. It must match the '
+      + 'port Gluetun forwarded, or nothing reaches it.'
+    : (transfer.listen_port_error
+      || "qBittorrent's port settings have not been read yet.");
 
   // One line for whether switching is being held back, and why.
   let switching;

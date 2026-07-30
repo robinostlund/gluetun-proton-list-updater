@@ -287,6 +287,11 @@ type TransferStatus struct {
 	// RandomPort whether it re-chooses that port on every start.
 	ListenPort uint16 `json:"listen_port,omitempty"`
 	RandomPort bool   `json:"random_port,omitempty"`
+	// ListenPortError is why ListenPort is unknown, when it is. The settings are read
+	// separately from the rates and can fail on their own - an API key that is refused
+	// for /api/v2/app/preferences, for instance - and an "unknown" with no reason
+	// attached is not actionable.
+	ListenPortError string `json:"listen_port_error,omitempty"`
 	// PortForwarding is the verdict on whether a forwarded port actually reaches
 	// qBittorrent: "working", "unreachable", "mismatch", "not requested" or
 	// "unknown". PortForwardingDetail explains it in a sentence.
