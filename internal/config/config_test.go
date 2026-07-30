@@ -344,3 +344,67 @@ func TestQBittorrentIsOffByDefault(t *testing.T) {
 		t.Error("qBittorrent should be disabled when QBITTORRENT_URL is unset")
 	}
 }
+
+// "nan" and "inf" parse cleanly as floats and then defeat every range check, because
+// NaN compares false against everything. Both settings this affects fail *open*, which
+// is the dangerous direction: a NaN busy-threshold is never exceeded, so a typo would
+// silently switch off the protection, and a NaN scoring weight makes every score NaN
+// and the ranking meaningless.
+func TestNonFiniteNumbersAreRejected(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"nan", "NaN", "inf", "+Inf", "-inf", "1e400"} {
+		if _, err := parseByteRate(value); err == nil {
+			t.Errorf("parseByteRate(%q) should have been rejected", value)
+		}
+	}
+	// And a value that overflows uint64 once scaled. Converting an out-of-range float
+	// to an integer is undefined in Go, so this must be caught before the conversion.
+	// 2e19 is above MaxUint64 (~1.845e19); 1e19 is below it and must stay acceptable.
+	for _, value := range []string{"99999999999999999999TB", "1e30MB", "2e19"} {
+		if got, err := parseByteRate(value); err == nil {
+			t.Errorf("parseByteRate(%q) = %d, should have been rejected as too large", value, got)
+		}
+	}
+	// Something large but genuinely representable stays acceptable.
+	for _, value := range []string{"10GB", "1e19"} {
+		if _, err := parseByteRate(value); err != nil {
+			t.Errorf("parseByteRate(%q) should be accepted: %v", value, err)
+		}
+	}
+}
+
+// The same class of bug in the float reader, which the scoring weights use.
+func TestNonFiniteScoringWeightsAreRejected(t *testing.T) {
+	for _, key := range []string{"SCORE_LOAD_WEIGHT", "SCORE_LATENCY_WEIGHT", "SCORE_PROTON_WEIGHT"} {
+		for _, value := range []string{"nan", "inf"} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				t.Setenv("PROTON_USERNAME", "user")
+				t.Setenv("PROTON_PASSWORD", "pass")
+				t.Setenv(key, value)
+
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("%s=%s was accepted; every score would become NaN", key, value)
+				}
+				if !strings.Contains(err.Error(), "finite") {
+					t.Errorf("error = %v, want it to say the value is not finite", err)
+				}
+			})
+		}
+	}
+}
+
+// A non-finite busy threshold has to be refused too, since it reaches the same
+// conversion by a different route.
+func TestANonFiniteBusyThresholdIsRejected(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+	t.Setenv("QBITTORRENT_URL", "http://qb:8080")
+	t.Setenv("QBITTORRENT_API_KEY", "qbt_x")
+	t.Setenv("SWITCH_BUSY_DOWNLOAD", "nan")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("SWITCH_BUSY_DOWNLOAD=nan was accepted; it would never be exceeded")
+	}
+}

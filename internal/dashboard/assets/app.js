@@ -506,7 +506,9 @@ function renderTransfer() {
   card.hidden = !transfer.configured;
   if (!transfer.configured) return;
 
-  text('transfer-rates', `${rate(transfer.download_speed)} ↓  ${rate(transfer.upload_speed)} ↑`);
+  text('transfer-rates', transfer.has_reading
+    ? `${rate(transfer.download_speed)} ↓  ${rate(transfer.upload_speed)} ↑`
+    : 'no reading');
   el('transfer-down').innerHTML = rateAgainst(transfer.download_speed, transfer.busy_download_threshold);
   el('transfer-up').innerHTML = rateAgainst(transfer.upload_speed, transfer.busy_upload_threshold);
   text('transfer-down-limit', transfer.busy_download_threshold
@@ -522,8 +524,13 @@ function renderTransfer() {
   text('transfer-state', connection ? `qBittorrent is ${connection}` : '');
 
   const tags = [];
+  // "Not busy" and "never measured" are different claims, and only the first is
+  // about traffic. Saying "idle" with no reading would assert something nobody
+  // has looked at.
   if (transfer.busy) {
     tags.push('<span class="tag tag-blocked">switching on hold</span>');
+  } else if (!transfer.has_reading) {
+    tags.push('<span class="tag tag-excluded">no reading yet</span>');
   } else {
     tags.push('<span class="tag">idle enough to switch</span>');
   }
@@ -538,6 +545,10 @@ function renderTransfer() {
     notes.push(transfer.max_defer
       ? `It will switch anyway after ${transfer.max_defer}.`
       : 'It will wait for as long as the transfer lasts.');
+  } else if (!transfer.has_reading) {
+    notes.push('qBittorrent has not answered yet, so nothing is known about current traffic. '
+      + 'Switching is not being held back — a misconfiguration here must not freeze the tunnel '
+      + 'on one server indefinitely.');
   } else {
     notes.push('Nothing is above the thresholds, so switching is not being held back.');
   }

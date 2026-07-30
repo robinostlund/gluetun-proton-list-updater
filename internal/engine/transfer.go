@@ -94,7 +94,19 @@ func (e *Engine) transferBlocksSwitch() (blocked bool, reason string) {
 	if e.qbittorrent == nil {
 		return false, ""
 	}
-	// An unreachable qBittorrent keeps the last verdict rather than falling open.
+	// The two failure modes are treated differently, on purpose.
+	//
+	// Never having had a reading - a wrong URL, a wrong key, qBittorrent not running -
+	// falls open. Holding the tunnel on a degrading server for ever because of a
+	// misconfiguration would be a worse outcome than a switch, and the failure is
+	// reported loudly elsewhere rather than silently freezing selection.
+	//
+	// Having had a reading and then losing contact falls safe: the last known rates
+	// keep deferring, because a transfer that was running a moment ago is very likely
+	// still running.
+	if e.transferCheckedAt.IsZero() {
+		return false, ""
+	}
 	if !e.transferIsBusy() {
 		return false, ""
 	}
@@ -145,6 +157,7 @@ func (e *Engine) publishTransfer() {
 		snapshot.Transfer = TransferStatus{
 			Configured:            true,
 			Reachable:             e.transferReachable,
+			HasReading:            !e.transferCheckedAt.IsZero(),
 			LastError:             e.transferErr,
 			DownloadSpeed:         e.transfer.DownloadSpeed,
 			UploadSpeed:           e.transfer.UploadSpeed,

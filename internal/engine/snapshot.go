@@ -226,8 +226,14 @@ type TransferStatus struct {
 	Configured bool `json:"configured"`
 	// Reachable is false when the last read failed. The rates below are then the
 	// last known values, not current ones.
-	Reachable bool   `json:"reachable"`
-	LastError string `json:"last_error,omitempty"`
+	Reachable bool `json:"reachable"`
+	// HasReading is false until qBittorrent has answered at least once.
+	//
+	// It is distinct from Busy being false, and the difference matters: with no
+	// reading at all, "not busy" means "unmeasured", not "idle". Reporting the second
+	// would be a claim about traffic nobody has looked at.
+	HasReading bool   `json:"has_reading"`
+	LastError  string `json:"last_error,omitempty"`
 	// DownloadSpeed and UploadSpeed are bytes per second.
 	DownloadSpeed uint64 `json:"download_speed"`
 	UploadSpeed   uint64 `json:"upload_speed"`

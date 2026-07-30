@@ -30,11 +30,23 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 
 	e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Selection.LastEvaluation = time.Now() })
 
+	// Every path out of here sets an explanation.
+	//
+	// Without that, an explanation set by an earlier evaluation stays on the
+	// dashboard describing a situation that has since gone: "not switching while a
+	// transfer is in progress" would still be showing long after the transfer
+	// finished, if a later evaluation happened to bail out before deciding anything.
+	explain := func(reason string) {
+		e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Selection.Explanation = reason })
+	}
+
 	if len(e.ranked) == 0 {
 		e.logger.Debug("evaluation skipped: no candidates", "trigger", trigger)
+		explain("no candidate servers to choose from")
 		return
 	}
 	if e.cfg.Switch.Mode == config.ReconnectNone && !force {
+		explain(`reconnect mode is "none", so the tunnel is never moved`)
 		return
 	}
 
@@ -47,6 +59,7 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 		e.mutateSnapshot(func(snapshot *Snapshot) {
 			snapshot.Selection.LastError = "Gluetun is unreachable, so the tunnel cannot be moved"
 		})
+		explain("Gluetun is unreachable")
 		return
 	}
 	// The tunnel status decides whether acting is safe or useful:
@@ -66,11 +79,14 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 		if !force {
 			e.logger.Debug("evaluation skipped: tunnel is not in a state that can be moved",
 				"trigger", trigger, "status", gluetun.Status)
+			explain(fmt.Sprintf("the tunnel is %q, which is not a state it can be moved from",
+				gluetun.Status))
 			return
 		}
 	}
 	if gluetun.ProviderMismatch {
 		e.logger.Debug("evaluation skipped: gluetun is not using protonvpn", "trigger", trigger)
+		explain("Gluetun is not configured for ProtonVPN")
 		return
 	}
 
@@ -84,12 +100,10 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 	if !verdict.shouldSwitch {
 		e.logger.Debug("staying on current server",
 			"trigger", trigger, "reason", verdict.explanation, "current", currentHostname)
-		e.mutateSnapshot(func(snapshot *Snapshot) {
-			snapshot.Selection.Explanation = verdict.explanation
-		})
+		explain(verdict.explanation)
 		return
 	}
-	e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Selection.Explanation = "" })
+	explain("")
 
 	e.logger.Info("switching server",
 		"trigger", trigger,

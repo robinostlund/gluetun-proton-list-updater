@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -130,6 +131,14 @@ func (r *reader) float(key string, defaultValue float64) float64 {
 		r.errorf("%s: %q is not a number", key, value)
 		return defaultValue
 	}
+	// ParseFloat accepts "nan" and "inf", and neither survives a range check: NaN
+	// compares false against everything, so a "must not be negative" guard passes it
+	// through, and it then poisons every arithmetic result it touches. A NaN scoring
+	// weight would make every score NaN and the ranking meaningless, silently.
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		r.errorf("%s: %q is not a finite number", key, value)
+		return defaultValue
+	}
 	return parsed
 }
 
@@ -223,8 +232,22 @@ func parseByteRate(value string) (bytesPerSecond uint64, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("%q is not a number", text)
 	}
+	// "nan" and "inf" parse cleanly and then defeat every range check below, because
+	// NaN compares false against everything. Left in, a NaN threshold would never be
+	// exceeded and an Inf one could never be reached - so the protection this setting
+	// exists to provide would be silently switched off by a typo.
+	if math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return 0, fmt.Errorf("%q is not a finite number", text)
+	}
 	if amount < 0 {
 		return 0, fmt.Errorf("must not be negative")
 	}
-	return uint64(amount * scale), nil
+
+	// Converting an out-of-range float to an integer is undefined in Go, so the range
+	// has to be checked before the conversion rather than after.
+	total := amount * scale
+	if total > math.MaxUint64 {
+		return 0, fmt.Errorf("%q is too large to be a transfer rate", value)
+	}
+	return uint64(total), nil
 }

@@ -2330,10 +2330,12 @@ func withQBittorrent(t *testing.T, cfg *config.Config, down, up uint64) *fakeQBi
 	t.Cleanup(server.Close)
 
 	cfg.QBittorrent = config.QBittorrent{
-		URL:            server.URL,
-		APIKey:         "qbt_" + strings.Repeat("k", 28),
-		Interval:       50 * time.Millisecond,
-		RequestTimeout: 2 * time.Second,
+		URL:    server.URL,
+		APIKey: "qbt_" + strings.Repeat("k", 28),
+		// Deliberately a combination the real validation accepts: the timeout must be
+		// shorter than the interval, or a slow answer delays the next reading.
+		Interval:       200 * time.Millisecond,
+		RequestTimeout: 100 * time.Millisecond,
 		BusyDownload:   1 << 20,
 		BusyUpload:     1 << 20,
 	}
@@ -2342,9 +2344,8 @@ func withQBittorrent(t *testing.T, cfg *config.Config, down, up uint64) *fakeQBi
 
 // The whole point: a switch must not interrupt a transfer in progress.
 func TestATransferInProgressDefersSwitching(t *testing.T) {
-	var fake *fakeQBittorrent
 	harness := newHarness(t, false, func(cfg *config.Config) {
-		fake = withQBittorrent(t, cfg, 8<<20, 0) // 8 MB/s down, well over the threshold
+		withQBittorrent(t, cfg, 8<<20, 0) // 8 MB/s down, well over the threshold
 	})
 	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
 	engine := harness.engine
@@ -2366,7 +2367,6 @@ func TestATransferInProgressDefersSwitching(t *testing.T) {
 	if !transfer.Configured || !transfer.Reachable {
 		t.Errorf("transfer should be configured and reachable: %+v", transfer)
 	}
-	_ = fake
 }
 
 // An explicit instruction is the operator's decision, and must not be overridden.
@@ -2610,5 +2610,147 @@ func TestACrashedTunnelIsNotDeferred(t *testing.T) {
 	})
 	if blocked, _ := engine.transferBlocksSwitch(); blocked {
 		t.Error("a crashed tunnel must not be held back: nothing is flowing through it")
+	}
+}
+
+// The two failure modes are deliberately asymmetric, and the difference is the whole
+// safety argument, so it is pinned here.
+//
+// Never having had a reading falls open: a wrong URL or key must not freeze the tunnel
+// on one server for ever. Having had one and then losing contact falls safe: a transfer
+// running a moment ago is very likely still running.
+func TestAQBittorrentThatNeverAnsweredFallsOpen(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	// Broken from the very first request, so no reading is ever obtained.
+	fake.fail(true)
+
+	harness.run(t, func() bool {
+		return harness.engine.Snapshot().Transfer.LastError != ""
+	})
+	engine := harness.engine
+
+	transfer := engine.Snapshot().Transfer
+	if transfer.HasReading {
+		t.Error("HasReading should be false when qBittorrent has never answered")
+	}
+	if transfer.Busy {
+		t.Error("Busy should be false with no reading at all")
+	}
+	if blocked, _ := engine.transferBlocksSwitch(); blocked {
+		t.Error("a qBittorrent that never answered must not freeze switching indefinitely")
+	}
+
+	// And once it does answer with a transfer running, it starts deferring.
+	fake.fail(false)
+	engine.refreshTransfer(context.Background(), "test")
+	if !engine.Snapshot().Transfer.HasReading {
+		t.Error("HasReading should be true after a successful read")
+	}
+	if blocked, _ := engine.transferBlocksSwitch(); !blocked {
+		t.Error("should defer once a transfer is actually observed")
+	}
+}
+
+// "Not busy" and "never measured" must be distinguishable in the snapshot, or the
+// dashboard has to claim the tunnel is idle when nobody has looked.
+func TestNoReadingIsDistinguishableFromIdle(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 100, 100) // well under the thresholds: genuinely idle
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+
+	transfer := harness.engine.Snapshot().Transfer
+	if transfer.Busy {
+		t.Error("Busy should be false at 100 B/s")
+	}
+	if !transfer.HasReading {
+		t.Error("HasReading should be true: this is a measured idle, not an unmeasured one")
+	}
+}
+
+// A stale explanation misattributes. If an evaluation bails out before deciding
+// anything, an explanation from an earlier, different situation would stay on the
+// dashboard - "not switching while a transfer is in progress" long after the transfer
+// finished. Every path out of evaluate has to set one.
+func TestEveryEvaluationPathSetsAnExplanation(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	// Establish a deferral, so there is something stale to leak.
+	engine.evaluate(context.Background(), "test", false)
+	if got := engine.Snapshot().Selection.Explanation; !strings.Contains(got, "transfer is in progress") {
+		t.Fatalf("expected a transfer deferral first, got %q", got)
+	}
+
+	for _, testCase := range []struct {
+		name    string
+		arrange func()
+		want    string
+	}{
+		{
+			name:    "gluetun unreachable",
+			arrange: func() { engine.mutateSnapshot(func(s *Snapshot) { s.Gluetun.Reachable = false }) },
+			want:    "unreachable",
+		},
+		{
+			name: "tunnel mid-transition",
+			arrange: func() {
+				engine.mutateSnapshot(func(s *Snapshot) {
+					s.Gluetun.Reachable = true
+					s.Gluetun.Status = gluetunapi.StatusStopping
+				})
+			},
+			want: "not a state it can be moved from",
+		},
+		{
+			name: "provider mismatch",
+			arrange: func() {
+				engine.mutateSnapshot(func(s *Snapshot) {
+					s.Gluetun.Status = gluetunapi.StatusRunning
+					s.Gluetun.ProviderMismatch = true
+				})
+			},
+			want: "not configured for ProtonVPN",
+		},
+		{
+			name: "reconnect mode none",
+			arrange: func() {
+				engine.mutateSnapshot(func(s *Snapshot) { s.Gluetun.ProviderMismatch = false })
+				engine.cfg.Switch.Mode = config.ReconnectNone
+			},
+			want: `mode is "none"`,
+		},
+		{
+			name: "no candidates",
+			arrange: func() {
+				engine.cfg.Switch.Mode = config.ReconnectSettings
+				engine.ranked = nil
+			},
+			want: "no candidate servers",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			// Plant a stale explanation from a different situation each time.
+			engine.mutateSnapshot(func(s *Snapshot) {
+				s.Selection.Explanation = "STALE: a transfer that finished long ago"
+			})
+			testCase.arrange()
+			engine.evaluate(context.Background(), "test", false)
+
+			got := engine.Snapshot().Selection.Explanation
+			if strings.Contains(got, "STALE") {
+				t.Errorf("the stale explanation survived: %q", got)
+			}
+			if !strings.Contains(got, testCase.want) {
+				t.Errorf("explanation = %q, want it to mention %q", got, testCase.want)
+			}
+		})
 	}
 }
