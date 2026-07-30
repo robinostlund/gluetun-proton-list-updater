@@ -290,6 +290,16 @@ type QBittorrent struct {
 	// Zero disables that direction as a trigger.
 	BusyDownload uint64
 	BusyUpload   uint64
+	// BusyWindow is the period the rates are averaged over before being compared
+	// against the thresholds.
+	//
+	// A single reading is the wrong basis for this decision. Traffic is bursty: a
+	// torrent that is plainly active dips to nothing between pieces, and a poll that
+	// lands in one of those dips would report the tunnel idle and let a switch through
+	// mid-transfer - which is the exact interruption this feature exists to prevent.
+	//
+	// Zero uses the latest reading alone, which is the old behaviour.
+	BusyWindow time.Duration
 	// MaxDefer bounds how long switching can be held off by activity. Zero means no
 	// bound: an active transfer always wins, which is the point of the feature.
 	// Setting it puts a ceiling on how stale a server choice can become on a
@@ -403,6 +413,7 @@ func Load() (cfg Config, err error) {
 		RequestTimeout: r.duration("QBITTORRENT_TIMEOUT", 5*time.Second),
 		BusyDownload:   r.byteRate("SWITCH_BUSY_DOWNLOAD", 1<<20),
 		BusyUpload:     r.byteRate("SWITCH_BUSY_UPLOAD", 1<<20),
+		BusyWindow:     r.duration("SWITCH_BUSY_WINDOW", 5*time.Minute),
 		MaxDefer:       r.duration("SWITCH_BUSY_MAX_DEFER", 0),
 	}
 
@@ -446,6 +457,12 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 		if cfg.QBittorrent.BusyDownload == 0 && cfg.QBittorrent.BusyUpload == 0 {
 			r.errorf("QBITTORRENT_URL is set but both SWITCH_BUSY_DOWNLOAD and " +
 				"SWITCH_BUSY_UPLOAD are 0, so no transfer would ever defer a switch")
+		}
+		// A window shorter than the poll interval would hold one sample, which is the
+		// thing it exists to stop being decisive.
+		if window := cfg.QBittorrent.BusyWindow; window > 0 && window < cfg.QBittorrent.Interval {
+			r.errorf("SWITCH_BUSY_WINDOW (%s) must be at least QBITTORRENT_INTERVAL (%s), "+
+				"or it averages a single reading", window, cfg.QBittorrent.Interval)
 		}
 		if cfg.QBittorrent.RequestTimeout >= cfg.QBittorrent.Interval {
 			r.errorf("QBITTORRENT_TIMEOUT (%s) must be shorter than QBITTORRENT_INTERVAL (%s), "+

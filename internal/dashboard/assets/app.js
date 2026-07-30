@@ -453,6 +453,19 @@ function renderBest() {
   text('best-decision', decision);
 }
 
+// parseDuration reads Go's duration format ("5m0s", "1h30m", "90s") into seconds.
+// The snapshot carries intervals as Go strings, and comparing against one is what makes
+// "overdue" mean a missed refresh rather than an arbitrary age.
+function parseDuration(value) {
+  if (!value) return 0;
+  let seconds = 0;
+  for (const [, amount, unit] of String(value).matchAll(/([\d.]+)(ms|h|m|s|us|ns)/g)) {
+    const scale = { h: 3600, m: 60, s: 1, ms: 1e-3, us: 1e-6, ns: 1e-9 }[unit] ?? 0;
+    seconds += parseFloat(amount) * scale;
+  }
+  return seconds;
+}
+
 function renderGluetun() {
   const gluetun = snapshot.gluetun;
   text('gluetun-status', gluetun.status || 'unknown');
@@ -611,11 +624,23 @@ function renderTransfer() {
   card.hidden = !transfer.configured;
   if (!transfer.configured) return;
 
-  text('transfer-rates', transfer.has_reading
-    ? `${rate(transfer.download_speed)} ↓  ${rate(transfer.upload_speed)} ↑`
-    : 'no reading');
-  el('transfer-down').innerHTML = rateAgainst(transfer.download_speed, transfer.busy_download_threshold);
-  el('transfer-up').innerHTML = rateAgainst(transfer.upload_speed, transfer.busy_upload_threshold);
+
+  // The instantaneous rates, and separately the averages the thresholds are actually
+  // compared against. Showing only the first made the card look like it contradicted
+  // its own verdict every time traffic dipped between pieces; the bars belong on the
+  // values that decide.
+  text('transfer-down-now', rate(transfer.download_speed));
+  text('transfer-up-now', rate(transfer.upload_speed));
+  el('transfer-down').innerHTML = rateAgainst(transfer.average_download, transfer.busy_download_threshold);
+  el('transfer-up').innerHTML = rateAgainst(transfer.average_upload, transfer.busy_upload_threshold);
+  text('transfer-window', transfer.busy_window
+    ? `${transfer.busy_window} (${transfer.samples} reading${transfer.samples === 1 ? '' : 's'})`
+    : 'not averaged');
+  el('transfer-window').title = transfer.busy_window
+    ? 'Traffic is bursty: a torrent that is plainly active drops to nothing between '
+      + 'pieces. Averaging over this window stops a single dip letting a switch through '
+      + 'mid-transfer. Set with SWITCH_BUSY_WINDOW.'
+    : 'SWITCH_BUSY_WINDOW is 0, so the latest reading alone decides.';
   text('transfer-down-limit', transfer.busy_download_threshold
     ? rate(transfer.busy_download_threshold) : 'not a trigger');
   text('transfer-up-limit', transfer.busy_upload_threshold
@@ -653,28 +678,13 @@ function renderTransfer() {
   el('transfer-portfwd').title = transfer.port_forwarding_detail || '';
 
 
-  const tags = [];
-  // "Not busy" and "never measured" are different claims, and only the first is
-  // about traffic. Saying "idle" with no reading would assert something nobody
-  // has looked at.
-  if (transfer.busy) {
-    tags.push('<span class="tag tag-blocked">switching on hold</span>');
-  } else if (!transfer.has_reading) {
-    tags.push('<span class="tag tag-excluded">no reading yet</span>');
-  } else {
-    tags.push('<span class="tag">idle enough to switch</span>');
-  }
-  if (verdict === 'mismatch') {
-    tags.push('<span class="tag tag-excluded">port mismatch</span>');
-  } else if (verdict === 'unreachable') {
-    tags.push('<span class="tag tag-blocked">port unreachable</span>');
-  } else if (verdict === 'working') {
-    tags.push('<span class="tag tag-p2p">port forwarding works</span>');
-  }
-  if (transfer.random_port) tags.push('<span class="tag tag-blocked">random port</span>');
-  if (transfer.version) tags.push(`<span class="tag">${escapeHTML(transfer.version)}</span>`);
-  if (!transfer.reachable) tags.push('<span class="tag tag-excluded">stale reading</span>');
-  el('transfer-tags').innerHTML = tags.join('');
+  text('transfer-version', transfer.version || '–');
+  text('transfer-listen', transfer.listen_port ? String(transfer.listen_port) : 'unknown');
+  boolRow('transfer-random', Boolean(transfer.random_port));
+  el('transfer-random').title = transfer.random_port
+    ? 'qBittorrent re-chooses its listening port on every start, so it will stop matching '
+      + 'the forwarded port.'
+    : '';
 
   // One line for whether switching is being held back, and why.
   let switching;

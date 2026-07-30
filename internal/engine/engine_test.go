@@ -2907,3 +2907,171 @@ func TestTheVerdictIsRecomputedWhenGluetunsPortChanges(t *testing.T) {
 		t.Errorf("PortForwarding = %q, want working once the ports agree", got)
 	}
 }
+
+// The reason the window exists. Traffic is bursty: a torrent that is plainly active
+// drops to nothing between pieces, and a poll landing in one of those dips used to
+// report the tunnel idle and let a switch through mid-transfer.
+func TestABurstyTransferStaysBusyThroughItsDips(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+		cfg.QBittorrent.BusyDownload = 2 << 20 // 2 MiB/s
+		cfg.QBittorrent.BusyUpload = 0
+		cfg.QBittorrent.BusyWindow = time.Hour // long enough that nothing ages out here
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+	engine := harness.engine
+
+	// A transfer running well above the threshold, sampled a few times.
+	for range 4 {
+		fake.set(8<<20, 0)
+		engine.refreshTransfer(context.Background(), "test")
+	}
+	if !engine.Snapshot().Transfer.Busy {
+		t.Fatal("should be busy at 8 MiB/s")
+	}
+
+	// Now a dip to nothing - the sample that used to clear the hold.
+	fake.set(0, 0)
+	engine.refreshTransfer(context.Background(), "test")
+
+	if !engine.Snapshot().Transfer.Busy {
+		t.Error("a single dip to 0 cleared the hold; that is the interruption this prevents")
+	}
+	if blocked, reason := engine.transferBlocksSwitch(); !blocked {
+		t.Errorf("switching was allowed during a dip: %s", reason)
+	}
+	// The published average has to be the deciding figure, not the latest reading.
+	transfer := engine.Snapshot().Transfer
+	if transfer.DownloadSpeed != 0 {
+		t.Errorf("DownloadSpeed = %d, want the latest reading (0)", transfer.DownloadSpeed)
+	}
+	if transfer.AverageDownload == 0 {
+		t.Error("AverageDownload should still be well above zero")
+	}
+}
+
+// A transfer that genuinely finishes must release the hold once its samples age out,
+// or one busy moment would defer switching for ever.
+func TestTheAverageFallsAwayOnceTheTransferReallyStops(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+		cfg.QBittorrent.BusyDownload = 2 << 20
+		cfg.QBittorrent.BusyUpload = 0
+		cfg.QBittorrent.BusyWindow = time.Hour
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+	engine := harness.engine
+
+	fake.set(8<<20, 0)
+	engine.refreshTransfer(context.Background(), "test")
+	if !engine.Snapshot().Transfer.Busy {
+		t.Fatal("should be busy")
+	}
+
+	// Age the busy samples out of the window, then keep reading zeroes.
+	for i := range engine.transferSamples {
+		engine.transferSamples[i].at = time.Now().Add(-2 * time.Hour)
+	}
+	fake.set(0, 0)
+	engine.refreshTransfer(context.Background(), "test")
+
+	if engine.Snapshot().Transfer.Busy {
+		t.Error("the hold should release once the busy samples have aged out")
+	}
+}
+
+// Samples are pruned relative to the newest reading, not to now. Measured from now, an
+// unreachable qBittorrent would drain the window until the average fell below the
+// threshold and a switch was allowed - silently undoing the fail-safe.
+func TestAnUnreachableQBittorrentDoesNotDrainTheWindow(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+		cfg.QBittorrent.BusyDownload = 2 << 20
+		cfg.QBittorrent.BusyUpload = 0
+		cfg.QBittorrent.BusyWindow = 500 * time.Millisecond // tiny, so "now" would drain it
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+	engine := harness.engine
+
+	fake.set(8<<20, 0)
+	engine.refreshTransfer(context.Background(), "test")
+	if !engine.Snapshot().Transfer.Busy {
+		t.Fatal("should be busy")
+	}
+	samples := len(engine.transferSamples)
+
+	// qBittorrent goes away. Well past the window, nothing may be dropped, because
+	// nothing new has been measured.
+	fake.fail(true)
+	time.Sleep(600 * time.Millisecond)
+	engine.refreshTransfer(context.Background(), "test")
+
+	if got := len(engine.transferSamples); got != samples {
+		t.Errorf("samples = %d, want %d kept: a failed read must not age the window out", got, samples)
+	}
+	if !engine.Snapshot().Transfer.Busy {
+		t.Error("the hold was released by qBittorrent going away, not by the transfer ending")
+	}
+}
+
+// A zero window is the escape hatch: decide on the latest reading alone.
+func TestAZeroWindowUsesTheLatestReadingAlone(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+		cfg.QBittorrent.BusyDownload = 2 << 20
+		cfg.QBittorrent.BusyUpload = 0
+		cfg.QBittorrent.BusyWindow = 0
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+	engine := harness.engine
+
+	fake.set(8<<20, 0)
+	engine.refreshTransfer(context.Background(), "test")
+	if !engine.Snapshot().Transfer.Busy {
+		t.Fatal("should be busy at 8 MiB/s")
+	}
+	if got := len(engine.transferSamples); got != 1 {
+		t.Errorf("samples = %d, want exactly 1 with averaging disabled", got)
+	}
+
+	// With no averaging, one dip clears it immediately - the old behaviour, kept
+	// deliberately available.
+	fake.set(0, 0)
+	engine.refreshTransfer(context.Background(), "test")
+	if engine.Snapshot().Transfer.Busy {
+		t.Error("with SWITCH_BUSY_WINDOW=0 the latest reading should decide on its own")
+	}
+	if window := engine.Snapshot().Transfer.BusyWindow; window != "" {
+		t.Errorf("BusyWindow = %q, want empty so the card can say it is not averaged", window)
+	}
+}
+
+// The mean, not the peak: a single spike should not hold the tunnel for a whole window.
+func TestAnIsolatedSpikeDoesNotHoldTheTunnel(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+		cfg.QBittorrent.BusyDownload = 2 << 20
+		cfg.QBittorrent.BusyUpload = 0
+		cfg.QBittorrent.BusyWindow = time.Hour
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+	engine := harness.engine
+
+	// One spike, then a long quiet stretch: the mean stays under the threshold.
+	fake.set(20<<20, 0)
+	engine.refreshTransfer(context.Background(), "test")
+	for range 30 {
+		fake.set(0, 0)
+		engine.refreshTransfer(context.Background(), "test")
+	}
+
+	if engine.Snapshot().Transfer.Busy {
+		down, _ := engine.averageRates()
+		t.Errorf("still busy after one spike and 30 quiet readings (average %d B/s)", down)
+	}
+}

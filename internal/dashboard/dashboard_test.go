@@ -1025,10 +1025,12 @@ func TestTheTransferCardRendersWhatTheEnginePublishes(t *testing.T) {
 	}
 
 	for _, element := range []string{
-		"transfer-card", "transfer-rates", "transfer-down", "transfer-up",
+		"transfer-card", "transfer-down", "transfer-up",
 		"transfer-down-limit", "transfer-up-limit", "transfer-total",
-		"transfer-checked", "transfer-error", "transfer-tags",
+		"transfer-checked", "transfer-error",
 		"transfer-connected", "transfer-portfwd", "transfer-outcome", "transfer-switching",
+		"transfer-version", "transfer-listen", "transfer-random",
+		"transfer-down-now", "transfer-up-now", "transfer-window",
 	} {
 		if !bytes.Contains(page, []byte(`id="`+element+`"`)) {
 			t.Errorf("index.html has no %q element", element)
@@ -1044,6 +1046,7 @@ func TestTheTransferCardRendersWhatTheEnginePublishes(t *testing.T) {
 		"transfer.configured", "transfer.reachable", "transfer.download_speed",
 		"transfer.upload_speed", "transfer.busy_download_threshold",
 		"transfer.busy_upload_threshold", "transfer.busy", "transfer.deferred_for",
+		"transfer.average_download", "transfer.average_upload", "transfer.busy_window",
 		"transfer.max_defer", "transfer.version",
 		"transfer.port_forwarding", "transfer.port_forwarding_detail",
 		"transfer.listen_port", "transfer.random_port",
@@ -1199,8 +1202,8 @@ func TestCurrentAndBestAreOneComparison(t *testing.T) {
 	if !bytes.Contains(styles, []byte(".compare {")) {
 		t.Error("style.css has no .compare rule, so the columns will not line up")
 	}
-	if !bytes.Contains(styles, []byte(".card-wide")) {
-		t.Error("style.css has no .card-wide rule, so the merged cards have no room")
+	if !bytes.Contains(styles, []byte(".cards { display: flex; flex-direction: column;")) {
+		t.Error("the cards are not one per line, so the comparison has no room")
 	}
 }
 
@@ -1360,5 +1363,210 @@ func TestQBittorrentsOwnCapsAreShown(t *testing.T) {
 	// And they must not be confused with this tool's thresholds.
 	if !bytes.Contains(script, []byte("Independent of the thresholds above")) {
 		t.Error("nothing distinguishes qBittorrent's caps from our busy thresholds")
+	}
+}
+
+// Every function app.js calls must be defined in app.js.
+//
+// This is the bug class that keeps recurring and that the element-ID tests cannot see:
+// rewriting one block deletes a helper that another still calls, and the page dies at
+// the first call with "X is not defined" - taking every later render step with it. It
+// happened to parseDuration when the best-candidate prose was replaced by rows.
+//
+// There is no JavaScript runtime here, so this is a static approximation: it collects
+// bare `name(` call sites and checks each against the declarations in the same file.
+func TestEveryFunctionAppJSCallsIsDefined(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Strip string literals, then comments.
+	//
+	// The order matters: removing comments first destroys the "//" inside a URL in a
+	// string, leaving the quote unterminated, after which the string pass eats the rest
+	// of the file - including the declarations this is trying to find.
+	//
+	// Template literals may span lines; single- and double-quoted strings may not, so
+	// newlines are excluded from those or one unbalanced quote swallows the file.
+	source := regexp.MustCompile("(?s)`(?:\\\\.|[^`\\\\])*`").ReplaceAll(script, []byte("``"))
+	source = regexp.MustCompile(`'(?:\\.|[^'\\\n])*'`).ReplaceAll(source, []byte(`''`))
+	source = regexp.MustCompile(`"(?:\\.|[^"\\\n])*"`).ReplaceAll(source, []byte(`""`))
+	source = regexp.MustCompile(`(?m)//.*$`).ReplaceAll(source, nil)
+	source = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAll(source, nil)
+
+	defined := map[string]bool{}
+	for _, pattern := range []string{
+		`(?:async\s+)?function\s+\*?\s*([A-Za-z_$][\w$]*)`,
+		`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(`,
+		`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?function`,
+	} {
+		for _, match := range regexp.MustCompile(pattern).FindAllSubmatch(source, -1) {
+			defined[string(match[1])] = true
+		}
+	}
+	if len(defined) < 15 {
+		t.Fatalf("only found %d declarations; the patterns are wrong", len(defined))
+	}
+
+	// Language keywords and host/standard-library members reached as bare calls.
+	ambient := map[string]bool{
+		"if": true, "for": true, "while": true, "switch": true, "catch": true,
+		"return": true, "function": true, "typeof": true, "await": true, "new": true,
+		"parseFloat": true, "parseInt": true, "fetch": true, "confirm": true,
+		"setTimeout": true, "setInterval": true, "isNaN": true, "alert": true,
+		"encodeURIComponent": true, "decodeURIComponent": true, "require": true,
+		"clearTimeout": true, "clearInterval": true,
+		// "async (" is an arrow function, not a call.
+		"async": true,
+	}
+
+	// Only bare calls: a method call has a "." before it and belongs to its receiver.
+	callSites := regexp.MustCompile(`(^|[^.\w$])([a-z][A-Za-z0-9_$]*)\s*\(`).FindAllSubmatch(source, -1)
+	var undefined []string
+	seen := map[string]bool{}
+	for _, match := range callSites {
+		name := string(match[2])
+		if defined[name] || ambient[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		undefined = append(undefined, name)
+	}
+	sort.Strings(undefined)
+	if len(undefined) > 0 {
+		t.Errorf("app.js calls functions it does not define: %v\n"+
+			"the page throws at the first one and every later render step stops", undefined)
+	}
+}
+
+// The two merged cards are full width, and use that width to be *shorter* rather than
+// to spread the same rows over more space. Without the side-by-side inner layouts,
+// going full width just adds empty area to the right of a very tall card.
+func TestTheMergedCardsUseTheirWidthToReduceHeight(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One card per line: every card has the whole row, so none is tall and narrow.
+	if !bytes.Contains(styles, []byte(".cards { display: flex; flex-direction: column;")) {
+		t.Error("the cards are not laid out one per line")
+	}
+	if bytes.Contains(page, []byte("card-wide")) {
+		t.Error("card-wide is back; with one card per line there is nothing to widen")
+	}
+	// Server selection: comparison beside its details.
+	if !bytes.Contains(page, []byte(`<div class="card-split">`)) {
+		t.Error("the server selection card does not split comparison from details")
+	}
+	// Gluetun: three sections across, which is most of its height.
+	if !bytes.Contains(page, []byte(`<div class="card-columns">`)) {
+		t.Error("the Gluetun card does not lay its sections out in columns")
+	}
+	for _, rule := range []string{".card-split {", ".card-columns {", ".kv.one {"} {
+		if !bytes.Contains(styles, []byte(rule)) {
+			t.Errorf("style.css has no %q rule", rule)
+		}
+	}
+	// Both must collapse to one column on a narrow screen.
+	if !bytes.Contains(styles, []byte(".card-split, .card-columns { grid-template-columns: 1fr; }")) {
+		t.Error("the split layouts do not collapse on narrow screens")
+	}
+
+	// Only <div> inside a card: an inner <section> makes "the cards section"
+	// ambiguous for anything matching up to the first </section>.
+	cards := regexp.MustCompile(`(?s)<section class="cards">.*?</section>`).Find(page)
+	if cards == nil {
+		t.Fatal("could not find the cards section")
+	}
+	// Skip the region's own opening tag before looking for a nested one.
+	const opening = `<section class="cards">`
+	if bytes.Contains(cards[len(opening):], []byte("<section")) {
+		t.Error("a card contains a nested <section>; use <div> for layout groups")
+	}
+	// And the boundary must still enclose all four cards.
+	if titles := bytes.Count(cards, []byte("<h2>")); titles != 4 {
+		t.Errorf("the cards section encloses %d cards, want 4", titles)
+	}
+}
+
+// The actions were a bare row of buttons with no heading. They are a subject like any
+// other now, and the folding panels' titles sit on the left where a heading belongs.
+func TestControlsAreAPanelAndFoldTitlesAreLeftAligned(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(page, []byte("<h2>Controls</h2>")) {
+		t.Error("the actions have no heading of their own")
+	}
+	if bytes.Contains(page, []byte(`<section class="toolbar">`)) {
+		t.Error("the toolbar is a bare section again rather than a panel")
+	}
+	// The automatic-switching toggle belongs with the controls.
+	controls := regexp.MustCompile(`(?s)<h2>Controls</h2>.*?</section>`).Find(page)
+	if controls == nil {
+		t.Fatal("could not find the controls panel")
+	}
+	if !bytes.Contains(controls, []byte(`id="auto-switch"`)) {
+		t.Error("the automatic-switching toggle is not in the controls panel")
+	}
+
+	// panel-head is space-between; a summary's disclosure marker is its first flex
+	// item, which pushed the title to the far right until this override.
+	if !bytes.Contains(styles, []byte("justify-content: flex-start;")) {
+		t.Error("a folding panel's title will be pushed to the right by space-between")
+	}
+}
+
+// Tags are for servers, and for the status strip at the top. Everywhere else a value
+// belongs in a labelled row: a row of tags inside a card is a second, inconsistent way
+// of presenting the same kind of information.
+func TestTagsAreOnlyUsedForServersAndTheStatusStrip(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The only tag containers left in the markup are the two server ones, inside the
+	// comparison, where a server's features genuinely are a set of flags.
+	var containers []string
+	for _, match := range regexp.MustCompile(`id="([a-z0-9-]+)" class="tags`).FindAllSubmatch(page, -1) {
+		containers = append(containers, string(match[1]))
+	}
+	sort.Strings(containers)
+	want := []string{"best-tags", "current-tags"}
+	if strings.Join(containers, ",") != strings.Join(want, ",") {
+		t.Errorf("tag containers = %v, want %v", containers, want)
+	}
+
+	// What the qBittorrent tags used to say now has rows of its own.
+	for _, id := range []string{"transfer-version", "transfer-listen", "transfer-random"} {
+		if !bytes.Contains(page, []byte(`id="`+id+`"`)) {
+			t.Errorf("index.html has no %q row, so information was lost with the tags", id)
+		}
+	}
+
+	// The status strip keeps its chips: there, a set of independent states is exactly
+	// what is being shown, and each is one word.
+	if !bytes.Contains(page, []byte(`id="status-strip"`)) {
+		t.Error("the status strip is gone")
 	}
 }

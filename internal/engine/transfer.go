@@ -65,15 +65,19 @@ func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
 	e.transferErr = ""
 	e.transfer = transfer
 	e.transferCheckedAt = time.Now()
+	e.recordTransferSample(transfer)
 
 	// Track when the tunnel became busy, so the wait can be bounded and shown.
 	busy := e.transferIsBusy()
 	switch {
 	case busy && e.transferBusySince.IsZero():
 		e.transferBusySince = time.Now()
+		averageDownload, averageUpload := e.averageRates()
 		e.logger.Info("transfer in progress, automatic switching is on hold",
-			"download", formatRate(transfer.DownloadSpeed),
-			"upload", formatRate(transfer.UploadSpeed))
+			"average_download", formatRate(averageDownload),
+			"average_upload", formatRate(averageUpload),
+			"window", e.cfg.QBittorrent.BusyWindow,
+			"samples", len(e.transferSamples))
 	case !busy && !e.transferBusySince.IsZero():
 		e.logger.Info("transfer has quietened down, automatic switching is available again",
 			"was_busy_for", time.Since(e.transferBusySince).Truncate(time.Second))
@@ -90,10 +94,72 @@ func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
 // one and not the other. A zero threshold disables that direction.
 func (e *Engine) transferIsBusy() bool {
 	limits := e.cfg.QBittorrent
-	if limits.BusyDownload > 0 && e.transfer.DownloadSpeed >= limits.BusyDownload {
+	download, upload := e.averageRates()
+	if limits.BusyDownload > 0 && download >= limits.BusyDownload {
 		return true
 	}
-	return limits.BusyUpload > 0 && e.transfer.UploadSpeed >= limits.BusyUpload
+	return limits.BusyUpload > 0 && upload >= limits.BusyUpload
+}
+
+// transferSample is one reading, kept so the decision can be made on an average.
+type transferSample struct {
+	at       time.Time
+	download uint64
+	upload   uint64
+}
+
+// recordTransferSample appends a reading and drops the ones that have aged out.
+//
+// Pruning is relative to the newest sample rather than to now, which matters when
+// qBittorrent stops answering: measured from now, the window would drain until the
+// average fell below the threshold and a switch was allowed - silently undoing the
+// fail-safe. Anchored to the last reading, the history simply stops moving.
+func (e *Engine) recordTransferSample(transfer qbittorrent.Transfer) {
+	window := e.cfg.QBittorrent.BusyWindow
+	now := time.Now()
+	if window <= 0 {
+		// Averaging disabled: the latest reading is the whole history.
+		e.transferSamples = []transferSample{{
+			at: now, download: transfer.DownloadSpeed, upload: transfer.UploadSpeed,
+		}}
+		return
+	}
+
+	e.transferSamples = append(e.transferSamples, transferSample{
+		at: now, download: transfer.DownloadSpeed, upload: transfer.UploadSpeed,
+	})
+
+	cutoff := now.Add(-window)
+	kept := e.transferSamples[:0]
+	for _, sample := range e.transferSamples {
+		if !sample.at.Before(cutoff) {
+			kept = append(kept, sample)
+		}
+	}
+	e.transferSamples = kept
+}
+
+// averageRates returns the mean download and upload rate over the window.
+//
+// A mean, not the latest reading: traffic is bursty, and a torrent that is plainly
+// active drops to nothing between pieces. A poll landing in one of those dips reported
+// the tunnel idle and let a switch through mid-transfer, which is the exact
+// interruption this feature exists to prevent.
+//
+// Not a peak either. A single spike should not hold the tunnel for a whole window; an
+// average is what distinguishes "in use" from "was used once a few minutes ago".
+func (e *Engine) averageRates() (download, upload uint64) {
+	if len(e.transferSamples) == 0 {
+		return e.transfer.DownloadSpeed, e.transfer.UploadSpeed
+	}
+
+	var totalDownload, totalUpload uint64
+	for _, sample := range e.transferSamples {
+		totalDownload += sample.download
+		totalUpload += sample.upload
+	}
+	count := uint64(len(e.transferSamples))
+	return totalDownload / count, totalUpload / count
 }
 
 // transferBlocksSwitch reports whether a switch should be deferred, and why.
@@ -142,8 +208,14 @@ func (e *Engine) transferBlocksSwitch() (blocked bool, reason string) {
 		}
 	}
 
-	reason = fmt.Sprintf("a transfer is in progress (%s down, %s up)",
-		formatRate(e.transfer.DownloadSpeed), formatRate(e.transfer.UploadSpeed))
+	averageDownload, averageUpload := e.averageRates()
+	reason = fmt.Sprintf("a transfer is in progress (%s down, %s up",
+		formatRate(averageDownload), formatRate(averageUpload))
+	if window := e.cfg.QBittorrent.BusyWindow; window > 0 {
+		reason += fmt.Sprintf(" averaged over %s)", window)
+	} else {
+		reason += ")"
+	}
 	if !e.transferReachable {
 		reason += ", from the last reading before qbittorrent stopped answering"
 	}
@@ -266,6 +338,11 @@ func (e *Engine) transferView() TransferStatus {
 		maxDefer = limits.MaxDefer.String()
 	}
 	verdict, detail := e.portForwardingVerdict(e.Snapshot().Gluetun)
+	averageDownload, averageUpload := e.averageRates()
+	window := ""
+	if limits.BusyWindow > 0 {
+		window = limits.BusyWindow.String()
+	}
 
 	return TransferStatus{
 		Configured:            true,
@@ -274,6 +351,10 @@ func (e *Engine) transferView() TransferStatus {
 		LastError:             e.transferErr,
 		DownloadSpeed:         e.transfer.DownloadSpeed,
 		UploadSpeed:           e.transfer.UploadSpeed,
+		AverageDownload:       averageDownload,
+		AverageUpload:         averageUpload,
+		BusyWindow:            window,
+		Samples:               len(e.transferSamples),
 		DownloadTotal:         e.transfer.DownloadTotal,
 		UploadTotal:           e.transfer.UploadTotal,
 		DownloadLimit:         e.transfer.DownloadLimit,

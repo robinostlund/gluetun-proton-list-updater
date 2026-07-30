@@ -120,7 +120,14 @@ main {
 .chip-bad b { color: var(--bad); }
 
 /* Reference panels fold away: read once during setup, not scanned daily. */
-.panel-fold > summary { cursor: pointer; list-style: none; }
+.panel-fold > summary {
+  cursor: pointer;
+  list-style: none;
+  /* panel-head is space-between, which with the marker as the first item pushed the
+     title to the far right. The marker and the title belong together on the left. */
+  justify-content: flex-start;
+  gap: 8px;
+}
 .panel-fold > summary::-webkit-details-marker { display: none; }
 .panel-fold > summary::before {
   content: "▸";
@@ -155,14 +162,10 @@ main {
 .alert form { display: flex; gap: 8px; margin-top: 6px; }
 
 /* Cards */
-.cards {
-  display: grid;
-  /* Wide enough that a hostname or an organisation name has room on one line.
-     At 260px the two value columns were ~120px each, which forced hostnames to
-     wrap across three or four lines. */
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 14px;
-}
+/* One card per line. Cards were competing for width and each ended up tall and
+   narrow; given the whole row, their inner columns flow instead and every card is
+   shorter than it was as a half-width one. */
+.cards { display: flex; flex-direction: column; gap: 14px; }
 .card {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
@@ -181,9 +184,25 @@ main {
 
 /* A merged card carries three sections' worth of rows, so it gets two columns of the
    grid where there is room and falls back to one when there is not. */
-.card-wide { grid-column: span 2; }
-@media (max-width: 719px) {
-  .card-wide { grid-column: span 1; }
+/* Server selection: the comparison beside its details rather than above them. */
+.card-split {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.2fr) minmax(280px, 1fr);
+  gap: 8px 28px;
+  align-items: start;
+}
+
+/* Gluetun: three sections across rather than stacked, which is most of its height. */
+.card-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 4px 28px;
+  align-items: start;
+}
+.kv.one { grid-template-columns: 1fr; }
+
+@media (max-width: 900px) {
+  .card-split, .card-columns { grid-template-columns: 1fr; }
 }
 
 /* Sub-headings inside a merged card, so "Tunnel" and "Exit address" stay legibly
@@ -259,7 +278,12 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-inset);
 .card-note { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); }
 .card-note.error:not(:empty) { color: var(--bad); }
 
-.kv { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin: 0; }
+.kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px 20px;
+  margin: 0;
+}
 .kv > div { min-width: 0; }
 /* Long values take the full width rather than being squeezed into half a card. */
 .kv > div.wide { grid-column: 1 / -1; }
@@ -283,8 +307,8 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-inset);
   overflow-wrap: break-word;
 }
 
-/* Toolbar */
-.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+/* Toolbar, inside the Controls panel. */
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 16px; }
 button {
   font: inherit;
   padding: 7px 13px;
@@ -299,7 +323,7 @@ button:disabled { opacity: 0.5; cursor: progress; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 button.small { padding: 3px 9px; font-size: 12px; }
 
-.toggle { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; font-size: 13px; }
+.toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
 input[type="search"], input[type="text"] {
   font: inherit;
   padding: 6px 10px;

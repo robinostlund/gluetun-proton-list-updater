@@ -99,11 +99,14 @@ type Engine struct {
 	qbittorrent        *qbittorrent.Client
 	qbittorrentVersion string
 	transfer           qbittorrent.Transfer
-	qbPreferences      qbittorrent.Preferences
-	qbPreferencesAt    time.Time
-	transferReachable  bool
-	transferErr        string
-	transferCheckedAt  time.Time
+	// transferSamples is the recent rate history, used to average over
+	// SWITCH_BUSY_WINDOW rather than deciding on one reading.
+	transferSamples   []transferSample
+	qbPreferences     qbittorrent.Preferences
+	qbPreferencesAt   time.Time
+	transferReachable bool
+	transferErr       string
+	transferCheckedAt time.Time
 	// transferBusySince is when the tunnel last became busy, zero when idle. It is
 	// what bounds how long a switch can be deferred.
 	transferBusySince time.Time

@@ -356,6 +356,78 @@ build step, works on an air-gapped network, and follows your light/dark preferen
 Optional HTTP basic auth via `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`. `/healthz` stays
 unauthenticated so Docker's health check works.
 
+## Not switching during a transfer
+
+A switch tears the tunnel down and takes every connection through it with it. Doing that in the
+middle of a download to reach a marginally quieter server is a self-inflicted interruption, so the
+tool can watch qBittorrent and wait instead.
+
+It is **off unless configured**. Gluetun exposes no throughput information at all — its control
+server has no such route, and it never reads the byte counters that exist inside its own network
+namespace — so the rates have to come from something that knows about the traffic.
+
+```yaml
+QBITTORRENT_URL: "http://qbittorrent:8080"
+QBITTORRENT_API_KEY: "qbt_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+SWITCH_BUSY_DOWNLOAD: "2MB"      # defer while downloading faster than this
+SWITCH_BUSY_UPLOAD: "512KB"      # and while uploading faster than this
+SWITCH_BUSY_WINDOW: 5m           # averaged over this period, not sampled once
+```
+
+Generate the key in qBittorrent itself: **Preferences → Web UI → API keys**. It is sent as
+`Authorization: Bearer …`, which is qBittorrent's own scheme for programmatic access. A key rather
+than a username and password on purpose: it cannot expire mid-session, it is exempt from
+qBittorrent's CSRF protection so no `Referer` handling is needed, and it cannot trip the
+brute-force lockout that repeated logins would. Verified against a real qBittorrent **5.2.2**.
+
+Thresholds are written the way people say rates — `2MB`, `512KB`, `1.5MiB`, or a bare number for
+bytes per second. `KB`/`MB`/`GB` are powers of ten and `KiB`/`MiB`/`GiB` powers of two.
+
+### The rates are averaged, not sampled once
+
+Traffic is bursty. A torrent that is plainly active drops to nothing between pieces, and a poll
+landing in one of those dips would report the tunnel idle and let a switch through mid-transfer —
+the exact interruption this exists to prevent. So the comparison uses the **mean over
+`SWITCH_BUSY_WINDOW`** (default `5m`), and the dashboard shows the instantaneous rates *and* the
+averages, with the bars on the averages because those are what decide.
+
+A mean rather than a peak, deliberately: one spike should not hold the tunnel for a whole window,
+and an average over a few minutes is what distinguishes "in use" from "was used once recently". Set
+`SWITCH_BUSY_WINDOW=0` for the old single-reading behaviour.
+
+Samples age out relative to the **last successful reading**, not to the clock. Measured from now, a
+qBittorrent that stopped answering would drain the window until the average fell below the threshold
+and a switch was allowed — silently undoing the fail-safe below.
+
+**The two directions are independent.** Seeding at 5 MB/s and downloading at 5 MB/s are different
+situations, and you may want to protect one and not the other. Setting either to `0` stops it being
+a trigger; setting both to `0` is rejected at startup, since the feature would read as enabled while
+never deferring anything.
+
+### What it does and does not hold back
+
+| | Behaviour |
+|---|---|
+| Automatic switching | deferred while either average is at or above its threshold |
+| **Reconnect to best** and per-row **Use** | always proceed — an explicit instruction is never overridden |
+| `SWITCH_LOAD_TRIGGER` (overloaded server) | also deferred: a slow transfer beats a broken one |
+| Current server unknown | also deferred: that is no reason to break a transfer that is demonstrably flowing |
+| Tunnel **crashed** | **not** deferred — nothing is flowing through a tunnel that is down, so there is only a recovery to delay |
+
+`SWITCH_BUSY_MAX_DEFER` bounds the wait. It defaults to unset, meaning an active transfer always
+wins, which is the point of the feature. Set it (`2h`) if you would rather cap how stale the server
+choice can become on a permanently busy tunnel.
+
+### If qBittorrent stops answering
+
+The last known rates are kept and **keep deferring switches**, marked as a stale reading on the
+dashboard. This is deliberate: treating "I could not find out" as "nothing is happening" would
+interrupt exactly the transfer the feature exists to protect.
+
+One asymmetry worth knowing: if qBittorrent has **never** answered — a wrong URL, a wrong key, not
+running — the feature falls **open** and switching proceeds. Holding the tunnel on one server for
+ever because of a misconfiguration would be worse, and the failure is reported loudly instead.
+
 ### Is the forwarded port actually reaching qBittorrent?
 
 Neither side can answer this alone, which is why it silently goes wrong. Gluetun knows which port
@@ -674,6 +746,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `QBITTORRENT_TIMEOUT` | `5s` | Per-request timeout. Must be shorter than the interval. |
 | `SWITCH_BUSY_DOWNLOAD` | `1MiB` | Defer automatic switching at or above this download rate. `0` disables this trigger. |
 | `SWITCH_BUSY_UPLOAD` | `1MiB` | Defer automatic switching at or above this upload rate. `0` disables this trigger. |
+| `SWITCH_BUSY_WINDOW` | `5m` | Average the rates over this period before comparing them. `0` uses the latest reading alone. |
 | `SWITCH_BUSY_MAX_DEFER` | unset | Cap on how long a transfer may defer switching. Unset means indefinitely. |
 
 ### Server list output
@@ -759,59 +832,6 @@ Only Gluetun-enforced exclusions are listed this way, capped at 25 rows. Servers
 excluded yourself — `COUNTRIES`, `MAX_LOAD`, a feature filter — are counted in the
 **Filtering** panel instead, because you already know about those and listing them
 would bury the useful rows under hundreds of self-inflicted ones.
-
-## Servers your account cannot use
-
-Proton's server list is the same whoever asks: it includes servers **above your
-plan's tier**, which look entirely ordinary and simply refuse the connection. A
-free account offered a Plus server would burn a reconnect and leave the tunnel
-down for nothing.
-
-So the tool asks Proton what the account is entitled to (`GET /vpn/v2` → `MaxTier`)
-and excludes anything above it. The tier is remembered in `STATE_DIR`, so a restart
-while Proton is unreachable still filters correctly, and a server whose tier Proton
-does not report is kept rather than discarded — refusing on missing information
-would be worse than trying.
-
-The dashboard shows this in three places:
-
-- the **Proton list** card shows the plan and tier, e.g. `VPN Plus (tier 2)`
-- every server in the candidate table carries a **`free`** or **`paid`** badge, so
-  which servers need a subscription is visible rather than implied
-- the **Filtering** panel counts what was skipped as *above account tier*
-
-`FREE_TIER` remains a separate preference: it decides whether you *want* free-tier
-servers (default `exclude`, since they are heavily loaded), while the tier check
-decides what is *possible*. A delinquent account is also flagged, because Proton
-refuses connections in that state and it looks identical to a server fault.
-
-## "Why is server X not in the list?"
-
-Ask the tool. It evaluates the question against the **raw Proton response** cached in `STATE_DIR`, so
-it can explain servers that are not candidates:
-
-```bash
-curl -s 'http://localhost:8080/api/explain?q=SE%23444' | jq
-```
-
-or type the name into the box in the dashboard's *Filtering* panel. It names every rule that
-rejected the server — `MAX_LOAD`, a country or city filter, a feature filter, a filter Gluetun itself
-enforces, a Proton `Status 0`, a missing WireGuard key — and lists each physical machine behind it.
-
-The most common answer is not an exclusion at all. **Proton groups one physical machine under several
-logical names**: `SE#148` and `SE#444` can be the same box, with the same hostname and entry IP but
-different reported loads. Gluetun connects by *hostname*, so that machine is usable either way — it
-simply appears in the candidate list under whichever name won deduplication (the quieter one). The
-diagnostic says so explicitly:
-
-```
-usable: SE#444 is the same machine as SE#148 (node-se-12.protonvpn.net),
-so it appears in the list under that name
-```
-
-So a name visible on Proton's portal but absent from the dashboard is usually present as a sibling,
-not missing. Deduplication is by entry IP, matching Gluetun's own updater, and keeps the
-least-loaded of the servers sharing a machine.
 
 ## Scoring and latency
 

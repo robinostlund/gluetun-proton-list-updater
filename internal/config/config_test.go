@@ -408,3 +408,53 @@ func TestANonFiniteBusyThresholdIsRejected(t *testing.T) {
 		t.Fatal("SWITCH_BUSY_DOWNLOAD=nan was accepted; it would never be exceeded")
 	}
 }
+
+// A window shorter than the poll interval holds one sample, which is the very thing it
+// exists to stop being decisive.
+func TestTheBusyWindowMustHoldMoreThanOneSample(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+	t.Setenv("QBITTORRENT_URL", "http://qb:8080")
+	t.Setenv("QBITTORRENT_API_KEY", "qbt_x")
+	t.Setenv("QBITTORRENT_INTERVAL", "15s")
+	t.Setenv("SWITCH_BUSY_WINDOW", "5s")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("a window shorter than the interval was accepted")
+	}
+	if !strings.Contains(err.Error(), "averages a single reading") {
+		t.Errorf("error = %v, want it to explain why", err)
+	}
+}
+
+// Zero is the escape hatch and must stay allowed.
+func TestAZeroBusyWindowIsAllowed(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+	t.Setenv("QBITTORRENT_URL", "http://qb:8080")
+	t.Setenv("QBITTORRENT_API_KEY", "qbt_x")
+	t.Setenv("SWITCH_BUSY_WINDOW", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.QBittorrent.BusyWindow != 0 {
+		t.Errorf("BusyWindow = %s, want 0", cfg.QBittorrent.BusyWindow)
+	}
+}
+
+// The default has to be long enough to smooth real bursts.
+func TestTheBusyWindowDefaultsToFiveMinutes(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.QBittorrent.BusyWindow != 5*time.Minute {
+		t.Errorf("BusyWindow = %s, want 5m", cfg.QBittorrent.BusyWindow)
+	}
+}

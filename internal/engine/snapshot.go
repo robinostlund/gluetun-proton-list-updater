@@ -234,9 +234,21 @@ type TransferStatus struct {
 	// would be a claim about traffic nobody has looked at.
 	HasReading bool   `json:"has_reading"`
 	LastError  string `json:"last_error,omitempty"`
-	// DownloadSpeed and UploadSpeed are bytes per second.
+	// DownloadSpeed and UploadSpeed are the latest reading, in bytes per second.
 	DownloadSpeed uint64 `json:"download_speed"`
 	UploadSpeed   uint64 `json:"upload_speed"`
+	// AverageDownload and AverageUpload are the mean over BusyWindow, and are what the
+	// thresholds are actually compared against.
+	//
+	// Published separately from the latest reading because the two differ, and the one
+	// that decides is the one worth showing next to the threshold: a card that showed
+	// only the instantaneous rate would appear to contradict its own verdict every
+	// time traffic dipped.
+	AverageDownload uint64 `json:"average_download"`
+	AverageUpload   uint64 `json:"average_upload"`
+	// BusyWindow is the averaging period, and Samples how many readings are in it.
+	BusyWindow string `json:"busy_window,omitempty"`
+	Samples    int    `json:"samples"`
 	// DownloadTotal and UploadTotal are bytes moved this qBittorrent session.
 	DownloadTotal uint64 `json:"download_total"`
 	UploadTotal   uint64 `json:"upload_total"`
