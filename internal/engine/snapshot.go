@@ -23,6 +23,10 @@ type Snapshot struct {
 	Servers   ServersStatus   `json:"servers_file"`
 	Selection SelectionStatus `json:"selection"`
 
+	// Transfer is what qBittorrent reports moving through the tunnel, when it is
+	// configured. Zero value with Configured false means the feature is off.
+	Transfer TransferStatus `json:"transfer"`
+
 	Stats   catalog.Stats   `json:"stats"`
 	Latency latency.Summary `json:"latency"`
 
@@ -209,6 +213,50 @@ type SelectionStatus struct {
 	// which means it is running with an older server list than the one now in
 	// servers.json and must be restarted to pick it up.
 	NeedsGluetunRestart bool `json:"needs_gluetun_restart"`
+}
+
+// TransferStatus is the traffic currently flowing, and what the engine does about it.
+//
+// It exists so a switch can be deferred rather than interrupting a transfer: tearing
+// the tunnel down takes every connection through it with it.
+type TransferStatus struct {
+	// Configured is false when QBITTORRENT_URL is unset. Distinguishing that from
+	// "configured and idle" matters: one means no information, the other means no
+	// traffic, and only the second is a reason to allow a switch.
+	Configured bool `json:"configured"`
+	// Reachable is false when the last read failed. The rates below are then the
+	// last known values, not current ones.
+	Reachable bool   `json:"reachable"`
+	LastError string `json:"last_error,omitempty"`
+	// DownloadSpeed and UploadSpeed are bytes per second.
+	DownloadSpeed uint64 `json:"download_speed"`
+	UploadSpeed   uint64 `json:"upload_speed"`
+	// DownloadTotal and UploadTotal are bytes moved this qBittorrent session.
+	DownloadTotal uint64 `json:"download_total"`
+	UploadTotal   uint64 `json:"upload_total"`
+	// DownloadLimit and UploadLimit are qBittorrent's configured caps, 0 for
+	// unlimited. They give the rates context.
+	DownloadLimit uint64 `json:"download_limit"`
+	UploadLimit   uint64 `json:"upload_limit"`
+	// ConnectionStatus is qBittorrent's own connectivity view: "connected",
+	// "firewalled" or "disconnected".
+	ConnectionStatus string `json:"connection_status,omitempty"`
+	// Busy is true when either rate is above its threshold, which is what defers a
+	// switch.
+	Busy bool `json:"busy"`
+	// BusySince is when the tunnel last became busy, so the dashboard can show how
+	// long switching has been deferred.
+	BusySince time.Time `json:"busy_since,omitempty"`
+	// DeferredFor is how long switching has been held off, formatted for display.
+	DeferredFor string `json:"deferred_for,omitempty"`
+	// Thresholds are the configured limits, echoed so the dashboard can show the
+	// rates against them rather than as bare numbers.
+	BusyDownloadThreshold uint64    `json:"busy_download_threshold"`
+	BusyUploadThreshold   uint64    `json:"busy_upload_threshold"`
+	MaxDefer              string    `json:"max_defer,omitempty"`
+	LastCheck             time.Time `json:"last_check"`
+	// Version is qBittorrent's reported version, proof the credentials work.
+	Version string `json:"version,omitempty"`
 }
 
 // CandidateView is one ranked server, flattened for the UI.

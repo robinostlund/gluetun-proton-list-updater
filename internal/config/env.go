@@ -165,3 +165,66 @@ func (r *reader) choice(key, defaultValue string, options ...string) string {
 	r.errorf("%s: %q is not one of %s", key, value, strings.Join(options, ", "))
 	return defaultValue
 }
+
+// byteRate reads a transfer rate in bytes per second.
+//
+// Rates are written the way people say them - "1MB", "500KB", "2.5MiB" - because a
+// threshold in bare bytes is unreadable and easy to get wrong by three orders of
+// magnitude. A bare number is accepted as bytes per second.
+//
+// Both conventions are supported: KB/MB/GB are powers of ten, KiB/MiB/GiB powers of
+// two, matching how each is normally defined. The "/s" is optional and ignored,
+// since a rate is the only thing this can mean.
+func (r *reader) byteRate(key string, defaultValue uint64) uint64 {
+	value, isSet := r.lookup(key)
+	if !isSet {
+		return defaultValue
+	}
+
+	parsed, err := parseByteRate(value)
+	if err != nil {
+		r.errorf("%s: %q is not a transfer rate (e.g. 1MB, 500KB, 2MiB, or bytes per second)", key, value)
+		return defaultValue
+	}
+	return parsed
+}
+
+// byteRateUnits is ordered longest-suffix-first, so "MiB" is matched before "B"
+// and "KB" before "B".
+var byteRateUnits = []struct {
+	suffix string
+	scale  float64
+}{
+	{"KIB", 1 << 10}, {"MIB", 1 << 20}, {"GIB", 1 << 30}, {"TIB", 1 << 40},
+	{"KB", 1e3}, {"MB", 1e6}, {"GB", 1e9}, {"TB", 1e12},
+	{"K", 1e3}, {"M", 1e6}, {"G", 1e9}, {"T", 1e12},
+	{"B", 1},
+}
+
+func parseByteRate(value string) (bytesPerSecond uint64, err error) {
+	text := strings.ToUpper(strings.TrimSpace(value))
+	text = strings.TrimSuffix(text, "/S")
+	text = strings.TrimSuffix(text, "PS")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0, fmt.Errorf("empty rate")
+	}
+
+	scale := 1.0
+	for _, unit := range byteRateUnits {
+		if len(text) > len(unit.suffix) && strings.HasSuffix(text, unit.suffix) {
+			scale = unit.scale
+			text = strings.TrimSpace(strings.TrimSuffix(text, unit.suffix))
+			break
+		}
+	}
+
+	amount, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a number", text)
+	}
+	if amount < 0 {
+		return 0, fmt.Errorf("must not be negative")
+	}
+	return uint64(amount * scale), nil
+}

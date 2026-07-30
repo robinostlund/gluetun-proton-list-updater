@@ -23,6 +23,7 @@ import (
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/gluetunapi"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/latency"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/proton"
+	"github.com/robinostlund/gluetun-proton-list-updater/internal/qbittorrent"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/scoring"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/serversfile"
 )
@@ -93,6 +94,17 @@ type Engine struct {
 	// explicit PORT_FORWARD_ONLY is unaffected: that is Gluetun's own filter and is
 	// always honoured.
 	portForwardInferenceAbandoned bool
+	// qbittorrent reads current transfer rates, nil when QBITTORRENT_URL is unset.
+	// Its purpose is to keep a switch from interrupting an active transfer.
+	qbittorrent        *qbittorrent.Client
+	qbittorrentVersion string
+	transfer           qbittorrent.Transfer
+	transferReachable  bool
+	transferErr        string
+	transferCheckedAt  time.Time
+	// transferBusySince is when the tunnel last became busy, zero when idle. It is
+	// what bounds how long a switch can be deferred.
+	transferBusySince time.Time
 	// gluetunKnownHosts is the server list Gluetun disclosed the last time it
 	// refused a hostname, empty when it has not refused one.
 	//
@@ -182,6 +194,23 @@ func New(opts Options) (engine *Engine, err error) {
 		vpnType:     opts.Config.Filter.VPNType,
 	}
 
+	if opts.Config.QBittorrent.Enabled() {
+		engine.qbittorrent = qbittorrent.New(qbittorrent.Options{
+			BaseURL: opts.Config.QBittorrent.URL,
+			APIKey:  opts.Config.QBittorrent.APIKey,
+			Timeout: opts.Config.QBittorrent.RequestTimeout,
+		})
+		if !qbittorrent.APIKeyLooksValid(opts.Config.QBittorrent.APIKey) {
+			// Advisory: qBittorrent decides whether a key works, and the format
+			// could change. But a value that is plainly not a key - a password, a
+			// session cookie, a truncated paste - is worth catching here rather
+			// than as a puzzling 401 later.
+			logger.Warn("QBITTORRENT_API_KEY does not look like a qBittorrent API key",
+				"expected", "a value beginning \"qbt_\", generated in Preferences -> Web UI -> API keys",
+				"note", "it will still be tried")
+		}
+	}
+
 	if err := engine.state.load(); err != nil {
 		// Corrupt state must not prevent startup: the tool can rebuild
 		// everything it needs from Proton and Gluetun.
@@ -234,6 +263,8 @@ func (e *Engine) Run(ctx context.Context) (err error) {
 	// interval, but do it inside the loop so a slow Proton API cannot delay
 	// dashboard responsiveness.
 	e.checkGluetun(ctx)
+	e.identifyQBittorrent(ctx)
+	e.refreshTransfer(ctx, "startup")
 	e.refreshServerList(ctx, "startup")
 	e.probeLatency(ctx, "startup")
 	e.evaluate(ctx, "startup", false)
@@ -248,6 +279,10 @@ func (e *Engine) Run(ctx context.Context) (err error) {
 	defer evaluateTicker.Stop()
 	healthTicker := newTicker(e.cfg.Gluetun.HealthInterval)
 	defer healthTicker.Stop()
+	// Disabled when qBittorrent is not configured, so an unused feature costs
+	// nothing: newTicker treats a zero interval as "never fire".
+	transferTicker := newTicker(e.transferInterval())
+	defer transferTicker.Stop()
 
 	for {
 		select {
@@ -271,6 +306,9 @@ func (e *Engine) Run(ctx context.Context) (err error) {
 		case <-healthTicker.C():
 			e.checkGluetun(ctx)
 			e.publish()
+
+		case <-transferTicker.C():
+			e.refreshTransfer(ctx, "scheduled")
 
 		case cmd := <-e.commands:
 			e.handleCommand(ctx, cmd)

@@ -305,6 +305,10 @@ to evaluate, and the tool would lose contact whenever the tunnel drops.
   why "Reconnect to best" will go there.
 - **Actions** — reconnect to best, refresh the server list, refresh loads, probe latency,
   re-evaluate, rewrite `servers.json`, toggle automatic switching.
+- **Transfer (qBittorrent)** — current download and upload rates, each with a bar showing how
+  close it is to the threshold that defers switching, plus session totals, qBittorrent's version
+  and its own connection status. The card hides itself entirely when the feature is off, because a
+  card reading `0 B/s` would claim the tunnel is idle rather than admitting nobody is measuring.
 - **Load freshness** — the Candidates heading carries `loads 2m ago`, turning amber once a
   refresh has been missed. Ranking is only as good as the utilisation behind it, and nothing
   previously said how old that was.
@@ -330,6 +334,69 @@ no build step, works on an air-gapped network, and follows your light/dark prefe
 
 Optional HTTP basic auth via `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`. `/healthz` stays
 unauthenticated so Docker's health check works.
+
+## Not switching during a transfer
+
+A switch tears the tunnel down and takes every connection through it with it. Doing that in the
+middle of a download to reach a marginally quieter server is a self-inflicted interruption, so the
+tool can watch qBittorrent and wait instead.
+
+It is **off unless configured**. Gluetun exposes no throughput information at all — its control
+server has no such route, and it never reads the byte counters that exist inside its own network
+namespace — so the rates have to come from something that knows about the traffic.
+
+```yaml
+QBITTORRENT_URL: "http://qbittorrent:8080"
+QBITTORRENT_API_KEY: "qbt_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+SWITCH_BUSY_DOWNLOAD: "2MB"      # defer while downloading faster than this
+SWITCH_BUSY_UPLOAD: "512KB"      # and while uploading faster than this
+```
+
+Generate the key in qBittorrent itself: **Preferences → Web UI → API keys**. It is sent as
+`Authorization: Bearer …`, which is qBittorrent's own scheme for programmatic access. A key rather
+than a username and password on purpose: it cannot expire mid-session, it is exempt from
+qBittorrent's CSRF protection so no `Referer` handling is needed, and it cannot trip the
+brute-force lockout that repeated logins would. Verified against a real qBittorrent **5.2.2**.
+
+Thresholds are written the way people say rates — `2MB`, `512KB`, `1.5MiB`, or a bare number for
+bytes per second. `KB`/`MB`/`GB` are powers of ten and `KiB`/`MiB`/`GiB` powers of two.
+
+**The two directions are independent.** Seeding at 5 MB/s and downloading at 5 MB/s are different
+situations, and you may want to protect one and not the other. Setting either to `0` stops it being
+a trigger; setting both to `0` is rejected at startup, since the feature would read as enabled while
+never deferring anything.
+
+### What it does and does not hold back
+
+| | Behaviour |
+|---|---|
+| Automatic switching | deferred while either rate is at or above its threshold |
+| **Reconnect to best** and per-row **Use** | always proceed — an explicit instruction is never overridden |
+| `SWITCH_LOAD_TRIGGER` (overloaded server) | also deferred: a slow transfer beats a broken one |
+| Current server unknown | also deferred: that is no reason to break a transfer that is demonstrably flowing |
+| Tunnel **crashed** | **not** deferred — nothing is flowing through a tunnel that is down, so there is only a recovery to delay |
+
+`SWITCH_BUSY_MAX_DEFER` bounds the wait. It defaults to unset, meaning an active transfer always
+wins, which is the point of the feature. Set it (`2h`) if you would rather cap how stale the server
+choice can become on a permanently busy tunnel.
+
+### If qBittorrent stops answering
+
+The last known rates are kept and **keep deferring switches**, marked as a stale reading on the
+dashboard. This is deliberate: treating "I could not find out" as "nothing is happening" would
+interrupt exactly the transfer the feature exists to protect.
+
+### Troubleshooting a `401`
+
+qBittorrent answers `401` for a refused key *and* for a request its **host-header validation**
+rejects — two completely different fixes. The second is easy to hit: it validates the port in the
+`Host` header against its own Web UI port, so reaching qBittorrent through a *remapped* port fails
+even with a correct key. Confirmed on 5.2.2: the same request that failed on `127.0.0.1:19900`
+succeeded with `Host: localhost:8080`.
+
+Container-to-container on the same Docker network — `http://qbittorrent:8080`, qBittorrent's real
+port — is the normal case and works. If you go through a different external port, either point this
+tool at the internal one or add the name to qBittorrent's `WebUI\ServerDomains`.
 
 ### Gluetun's "Selected …" rows are not your filters
 
@@ -590,6 +657,18 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `GLUETUN_HEALTH_INTERVAL` | `30s` | Status/public-IP poll interval |
 | `GLUETUN_REFRESH_SERVERS_ON_REJECT` | `true` | When Gluetun refuses every hostname, ask it to refresh its own server list (needs `UPDATER_PROTONVPN_EMAIL`/`_PASSWORD` on the Gluetun container) |
 | `GLUETUN_UPDATER_TIMEOUT` | `3m` | How long to wait for that refresh |
+
+### qBittorrent (optional — off unless `QBITTORRENT_URL` is set)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `QBITTORRENT_URL` | – | Web UI address, e.g. `http://qbittorrent:8080`. Empty disables the feature. |
+| `QBITTORRENT_API_KEY` | – | API key from Preferences → Web UI → API keys. Required when the URL is set. |
+| `QBITTORRENT_INTERVAL` | `15s` | How often the rates are read. |
+| `QBITTORRENT_TIMEOUT` | `5s` | Per-request timeout. Must be shorter than the interval. |
+| `SWITCH_BUSY_DOWNLOAD` | `1MiB` | Defer automatic switching at or above this download rate. `0` disables this trigger. |
+| `SWITCH_BUSY_UPLOAD` | `1MiB` | Defer automatic switching at or above this upload rate. `0` disables this trigger. |
+| `SWITCH_BUSY_MAX_DEFER` | unset | Cap on how long a transfer may defer switching. Unset means indefinitely. |
 
 ### Server list output
 

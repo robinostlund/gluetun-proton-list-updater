@@ -97,6 +97,41 @@ function portForwardingState(gluetun) {
   return requested ? 'on' : 'off';
 }
 
+// rate renders bytes per second the way the engine's log does, so the two agree.
+function rate(bytesPerSecond) {
+  const value = Number(bytesPerSecond || 0);
+  if (value < 1000) return `${value} B/s`;
+  const units = ['kB/s', 'MB/s', 'GB/s', 'TB/s'];
+  let scaled = value;
+  for (const unit of units) {
+    scaled /= 1000;
+    if (scaled < 1000) return `${scaled.toFixed(1)} ${unit}`;
+  }
+  return `${(scaled / 1000).toFixed(1)} PB/s`;
+}
+
+function bytes(total) {
+  const value = Number(total || 0);
+  if (value < 1000) return `${value} B`;
+  const units = ['kB', 'MB', 'GB', 'TB'];
+  let scaled = value;
+  for (const unit of units) {
+    scaled /= 1000;
+    if (scaled < 1000) return `${scaled.toFixed(1)} ${unit}`;
+  }
+  return `${(scaled / 1000).toFixed(1)} PB`;
+}
+
+// A rate shown against the threshold that would defer a switch, with a bar so the
+// margin is visible at a glance rather than needing two numbers compared by eye.
+function rateAgainst(speed, threshold) {
+  const shown = escapeHTML(rate(speed));
+  if (!threshold) return shown;
+  const fraction = Math.min(Number(speed || 0) / Number(threshold), 1);
+  const severity = fraction >= 1 ? 'bad' : fraction >= 0.6 ? 'warn' : '';
+  return `${shown}<span class="bar ${severity}"><span style="width:${fraction * 100}%"></span></span>`;
+}
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -121,6 +156,7 @@ function render() {
   renderGluetunDetail();
   renderProton();
   renderServersFile();
+  renderTransfer();
   renderLatency();
   renderCandidates();
   renderHistory();
@@ -457,6 +493,60 @@ function renderServersFile() {
   text('servers-write', timeAgo(servers.last_write));
   text('servers-preserved', (servers.preserved_keys || []).join(', ') || 'none');
   text('servers-error', servers.last_error || (servers.ignored ? 'Gluetun keeps no server data on disk, so this is not read.' : ''));
+}
+
+// Transfer rates from qBittorrent, and whether they are holding switching back.
+//
+// The card hides itself entirely when the feature is not configured: an empty panel
+// reading "0 B/s" would suggest the tunnel is idle, which is a different claim from
+// "nobody is measuring".
+function renderTransfer() {
+  const transfer = snapshot.transfer || {};
+  const card = el('transfer-card');
+  card.hidden = !transfer.configured;
+  if (!transfer.configured) return;
+
+  text('transfer-rates', `${rate(transfer.download_speed)} ↓  ${rate(transfer.upload_speed)} ↑`);
+  el('transfer-down').innerHTML = rateAgainst(transfer.download_speed, transfer.busy_download_threshold);
+  el('transfer-up').innerHTML = rateAgainst(transfer.upload_speed, transfer.busy_upload_threshold);
+  text('transfer-down-limit', transfer.busy_download_threshold
+    ? rate(transfer.busy_download_threshold) : 'not a trigger');
+  text('transfer-up-limit', transfer.busy_upload_threshold
+    ? rate(transfer.busy_upload_threshold) : 'not a trigger');
+  text('transfer-total', `${bytes(transfer.download_total)} ↓ / ${bytes(transfer.upload_total)} ↑`);
+  text('transfer-checked', transfer.last_check ? timeAgo(transfer.last_check) : 'never');
+
+  // qBittorrent's own connectivity, worth showing next to a port-forwarding setup:
+  // "firewalled" there usually means the forwarded port is not reaching it.
+  const connection = transfer.connection_status;
+  text('transfer-state', connection ? `qBittorrent is ${connection}` : '');
+
+  const tags = [];
+  if (transfer.busy) {
+    tags.push('<span class="tag tag-blocked">switching on hold</span>');
+  } else {
+    tags.push('<span class="tag">idle enough to switch</span>');
+  }
+  if (transfer.version) tags.push(`<span class="tag">${escapeHTML(transfer.version)}</span>`);
+  if (!transfer.reachable) tags.push('<span class="tag tag-excluded">stale reading</span>');
+  el('transfer-tags').innerHTML = tags.join('');
+
+  const notes = [];
+  if (transfer.busy) {
+    notes.push(`A transfer is in progress, so automatic switching is deferred${
+      transfer.deferred_for ? ` (${transfer.deferred_for} so far)` : ''}.`);
+    notes.push(transfer.max_defer
+      ? `It will switch anyway after ${transfer.max_defer}.`
+      : 'It will wait for as long as the transfer lasts.');
+  } else {
+    notes.push('Nothing is above the thresholds, so switching is not being held back.');
+  }
+  notes.push('"Reconnect to best" always proceeds — an explicit instruction is never deferred.');
+  text('transfer-note', notes.join(' '));
+
+  // An unreachable qBittorrent is shown as an error, but the rates above are kept:
+  // the last known values keep deferring switches rather than falling open.
+  text('transfer-error', transfer.reachable ? '' : (transfer.last_error || ''));
 }
 
 function renderLatency() {

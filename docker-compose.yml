@@ -128,6 +128,21 @@ services:
       PROTON_REFRESH_INTERVAL: 12h
       PROTON_LOAD_REFRESH_INTERVAL: 15m
 
+      # Optional: do not switch while a transfer is running.
+      #
+      # A switch drops the tunnel and every connection through it, so moving to a
+      # marginally quieter server mid-download is a self-inflicted interruption.
+      # Gluetun cannot report throughput at all, so the rates come from qBittorrent.
+      # Generate the key in qBittorrent: Preferences -> Web UI -> API keys.
+      #
+      # Leave QBITTORRENT_URL unset to disable this entirely. Use qBittorrent's real
+      # port here - it validates the Host header and rejects a remapped one with 401.
+      # QBITTORRENT_URL: "http://qbittorrent:8080"
+      # QBITTORRENT_API_KEY: ${QBITTORRENT_API_KEY}
+      # SWITCH_BUSY_DOWNLOAD: "2MB"
+      # SWITCH_BUSY_UPLOAD: "512KB"
+      # SWITCH_BUSY_MAX_DEFER: 2h
+
       # DASHBOARD_USERNAME: admin
       # DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
 

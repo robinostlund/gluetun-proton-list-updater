@@ -235,3 +235,112 @@ func TestEmptyVariableFallsBackToDefault(t *testing.T) {
 		t.Errorf("BaseURL = %q, want the default", cfg.Gluetun.BaseURL)
 	}
 }
+
+// Thresholds are written the way people say rates. A value in bare bytes is
+// unreadable and trivially wrong by three orders of magnitude, which for this setting
+// is the difference between "never switch" and "always switch".
+func TestByteRateParsing(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		input string
+		want  uint64
+	}{
+		{"1MB", 1_000_000},
+		{"1mb", 1_000_000},
+		{"1 MB", 1_000_000},
+		{"1MB/s", 1_000_000},
+		{"500KB", 500_000},
+		{"1MiB", 1 << 20},
+		{"2MiB", 2 << 20},
+		{"1GB", 1_000_000_000},
+		{"1.5MB", 1_500_000},
+		{"2M", 2_000_000},
+		{"1024", 1024}, // a bare number is bytes per second
+		{"0", 0},
+		{"1024B", 1024},
+	} {
+		got, err := parseByteRate(testCase.input)
+		if err != nil {
+			t.Errorf("parseByteRate(%q): %v", testCase.input, err)
+			continue
+		}
+		if got != testCase.want {
+			t.Errorf("parseByteRate(%q) = %d, want %d", testCase.input, got, testCase.want)
+		}
+	}
+
+	for _, bad := range []string{"", "lots", "-1MB", "MB", "1XB"} {
+		if _, err := parseByteRate(bad); err == nil {
+			t.Errorf("parseByteRate(%q) should have failed", bad)
+		}
+	}
+}
+
+// A half-configured qBittorrent is worse than none: it reads as enabled while never
+// deferring anything, so every mistake has to be caught at startup.
+func TestQBittorrentConfigurationIsValidated(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "url without a key",
+			env:     map[string]string{"QBITTORRENT_URL": "http://qb:8080"},
+			wantErr: "QBITTORRENT_API_KEY is required",
+		},
+		{
+			name: "url without a scheme",
+			env: map[string]string{
+				"QBITTORRENT_URL": "qb:8080", "QBITTORRENT_API_KEY": "qbt_x",
+			},
+			wantErr: "must start with http",
+		},
+		{
+			name: "both thresholds disabled",
+			env: map[string]string{
+				"QBITTORRENT_URL": "http://qb:8080", "QBITTORRENT_API_KEY": "qbt_x",
+				"SWITCH_BUSY_DOWNLOAD": "0", "SWITCH_BUSY_UPLOAD": "0",
+			},
+			wantErr: "no transfer would ever defer a switch",
+		},
+		{
+			name: "timeout not shorter than the interval",
+			env: map[string]string{
+				"QBITTORRENT_URL": "http://qb:8080", "QBITTORRENT_API_KEY": "qbt_x",
+				"QBITTORRENT_TIMEOUT": "30s", "QBITTORRENT_INTERVAL": "15s",
+			},
+			wantErr: "must be shorter than",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("PROTON_USERNAME", "user")
+			t.Setenv("PROTON_PASSWORD", "pass")
+			for key, value := range testCase.env {
+				t.Setenv(key, value)
+			}
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected an error mentioning %q", testCase.wantErr)
+			}
+			if !strings.Contains(err.Error(), testCase.wantErr) {
+				t.Errorf("error = %v, want it to mention %q", err, testCase.wantErr)
+			}
+		})
+	}
+}
+
+// And the feature must stay off, with no validation at all, when it is not configured.
+func TestQBittorrentIsOffByDefault(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.QBittorrent.Enabled() {
+		t.Error("qBittorrent should be disabled when QBITTORRENT_URL is unset")
+	}
+}

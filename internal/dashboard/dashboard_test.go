@@ -1009,3 +1009,67 @@ func TestGluetunsLiveSelectionIsNotLabelledAsAFilter(t *testing.T) {
 		}
 	}
 }
+
+// The transfer card is rendered by JavaScript, so this asserts statically that the
+// snapshot fields the engine publishes are the ones the script reads, and that each
+// has somewhere to render into.
+func TestTheTransferCardRendersWhatTheEnginePublishes(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, element := range []string{
+		"transfer-card", "transfer-rates", "transfer-down", "transfer-up",
+		"transfer-down-limit", "transfer-up-limit", "transfer-total",
+		"transfer-checked", "transfer-note", "transfer-error", "transfer-tags",
+	} {
+		if !bytes.Contains(page, []byte(`id="`+element+`"`)) {
+			t.Errorf("index.html has no %q element", element)
+		}
+	}
+
+	// Field names must match the JSON tags on TransferStatus exactly.
+	for _, field := range []string{
+		"transfer.configured", "transfer.reachable", "transfer.download_speed",
+		"transfer.upload_speed", "transfer.busy_download_threshold",
+		"transfer.busy_upload_threshold", "transfer.busy", "transfer.deferred_for",
+		"transfer.max_defer", "transfer.connection_status", "transfer.version",
+	} {
+		if !bytes.Contains(script, []byte(field)) {
+			t.Errorf("app.js never reads %q", field)
+		}
+	}
+}
+
+// An unconfigured feature must not render as an idle one. A card reading "0 B/s"
+// claims the tunnel is quiet; hiding it admits nobody is measuring.
+func TestTheTransferCardHidesItselfWhenNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hidden in the markup, so it never flashes before the first snapshot arrives.
+	if !regexp.MustCompile(`id="transfer-card"[^>]*hidden`).Match(page) {
+		t.Error("the transfer card should start hidden")
+	}
+	if !bytes.Contains(script, []byte("card.hidden = !transfer.configured")) {
+		t.Error("the card's visibility is not driven by transfer.configured")
+	}
+	if !bytes.Contains(script, []byte("if (!transfer.configured) return;")) {
+		t.Error("rendering should stop early when the feature is off")
+	}
+}

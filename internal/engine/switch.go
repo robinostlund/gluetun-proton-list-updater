@@ -114,6 +114,23 @@ func (e *Engine) decide(current scoring.Scored, haveCurrent bool, best scoring.S
 	if !e.autoSwitchEnabled() {
 		return decision{explanation: "automatic switching is disabled"}
 	}
+
+	// An active transfer outranks every reason to move.
+	//
+	// This has to come before all of them, including "the current server is unknown"
+	// and the load trigger. Switching tears the tunnel down and takes every
+	// connection through it with it, so moving to a better server would inflict
+	// exactly the interruption the better server is meant to avoid. A slow transfer
+	// still beats a broken one, and an unidentified current server is no reason to
+	// break a transfer that is demonstrably flowing.
+	if blocked, reason := e.transferBlocksSwitch(); blocked {
+		explanation := "not switching while " + reason
+		if maxDefer := e.cfg.QBittorrent.MaxDefer; maxDefer > 0 {
+			explanation += fmt.Sprintf("; will switch anyway after %s", maxDefer)
+		}
+		return decision{explanation: explanation}
+	}
+
 	if !haveCurrent {
 		// Either the tunnel is on a server outside the allowed set, or it is
 		// down. Either way, moving it to the best candidate is right.

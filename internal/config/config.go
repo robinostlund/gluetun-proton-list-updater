@@ -47,14 +47,15 @@ const (
 
 // Config is the fully validated runtime configuration.
 type Config struct {
-	Proton    Proton
-	Gluetun   Gluetun
-	Servers   Servers
-	Filter    Filter
-	Score     Score
-	Latency   Latency
-	Switch    Switch
-	Dashboard Dashboard
+	Proton      Proton
+	Gluetun     Gluetun
+	Servers     Servers
+	Filter      Filter
+	Score       Score
+	Latency     Latency
+	Switch      Switch
+	QBittorrent QBittorrent
+	Dashboard   Dashboard
 
 	// StateDir holds the Proton session, the cached server list and the
 	// selection history. It must be writable and should be a volume so a
@@ -259,6 +260,46 @@ type Switch struct {
 	Candidates int
 }
 
+// QBittorrent configures reading current transfer rates from qBittorrent, so a
+// server switch can wait rather than interrupt an active transfer.
+//
+// It is off unless URL is set. This is deliberately opt-in: it is the operator's
+// business whether a torrent client exists, and a tool that guesses at one would
+// either fail noisily or silently do nothing.
+type QBittorrent struct {
+	// URL is qBittorrent's Web UI address, e.g. http://qbittorrent:8080. Empty
+	// disables the whole feature.
+	URL string
+	// APIKey is a Web API key from qBittorrent's own settings (Preferences → Web UI
+	// → API keys). Sent as a bearer token.
+	//
+	// A key rather than a username and password on purpose: it cannot expire
+	// mid-session, it bypasses qBittorrent's CSRF protection so no Referer handling
+	// is needed, and it cannot trip the brute-force lockout that repeated login
+	// attempts would.
+	APIKey string
+	// Interval is how often the transfer rates are read.
+	Interval time.Duration
+	// RequestTimeout bounds one read. It must stay well below Interval.
+	RequestTimeout time.Duration
+	// BusyDownload and BusyUpload are the rates, in bytes per second, above which
+	// automatic switching is deferred. They are separate because the two are not
+	// interchangeable: seeding at 5 MB/s and downloading at 5 MB/s are different
+	// situations, and an operator may care about protecting one and not the other.
+	//
+	// Zero disables that direction as a trigger.
+	BusyDownload uint64
+	BusyUpload   uint64
+	// MaxDefer bounds how long switching can be held off by activity. Zero means no
+	// bound: an active transfer always wins, which is the point of the feature.
+	// Setting it puts a ceiling on how stale a server choice can become on a
+	// permanently busy tunnel.
+	MaxDefer time.Duration
+}
+
+// Enabled reports whether transfer-rate awareness is configured.
+func (q QBittorrent) Enabled() bool { return q.URL != "" }
+
 // Dashboard configures the built-in web UI.
 type Dashboard struct {
 	Enabled bool
@@ -355,6 +396,16 @@ func Load() (cfg Config, err error) {
 		Candidates:     r.integer("SWITCH_CANDIDATES", 3),
 	}
 
+	cfg.QBittorrent = QBittorrent{
+		URL:            strings.TrimSuffix(r.str("QBITTORRENT_URL", ""), "/"),
+		APIKey:         r.str("QBITTORRENT_API_KEY", ""),
+		Interval:       r.duration("QBITTORRENT_INTERVAL", 15*time.Second),
+		RequestTimeout: r.duration("QBITTORRENT_TIMEOUT", 5*time.Second),
+		BusyDownload:   r.byteRate("SWITCH_BUSY_DOWNLOAD", 1<<20),
+		BusyUpload:     r.byteRate("SWITCH_BUSY_UPLOAD", 1<<20),
+		MaxDefer:       r.duration("SWITCH_BUSY_MAX_DEFER", 0),
+	}
+
 	cfg.Dashboard = Dashboard{
 		Enabled:  r.boolean("DASHBOARD_ENABLED", true),
 		Address:  r.str("DASHBOARD_ADDRESS", ":8080"),
@@ -380,6 +431,27 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 	}
 	if cfg.Servers.OnlyAllowedCountries && len(cfg.Filter.Countries) == 0 {
 		r.errorf("SERVERS_ONLY_ALLOWED_COUNTRIES requires COUNTRIES to be set")
+	}
+	if cfg.QBittorrent.Enabled() {
+		if !strings.HasPrefix(cfg.QBittorrent.URL, "http://") &&
+			!strings.HasPrefix(cfg.QBittorrent.URL, "https://") {
+			r.errorf("QBITTORRENT_URL: %q must start with http:// or https://", cfg.QBittorrent.URL)
+		}
+		if cfg.QBittorrent.APIKey == "" {
+			r.errorf("QBITTORRENT_URL is set, so QBITTORRENT_API_KEY is required " +
+				"(generate one in qBittorrent: Preferences -> Web UI -> API keys)")
+		}
+		// Both thresholds at zero means nothing can ever defer a switch, so the
+		// configuration reads as enabled while doing nothing at all.
+		if cfg.QBittorrent.BusyDownload == 0 && cfg.QBittorrent.BusyUpload == 0 {
+			r.errorf("QBITTORRENT_URL is set but both SWITCH_BUSY_DOWNLOAD and " +
+				"SWITCH_BUSY_UPLOAD are 0, so no transfer would ever defer a switch")
+		}
+		if cfg.QBittorrent.RequestTimeout >= cfg.QBittorrent.Interval {
+			r.errorf("QBITTORRENT_TIMEOUT (%s) must be shorter than QBITTORRENT_INTERVAL (%s), "+
+				"or a slow answer delays the next reading",
+				cfg.QBittorrent.RequestTimeout, cfg.QBittorrent.Interval)
+		}
 	}
 	if cfg.Latency.Port < 1 || cfg.Latency.Port > 65535 {
 		r.errorf("LATENCY_PORT: %d is not a valid port", cfg.Latency.Port)

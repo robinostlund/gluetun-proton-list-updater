@@ -2280,3 +2280,335 @@ func TestWaitingForTheTunnelToSettleIsVisible(t *testing.T) {
 		t.Errorf("activity = %q after the wait, want the caller's own restored", got)
 	}
 }
+
+// fakeQBittorrent stands in for a qBittorrent Web API, so the busy/idle transitions
+// can be driven precisely.
+type fakeQBittorrent struct {
+	mu       sync.Mutex
+	down, up uint64
+	failing  bool
+	requests int
+}
+
+func (f *fakeQBittorrent) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "v5.2.2")
+	})
+	mux.HandleFunc("GET /api/v2/transfer/info", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		down, up, failing := f.down, f.up, f.failing
+		f.requests++
+		f.mu.Unlock()
+		if failing {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"dl_info_speed":%d,"up_info_speed":%d,"dl_info_data":1,`+
+			`"up_info_data":2,"connection_status":"connected"}`, down, up)
+	})
+	return mux
+}
+
+func (f *fakeQBittorrent) set(down, up uint64) {
+	f.mu.Lock()
+	f.down, f.up = down, up
+	f.mu.Unlock()
+}
+
+func (f *fakeQBittorrent) fail(failing bool) {
+	f.mu.Lock()
+	f.failing = failing
+	f.mu.Unlock()
+}
+
+// withQBittorrent attaches a fake qBittorrent to a harness and returns it.
+func withQBittorrent(t *testing.T, cfg *config.Config, down, up uint64) *fakeQBittorrent {
+	t.Helper()
+	fake := &fakeQBittorrent{down: down, up: up}
+	server := httptest.NewServer(fake.handler())
+	t.Cleanup(server.Close)
+
+	cfg.QBittorrent = config.QBittorrent{
+		URL:            server.URL,
+		APIKey:         "qbt_" + strings.Repeat("k", 28),
+		Interval:       50 * time.Millisecond,
+		RequestTimeout: 2 * time.Second,
+		BusyDownload:   1 << 20,
+		BusyUpload:     1 << 20,
+	}
+	return fake
+}
+
+// The whole point: a switch must not interrupt a transfer in progress.
+func TestATransferInProgressDefersSwitching(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 8<<20, 0) // 8 MB/s down, well over the threshold
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	engine.applyLogicals(mixedP2PLogicals(), false)
+	engine.evaluate(context.Background(), "scheduled", false)
+
+	explanation := engine.Snapshot().Selection.Explanation
+	if !strings.Contains(explanation, "transfer is in progress") {
+		t.Errorf("explanation = %q, want it to say a transfer deferred the switch", explanation)
+	}
+	transfer := engine.Snapshot().Transfer
+	if !transfer.Busy {
+		t.Error("Busy should be true at 8 MB/s against a 1 MiB/s threshold")
+	}
+	if transfer.DownloadSpeed != 8<<20 {
+		t.Errorf("DownloadSpeed = %d, want %d", transfer.DownloadSpeed, uint64(8<<20))
+	}
+	if !transfer.Configured || !transfer.Reachable {
+		t.Errorf("transfer should be configured and reachable: %+v", transfer)
+	}
+	_ = fake
+}
+
+// An explicit instruction is the operator's decision, and must not be overridden.
+func TestAForcedSwitchIsNotDeferredByATransfer(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], true)
+	if !verdict.shouldSwitch || verdict.reason != "manual" {
+		t.Errorf("a forced switch should proceed despite a transfer: %+v", verdict)
+	}
+}
+
+// The two directions are independent: protecting uploads must not require protecting
+// downloads, and vice versa.
+func TestDownloadAndUploadThresholdsAreIndependent(t *testing.T) {
+	for _, testCase := range []struct {
+		name             string
+		down, up         uint64
+		busyDown, busyUp uint64
+		wantBusy         bool
+	}{
+		{"download over, upload under", 5 << 20, 0, 1 << 20, 1 << 20, true},
+		{"upload over, download under", 0, 5 << 20, 1 << 20, 1 << 20, true},
+		{"both under", 100, 100, 1 << 20, 1 << 20, false},
+		{"download over but download not a trigger", 5 << 20, 0, 0, 1 << 20, false},
+		{"upload over but upload not a trigger", 0, 5 << 20, 1 << 20, 0, false},
+		{"exactly at the threshold counts as busy", 1 << 20, 0, 1 << 20, 1 << 20, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness := newHarness(t, false, func(cfg *config.Config) {
+				withQBittorrent(t, cfg, testCase.down, testCase.up)
+				cfg.QBittorrent.BusyDownload = testCase.busyDown
+				cfg.QBittorrent.BusyUpload = testCase.busyUp
+			})
+			harness.run(t, func() bool {
+				return !harness.engine.Snapshot().Transfer.LastCheck.IsZero()
+			})
+			if got := harness.engine.Snapshot().Transfer.Busy; got != testCase.wantBusy {
+				t.Errorf("Busy = %v, want %v (%d down / %d up against %d/%d)",
+					got, testCase.wantBusy, testCase.down, testCase.up,
+					testCase.busyDown, testCase.busyUp)
+			}
+		})
+	}
+}
+
+// The fail-safe that matters most. "I could not find out" must never be treated as
+// "nothing is happening", or the feature breaks the transfer it exists to protect.
+func TestAnUnreachableQBittorrentKeepsDeferring(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	// qBittorrent goes away while the transfer is still running.
+	fake.fail(true)
+	engine.refreshTransfer(context.Background(), "test")
+
+	transfer := engine.Snapshot().Transfer
+	if transfer.Reachable {
+		t.Error("Reachable should be false after a failed read")
+	}
+	if !transfer.Busy {
+		t.Fatal("Busy was cleared by a failed read; that would break the transfer")
+	}
+
+	blocked, reason := engine.transferBlocksSwitch()
+	if !blocked {
+		t.Error("switching should still be deferred on the last known rates")
+	}
+	if !strings.Contains(reason, "last reading") {
+		t.Errorf("reason = %q, want it to admit the reading is stale", reason)
+	}
+}
+
+// The safety valve: a permanently busy tunnel must not be stuck on a degrading server
+// for ever, when the operator has asked for a bound.
+func TestTheDeferralCanBeBounded(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 8<<20, 0)
+		cfg.QBittorrent.MaxDefer = time.Hour
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	if blocked, _ := engine.transferBlocksSwitch(); !blocked {
+		t.Fatal("should be deferring while inside the bound")
+	}
+
+	// Pretend the transfer has been running longer than the bound allows.
+	engine.transferBusySince = time.Now().Add(-2 * time.Hour)
+	if blocked, _ := engine.transferBlocksSwitch(); blocked {
+		t.Error("past MaxDefer the switch should proceed anyway")
+	}
+}
+
+// With no bound configured, an active transfer always wins - which is the default,
+// because "do not break the transfer" is the point.
+func TestWithoutABoundATransferAlwaysWins(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 8<<20, 0)
+		cfg.QBittorrent.MaxDefer = 0
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	engine.transferBusySince = time.Now().Add(-72 * time.Hour)
+	if blocked, _ := engine.transferBlocksSwitch(); !blocked {
+		t.Error("with MaxDefer unset a transfer should defer switching indefinitely")
+	}
+}
+
+// Not configured must mean not consulted: no requests, and nothing deferred.
+func TestWithoutQBittorrentNothingIsDeferred(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	if blocked, _ := engine.transferBlocksSwitch(); blocked {
+		t.Error("nothing should be deferred when qBittorrent is not configured")
+	}
+	if transfer := engine.Snapshot().Transfer; transfer.Configured {
+		t.Error("Transfer.Configured should be false, so the dashboard hides the card")
+	}
+	if got := engine.transferInterval(); got != 0 {
+		t.Errorf("transferInterval = %s, want 0 so the ticker never fires", got)
+	}
+}
+
+// A transfer that quietens down must release the hold, or one busy moment would
+// disable switching until a restart.
+func TestSwitchingResumesWhenTheTransferFinishes(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	fake.set(1024, 512) // the transfer finishes
+	engine.refreshTransfer(context.Background(), "test")
+
+	transfer := engine.Snapshot().Transfer
+	if transfer.Busy {
+		t.Error("Busy should clear once the rates drop below the thresholds")
+	}
+	if !transfer.BusySince.IsZero() {
+		t.Error("BusySince should be reset, so a later transfer measures its own duration")
+	}
+	if blocked, _ := engine.transferBlocksSwitch(); blocked {
+		t.Error("switching should no longer be deferred")
+	}
+}
+
+func TestRateFormatting(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		bytes uint64
+		want  string
+	}{
+		{0, "0 B/s"},
+		{999, "999 B/s"},
+		{1000, "1.0 kB/s"},
+		{1_500_000, "1.5 MB/s"},
+		{13_107_200, "13.1 MB/s"},
+		{2_500_000_000, "2.5 GB/s"},
+	} {
+		if got := formatRate(testCase.bytes); got != testCase.want {
+			t.Errorf("formatRate(%d) = %q, want %q", testCase.bytes, got, testCase.want)
+		}
+	}
+}
+
+// The gate has to come before every reason to move, not after some of them.
+//
+// "The current server is unknown" is a reason to switch, and it used to be evaluated
+// first, so an active transfer was silently bypassed on exactly the path most likely
+// to fire. An unidentified current server is no reason to break a transfer that is
+// demonstrably flowing.
+func TestAnUnknownCurrentServerDoesNotBypassTheTransferGate(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	// haveCurrent=false is the path that used to win outright.
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false)
+	if verdict.shouldSwitch {
+		t.Errorf("switched with a transfer running: %+v", verdict)
+	}
+	if !strings.Contains(verdict.explanation, "transfer is in progress") {
+		t.Errorf("explanation = %q, want the transfer to be the stated reason", verdict.explanation)
+	}
+}
+
+// Nor may the load trigger bypass it: moving off an overloaded server is still an
+// interruption, and a slow transfer beats a broken one.
+func TestTheLoadTriggerDoesNotBypassTheTransferGate(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 8<<20, 0)
+		cfg.Switch.LoadTrigger = 50
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	busy := scoring.Scored{Candidate: catalog.Candidate{
+		Hostname: "node-busy.protonvpn.net", ServerName: "SE#BUSY", Load: 95,
+	}, Score: 0.9}
+	quiet := engine.ranked[0]
+
+	verdict := engine.decide(busy, true, quiet, false)
+	if verdict.shouldSwitch {
+		t.Errorf("the load trigger bypassed the transfer gate: %+v", verdict)
+	}
+}
+
+// The one case where deferring is harmful: a crashed tunnel has no transfer left to
+// protect, only a recovery to delay.
+func TestACrashedTunnelIsNotDeferred(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
+	engine := harness.engine
+
+	if blocked, _ := engine.transferBlocksSwitch(); !blocked {
+		t.Fatal("should defer while the tunnel is running")
+	}
+
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.Status = gluetunapi.StatusCrashed
+	})
+	if blocked, _ := engine.transferBlocksSwitch(); blocked {
+		t.Error("a crashed tunnel must not be held back: nothing is flowing through it")
+	}
+}
