@@ -288,115 +288,121 @@ to evaluate, and the tool would lose contact whenever the tunnel drops.
 
 ## The dashboard
 
-- **Current server** — name, country, load, latency, score, rank, public IP, forwarded port,
-  how the server was identified, and **feature tags** (`p2p`, `secure core`, `tor`, `stream`,
-  `free`) so you can see at a glance what kind of server you are on.
-- **Public IP (from Gluetun)** — the exit address Gluetun reports, with country, region, city,
-  organisation, timezone and reverse DNS, and a note when it matches the selected server's Proton
-  exit address (which is how the current server is identified).
-- **Gluetun's own view** — everything its control server reports: tunnel status, version, commit,
-  build date, protocol, provider, DNS state, its own updater state, whether **port forwarding**
-  is on or off, the forwarded ports, how many **servers Gluetun knows** (see below), and the
-  **live server selection** it is applying — which is usually the reason a specific server was
-  refused.
-- **Best candidate** — with the score gap, its feature tags, and the reason a switch has or has
-  not happened. When Gluetun requires port forwarding, this card carries a note saying only P2P
-  servers are considered — which is why a *busier* server can legitimately be the best one, and
-  why "Reconnect to best" will go there.
-- **Actions** — reconnect to best, refresh the server list, refresh loads, probe latency,
-  re-evaluate, rewrite `servers.json`, toggle automatic switching.
-- **Transfer (qBittorrent)** — current download and upload rates, each with a bar showing how
-  close it is to the threshold that defers switching, plus session totals, qBittorrent's version
-  and its own connection status. The card hides itself entirely when the feature is off, because a
-  card reading `0 B/s` would claim the tunnel is idle rather than admitting nobody is measuring.
-- **Load freshness** — the Candidates heading carries `loads 2m ago`, turning amber once a
-  refresh has been missed. Ranking is only as good as the utilisation behind it, and nothing
-  previously said how old that was.
-- **Why nothing is happening** — the Best candidate card shows the engine's own reasoning when it
-  stays put: *"Staying put: best server only 0.021 better than current, need 0.050"*, or the
-  cooldown, or the minimum interval. Previously visible only at debug level in the log.
-- **Candidate table** — every allowed server ranked, with separate **Country** and **City**
-  columns, a load bar, latency, score breakdown (hover the score) and a per-row **Use** button to
-  switch to a specific server. Servers Gluetun's own filters rule out appear at the end in
-  **amber**, with no rank, a `cannot use` tag and a disabled button — visible for diagnosis,
-  impossible to select.
-- **Switch history** — what moved where and why, with the reason under the hostnames rather than
-  in a column of its own so the panel never scrolls sideways. The shared `.protonvpn.net` suffix
-  is trimmed for width; hover a row for the full names. A **Clear** button discards it (the last
-  100 entries are kept otherwise).
-- **Live log** — the most recent activity, also with a **Clear** button. That empties only the
-  buffer this page reads; the container's own log stream is untouched.
-- **Effective settings** and **filtering statistics** (how many servers each rule removed, so an
-  unexpectedly short list is self-explanatory).
+A status strip, four cards, and the detail below — each card answering one subject, all in the same
+label-and-value shape.
 
-Live updates arrive over server-sent events. The page is a single self-contained asset — no CDN,
-no build step, works on an air-gapped network, and follows your light/dark preference.
+**Status strip.** One line at the top answering *"is everything working?"* without reading anything
+else:
+
+```
+TUNNEL running   PROTONVPN signed in   SERVER DATA written   QBITTORRENT connected
+PORT FORWARDING working   SWITCHING automatic
+```
+
+Every chip states its value in words as well as colour, and carries the detail on hover — a bad chip
+explains itself without hunting for the card. They are derived from the same snapshot the cards use,
+so the strip can never disagree with the card below it.
+
+**Server selection** — current and best candidate side by side, sharing row labels so the
+comparison reads across rather than between two panels: server, load, latency, score, rank. The
+**Improvement** row states its own verdict — `0.021 too low, needs 0.100` in red, or `0.180 meets
+0.100` in green — because that single number decides whether the best candidate is used at all.
+Below it: the **Decision** in the engine's own words (`cooldown active for another 12m`), the
+thresholds behind it, what the selection is **restricted to** (P2P only, and which Gluetun setting
+caused it), and how the current server was **identified**.
+
+**Gluetun** — the tunnel, its exit address and the server data written for it, in one place. Tunnel
+status, version, protocol, provider, DNS; the public IP with its location, organisation and reverse
+DNS; then the layout, paths, schema version and write outcome of the data written for Gluetun.
+
+**ProtonVPN** — the server list and the latency measured against Proton's entry nodes, since that
+latency is one of the two inputs to the score. Plan and tier, candidate count, fetch times, then
+median/best/worst RTT and probe coverage.
+
+**qBittorrent** — appears only when configured. Current rates with a bar against each threshold,
+qBittorrent's **own** rate caps for context (`unlimited` when it has none — these are its settings,
+not this tool's, and have no bearing on the busy thresholds), session totals, and two rows that
+answer the questions that matter: whether **port forwarding** is actually reaching qBittorrent (see
+below) and whether **switching** is being held back.
+
+Every integration answers the same two questions in the same words — **Connected** (can this tool
+reach it) and **Last … result** (`successful` / `failed`, with the error on hover). Descriptive
+paragraphs were removed in favour of labelled rows; the reasoning behind a value lives in its
+tooltip, and only genuine failures get a line of their own.
+
+Below the cards: **Actions** (reconnect to best, refresh the list, refresh loads, probe latency,
+re-evaluate, rewrite the server data, toggle automatic switching), the **Candidate table**, and
+panels for **Switch history**, **Recent activity**, **Effective settings** and **Filtering**.
+
+- **Load freshness** — the Candidates heading carries `loads 2m ago`, turning amber once a refresh
+  has been missed. Ranking is only as good as the utilisation behind it.
+- **Candidate table** — every allowed server ranked, with separate **Country** and **City** columns,
+  a load bar, latency, score breakdown (hover the score) and a per-row **Use** button. Servers
+  Gluetun's own filters rule out appear at the end in **amber**, with no rank, a `cannot use` tag and
+  a disabled button — visible for diagnosis, impossible to select.
+- **Switch history** — what moved where and why, with a **Clear** button. The shared
+  `.protonvpn.net` suffix is trimmed for width; hover a row for the full names.
+- **Live log** — recent activity, also with a **Clear** button, which empties only the buffer this
+  page reads.
+- **Effective settings**, **Gluetun's own view** and **Filtering** fold away behind a summary line.
+  They are reference material read once during setup, not scanned daily. Native `<details>`, so no
+  JavaScript is involved and they work with the keyboard.
+- The **candidate table** can be hidden with a toggle in its heading — it is the tallest thing on the
+  page — and the choice is remembered across reloads.
+
+Live updates arrive over server-sent events. The page is a single self-contained asset — no CDN, no
+build step, works on an air-gapped network, and follows your light/dark preference.
 
 Optional HTTP basic auth via `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`. `/healthz` stays
 unauthenticated so Docker's health check works.
 
-## Not switching during a transfer
+### Is the forwarded port actually reaching qBittorrent?
 
-A switch tears the tunnel down and takes every connection through it with it. Doing that in the
-middle of a download to reach a marginally quieter server is a self-inflicted interruption, so the
-tool can watch qBittorrent and wait instead.
+Neither side can answer this alone, which is why it silently goes wrong. Gluetun knows which port
+Proton forwarded; qBittorrent knows which port it listens on and whether anything is arriving. The
+**Port forwarding** row compares them:
 
-It is **off unless configured**. Gluetun exposes no throughput information at all — its control
-server has no such route, and it never reads the byte counters that exist inside its own network
-namespace — so the rates have to come from something that knows about the traffic.
-
-```yaml
-QBITTORRENT_URL: "http://qbittorrent:8080"
-QBITTORRENT_API_KEY: "qbt_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-SWITCH_BUSY_DOWNLOAD: "2MB"      # defer while downloading faster than this
-SWITCH_BUSY_UPLOAD: "512KB"      # and while uploading faster than this
-```
-
-Generate the key in qBittorrent itself: **Preferences → Web UI → API keys**. It is sent as
-`Authorization: Bearer …`, which is qBittorrent's own scheme for programmatic access. A key rather
-than a username and password on purpose: it cannot expire mid-session, it is exempt from
-qBittorrent's CSRF protection so no `Referer` handling is needed, and it cannot trip the
-brute-force lockout that repeated logins would. Verified against a real qBittorrent **5.2.2**.
-
-Thresholds are written the way people say rates — `2MB`, `512KB`, `1.5MiB`, or a bare number for
-bytes per second. `KB`/`MB`/`GB` are powers of ten and `KiB`/`MiB`/`GiB` powers of two.
-
-**The two directions are independent.** Seeding at 5 MB/s and downloading at 5 MB/s are different
-situations, and you may want to protect one and not the other. Setting either to `0` stops it being
-a trigger; setting both to `0` is rejected at startup, since the feature would read as enabled while
-never deferring anything.
-
-### What it does and does not hold back
-
-| | Behaviour |
+| Verdict | Meaning |
 |---|---|
-| Automatic switching | deferred while either rate is at or above its threshold |
-| **Reconnect to best** and per-row **Use** | always proceed — an explicit instruction is never overridden |
-| `SWITCH_LOAD_TRIGGER` (overloaded server) | also deferred: a slow transfer beats a broken one |
-| Current server unknown | also deferred: that is no reason to break a transfer that is demonstrably flowing |
-| Tunnel **crashed** | **not** deferred — nothing is flowing through a tunnel that is down, so there is only a recovery to delay |
+| `working` | the ports agree and incoming connections are arriving |
+| `mismatch` | Gluetun forwarded one port, qBittorrent listens on another — **nothing reaches it** |
+| `unreachable` | the ports agree but qBittorrent reports itself firewalled: nothing is arriving |
+| `not requested` | Gluetun is not asking Proton for a port, so no incoming connections are expected |
+| `unknown` | qBittorrent has not answered yet, or has no peers to infer from |
 
-`SWITCH_BUSY_MAX_DEFER` bounds the wait. It defaults to unset, meaning an active transfer always
-wins, which is the point of the feature. Set it (`2h`) if you would rather cap how stale the server
-choice can become on a permanently busy tunnel.
+`mismatch` is the one worth having. Neither container calls it an error: Gluetun forwards a port
+successfully, qBittorrent runs happily, and every incoming connection goes nowhere — commonly
+because qBittorrent is still on its default `6881`. It is also flagged when qBittorrent's
+**random port** setting is on, since that guarantees the match breaks on its next restart.
 
-### If qBittorrent stops answering
+There is deliberately no active reachability probe. Testing a port from outside means calling a
+third-party service on your behalf, and from inside a container this tool cannot test external
+reachability itself. `connection_status` is qBittorrent's own answer to the same question, from the
+only vantage point that knows.
 
-The last known rates are kept and **keep deferring switches**, marked as a stale reading on the
-dashboard. This is deliberate: treating "I could not find out" as "nothing is happening" would
-interrupt exactly the transfer the feature exists to protect.
+### `401` means the URL, `403` means the key
 
-### Troubleshooting a `401`
+The two status codes are the opposite way round from what you would guess, so this is worth knowing
+before you go hunting. Measured against a real qBittorrent `5.2.2`:
 
-qBittorrent answers `401` for a refused key *and* for a request its **host-header validation**
-rejects — two completely different fixes. The second is easy to hit: it validates the port in the
-`Host` header against its own Web UI port, so reaching qBittorrent through a *remapped* port fails
-even with a correct key. Confirmed on 5.2.2: the same request that failed on `127.0.0.1:19900`
-succeeded with `Host: localhost:8080`.
+| Request | Status |
+|---|---|
+| correct key, `Host` port **matches** qBittorrent's Web UI port | `200` |
+| correct key, `Host` port **does not match** | **`401`** |
+| wrong or missing key, port matches | **`403`** |
 
-Container-to-container on the same Docker network — `http://qbittorrent:8080`, qBittorrent's real
-port — is the normal case and works. If you go through a different external port, either point this
-tool at the internal one or add the name to qBittorrent's `WebUI\ServerDomains`.
+So **a `401` is never about the API key.** qBittorrent validates the `Host` header *before* it looks
+at any credentials — `validateHostHeader` runs first and throws `Unauthorized`, while a key that
+fails to create a session falls through to a scope check that throws `Forbidden` — and it requires
+the **port in the URL to equal qBittorrent's own Web UI port**.
+
+That makes the fix mechanical: if you see `401`, `QBITTORRENT_URL` is pointing at a *remapped* port.
+Use qBittorrent's internal port, the one it is actually listening on. Container-to-container on the
+same Docker network — `http://qbittorrent:8080` — is the normal case and works; publishing it to
+the host as `8091:8080` and then asking for `:8091` does not.
+
+The two are reported separately, so the log names the right thing to fix rather than sending you
+after the key when the key is fine.
 
 ### Gluetun's "Selected …" rows are not your filters
 

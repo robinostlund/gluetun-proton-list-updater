@@ -244,9 +244,28 @@ type TransferStatus struct {
 	// unlimited. They give the rates context.
 	DownloadLimit uint64 `json:"download_limit"`
 	UploadLimit   uint64 `json:"upload_limit"`
-	// ConnectionStatus is qBittorrent's own connectivity view: "connected",
+	// ConnectionStatus is qBittorrent's own peer connectivity view: "connected",
 	// "firewalled" or "disconnected".
+	//
+	// Note what this is *not*: it says nothing about whether this tool can reach
+	// qBittorrent. That is Reachable. Presenting this one as "qBittorrent is
+	// connected" conflated the two and was actively misleading.
 	ConnectionStatus string `json:"connection_status,omitempty"`
+	// ListenPort is the port qBittorrent accepts incoming peer connections on, and
+	// RandomPort whether it re-chooses that port on every start.
+	ListenPort uint16 `json:"listen_port,omitempty"`
+	RandomPort bool   `json:"random_port,omitempty"`
+	// PortForwarding is the verdict on whether a forwarded port actually reaches
+	// qBittorrent: "working", "unreachable", "mismatch", "not requested" or
+	// "unknown". PortForwardingDetail explains it in a sentence.
+	//
+	// It is computed rather than reported, because no single source knows the answer:
+	// Gluetun knows which port Proton forwarded, qBittorrent knows which port it
+	// listens on and whether anything is arriving, and only comparing the two catches
+	// the common case where forwarding "works" while every incoming connection goes
+	// nowhere.
+	PortForwarding       string `json:"port_forwarding,omitempty"`
+	PortForwardingDetail string `json:"port_forwarding_detail,omitempty"`
 	// Busy is true when either rate is above its threshold, which is what defers a
 	// switch.
 	Busy bool `json:"busy"`

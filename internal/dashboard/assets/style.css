@@ -96,6 +96,48 @@ main {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Status strip: one line answering "is everything working?". */
+.strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.strip:empty { display: none; }
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.chip b { font-weight: 600; }
+.chip-label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; }
+.chip-good { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
+.chip-good b { color: var(--good); }
+.chip-warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
+.chip-warn b { color: var(--warn); }
+.chip-bad { border-color: color-mix(in srgb, var(--bad) 50%, var(--border)); }
+.chip-bad b { color: var(--bad); }
+
+/* Reference panels fold away: read once during setup, not scanned daily. */
+.panel-fold > summary { cursor: pointer; list-style: none; }
+.panel-fold > summary::-webkit-details-marker { display: none; }
+.panel-fold > summary::before {
+  content: "▸";
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-right: 2px;
+}
+.panel-fold[open] > summary::before { content: "▾"; }
+.panel-fold > summary:hover { background: var(--bg-inset); }
+.panel-fold[open] > summary { border-bottom: 1px solid var(--border); }
+.panel-fold:not([open]) > summary { border-bottom: 0; }
+.panel-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+.panel-body form { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Keeps the search field and the collapse button together in a panel head. */
+.panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
 /* Alerts */
 .alerts { display: flex; flex-direction: column; gap: 10px; }
 .alert {
@@ -136,6 +178,59 @@ main {
   margin-bottom: 6px;
 }
 .card-current { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+
+/* A merged card carries three sections' worth of rows, so it gets two columns of the
+   grid where there is room and falls back to one when there is not. */
+.card-wide { grid-column: span 2; }
+@media (max-width: 719px) {
+  .card-wide { grid-column: span 1; }
+}
+
+/* Sub-headings inside a merged card, so "Tunnel" and "Exit address" stay legibly
+   apart without going back to being separate cards. */
+.card-section {
+  margin: 16px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.card-section:first-of-type { padding-top: 0; border-top: 0; margin-top: 10px; }
+
+/* Current versus best, sharing row labels so the two are read across rather than
+   compared between two separate cards. */
+.compare {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) 1fr 1fr;
+  gap: 6px 14px;
+  align-items: start;
+  margin-bottom: 4px;
+}
+.compare-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.compare-label { font-size: 12px; color: var(--text-muted); min-width: 0; }
+.compare-value { font-size: 13px; font-family: var(--mono); min-width: 0; }
+.compare-name {
+  font-size: 16px;
+  font-weight: 650;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compare-sub { font-size: 12px; color: var(--text-muted); font-family: inherit; }
+.compare .hostname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.compare .tags { margin-top: 4px; }
 .card-exit { border-color: color-mix(in srgb, var(--good) 35%, var(--border)); }
 code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; }
 .card-headline {

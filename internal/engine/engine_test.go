@@ -2284,16 +2284,25 @@ func TestWaitingForTheTunnelToSettleIsVisible(t *testing.T) {
 // fakeQBittorrent stands in for a qBittorrent Web API, so the busy/idle transitions
 // can be driven precisely.
 type fakeQBittorrent struct {
-	mu       sync.Mutex
-	down, up uint64
-	failing  bool
-	requests int
+	mu         sync.Mutex
+	down, up   uint64
+	failing    bool
+	requests   int
+	listenPort uint16
+	randomPort bool
+	connection string
 }
 
 func (f *fakeQBittorrent) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "v5.2.2")
+	})
+	mux.HandleFunc("GET /api/v2/app/preferences", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		listen, random := f.listenPort, f.randomPort
+		f.mu.Unlock()
+		fmt.Fprintf(w, `{"listen_port":%d,"random_port":%t,"upnp":false}`, listen, random)
 	})
 	mux.HandleFunc("GET /api/v2/transfer/info", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -2304,8 +2313,14 @@ func (f *fakeQBittorrent) handler() http.Handler {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
 		}
+		f.mu.Lock()
+		connection := f.connection
+		f.mu.Unlock()
+		if connection == "" {
+			connection = "connected"
+		}
 		fmt.Fprintf(w, `{"dl_info_speed":%d,"up_info_speed":%d,"dl_info_data":1,`+
-			`"up_info_data":2,"connection_status":"connected"}`, down, up)
+			`"up_info_data":2,"connection_status":%q}`, down, up, connection)
 	})
 	return mux
 }
@@ -2325,7 +2340,7 @@ func (f *fakeQBittorrent) fail(failing bool) {
 // withQBittorrent attaches a fake qBittorrent to a harness and returns it.
 func withQBittorrent(t *testing.T, cfg *config.Config, down, up uint64) *fakeQBittorrent {
 	t.Helper()
-	fake := &fakeQBittorrent{down: down, up: up}
+	fake := &fakeQBittorrent{down: down, up: up, listenPort: 6881}
 	server := httptest.NewServer(fake.handler())
 	t.Cleanup(server.Close)
 
@@ -2752,5 +2767,143 @@ func TestEveryEvaluationPathSetsAnExplanation(t *testing.T) {
 				t.Errorf("explanation = %q, want it to mention %q", got, testCase.want)
 			}
 		})
+	}
+}
+
+// Whether a forwarded port actually reaches qBittorrent is not something either side
+// reports on its own. Gluetun knows which port Proton forwarded; qBittorrent knows
+// which port it listens on and whether anything is arriving. The case worth catching
+// is the one neither calls a problem: forwarding succeeds, qBittorrent runs happily,
+// and the ports differ - so every incoming connection goes nowhere.
+func TestPortForwardingVerdict(t *testing.T) {
+	enabled, disabled := true, false
+
+	for _, testCase := range []struct {
+		name        string
+		listenPort  uint16
+		randomPort  bool
+		connection  string
+		forwarded   []uint16
+		pfEnabled   *bool
+		wantVerdict string
+		wantDetail  string
+	}{
+		{
+			name: "ports agree and peers are arriving", listenPort: 55019,
+			connection: "connected", forwarded: []uint16{55019}, pfEnabled: &enabled,
+			wantVerdict: "working", wantDetail: "55019",
+		},
+		{
+			name: "ports disagree - the silent failure", listenPort: 6881,
+			connection: "connected", forwarded: []uint16{55019}, pfEnabled: &enabled,
+			wantVerdict: "mismatch", wantDetail: "listening on 6881",
+		},
+		{
+			name: "ports agree but nothing is arriving", listenPort: 55019,
+			connection: "firewalled", forwarded: []uint16{55019}, pfEnabled: &enabled,
+			wantVerdict: "unreachable", wantDetail: "firewalled",
+		},
+		{
+			name: "random port will drift out of match", listenPort: 55019, randomPort: true,
+			connection: "connected", forwarded: []uint16{55019}, pfEnabled: &enabled,
+			wantVerdict: "mismatch", wantDetail: "random listening port",
+		},
+		{
+			name: "gluetun is not asking for a port at all", listenPort: 6881,
+			connection: "firewalled", pfEnabled: &disabled,
+			wantVerdict: "not requested", wantDetail: "not asking",
+		},
+		{
+			name: "no peers yet, so nothing can be inferred", listenPort: 55019,
+			connection: "disconnected", forwarded: []uint16{55019}, pfEnabled: &enabled,
+			wantVerdict: "unknown",
+		},
+		{
+			name: "port forwarding on but no port yet", listenPort: 55019,
+			connection: "firewalled", pfEnabled: &enabled,
+			wantVerdict: "unreachable",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var fake *fakeQBittorrent
+			harness := newHarness(t, false, func(cfg *config.Config) {
+				fake = withQBittorrent(t, cfg, 0, 0)
+			})
+			fake.mu.Lock()
+			fake.listenPort, fake.randomPort, fake.connection =
+				testCase.listenPort, testCase.randomPort, testCase.connection
+			fake.mu.Unlock()
+
+			harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+			engine := harness.engine
+
+			engine.mutateSnapshot(func(snapshot *Snapshot) {
+				snapshot.Gluetun.ForwardedPorts = testCase.forwarded
+				snapshot.Gluetun.PortForwardingEnabled = testCase.pfEnabled
+			})
+
+			verdict, detail := engine.portForwardingVerdict(engine.Snapshot().Gluetun)
+			if verdict != testCase.wantVerdict {
+				t.Errorf("verdict = %q, want %q (detail: %s)", verdict, testCase.wantVerdict, detail)
+			}
+			if testCase.wantDetail != "" && !strings.Contains(detail, testCase.wantDetail) {
+				t.Errorf("detail = %q, want it to mention %q", detail, testCase.wantDetail)
+			}
+		})
+	}
+}
+
+// Before qBittorrent has answered there is nothing to say, and claiming otherwise
+// would be the same unmeasured-assertion problem as reporting an idle tunnel.
+func TestPortForwardingIsUnknownBeforeQBittorrentAnswers(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+	})
+	fake.fail(true)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.LastError != "" })
+
+	verdict, detail := harness.engine.portForwardingVerdict(harness.engine.Snapshot().Gluetun)
+	if verdict != "unknown" {
+		t.Errorf("verdict = %q, want unknown before any reading", verdict)
+	}
+	if !strings.Contains(detail, "not answered yet") {
+		t.Errorf("detail = %q, want it to say why", detail)
+	}
+}
+
+// The verdict depends on Gluetun's forwarded port, which arrives on a different tick
+// from the qBittorrent reading. If it were only recomputed when qBittorrent is polled,
+// it would lag a newly forwarded port by up to a full interval.
+func TestTheVerdictIsRecomputedWhenGluetunsPortChanges(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+	})
+	fake.mu.Lock()
+	fake.listenPort, fake.connection = 55019, "connected"
+	fake.mu.Unlock()
+
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+	engine := harness.engine
+
+	enabled := true
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.ForwardedPorts = []uint16{6881} // disagrees with qBittorrent
+		snapshot.Gluetun.PortForwardingEnabled = &enabled
+	})
+	// publish() is what runs after a Gluetun health check.
+	engine.publish()
+	if got := engine.Snapshot().Transfer.PortForwarding; got != "mismatch" {
+		t.Errorf("PortForwarding = %q, want mismatch after publish()", got)
+	}
+
+	// Now Gluetun's port comes to agree, without any new qBittorrent reading.
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.ForwardedPorts = []uint16{55019}
+	})
+	engine.publish()
+	if got := engine.Snapshot().Transfer.PortForwarding; got != "working" {
+		t.Errorf("PortForwarding = %q, want working once the ports agree", got)
 	}
 }

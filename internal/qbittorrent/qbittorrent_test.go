@@ -84,26 +84,62 @@ func TestTransferDecodesARealResponse(t *testing.T) {
 	}
 }
 
-// A refused key and a refused host both answer 401, and they need completely
-// different fixes, so the error has to point at both possibilities.
-func TestARefusedKeyIsDistinguishableAndActionable(t *testing.T) {
+// The status codes are the opposite way round from intuition, and conflating them sent
+// an operator hunting for a key problem that did not exist. Measured against a real
+// qBittorrent 5.2.2:
+//
+//	correct key, Host port matches  -> 200
+//	correct key, Host port mismatch -> 401
+//	wrong or missing key            -> 403
+//
+// So 401 is never about the key, and the two errors must say different things.
+func TestA401IsAboutTheAddressAnd403IsAboutTheKey(t *testing.T) {
 	t.Parallel()
 
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+	t.Run("401 blames the address, not the key", func(t *testing.T) {
 		client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "Unauthorized", status)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		})
 		_, err := client.Transfer(context.Background())
-		if !errors.Is(err, ErrUnauthorized) {
-			t.Errorf("HTTP %d gave %v, want ErrUnauthorized", status, err)
-			continue
+
+		if !errors.Is(err, ErrAddressRejected) {
+			t.Fatalf("error = %v, want ErrAddressRejected", err)
 		}
-		for _, want := range []string{"QBITTORRENT_API_KEY", "host-header"} {
+		if errors.Is(err, ErrKeyRejected) {
+			t.Error("a 401 must not be reported as a key problem")
+		}
+		if !errors.Is(err, ErrUnauthorized) {
+			t.Error("it should still match the general sentinel")
+		}
+		// The message has to say plainly that the key is not the problem, and name
+		// the setting to change.
+		for _, want := range []string{"QBITTORRENT_URL", "not the problem", "port"} {
 			if !strings.Contains(err.Error(), want) {
-				t.Errorf("HTTP %d error %q should mention %q", status, err, want)
+				t.Errorf("error %q should mention %q", err, want)
 			}
 		}
-	}
+		// And it must not send the operator after the key.
+		if strings.Contains(err.Error(), "check QBITTORRENT_API_KEY") {
+			t.Error("a 401 should not tell the operator to check the API key")
+		}
+	})
+
+	t.Run("403 blames the key", func(t *testing.T) {
+		client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		})
+		_, err := client.Transfer(context.Background())
+
+		if !errors.Is(err, ErrKeyRejected) {
+			t.Fatalf("error = %v, want ErrKeyRejected", err)
+		}
+		if errors.Is(err, ErrAddressRejected) {
+			t.Error("a 403 must not be reported as an address problem")
+		}
+		if !strings.Contains(err.Error(), "QBITTORRENT_API_KEY") {
+			t.Errorf("error %q should name the setting to fix", err)
+		}
+	})
 }
 
 // Anything else is "no information", never "idle": the engine must be able to tell

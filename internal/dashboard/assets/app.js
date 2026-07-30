@@ -132,6 +132,29 @@ function rateAgainst(speed, threshold) {
   return `${shown}<span class="bar ${severity}"><span style="width:${fraction * 100}%"></span></span>`;
 }
 
+// outcome renders the result of the most recent attempt at something.
+//
+// Every integration now answers the same two questions in the same place - can we
+// reach it, and did the last exchange work - so they are rendered the same way rather
+// than each card inventing its own wording.
+function outcome(node, attempted, failed, error) {
+  const el_ = el(node);
+  if (!el_) return;
+  if (!attempted) {
+    el_.innerHTML = '<span class="muted">not yet</span>';
+    el_.removeAttribute('title');
+    return;
+  }
+  el_.innerHTML = failed ? '<span class="no">failed</span>' : '<span class="ok">successful</span>';
+  if (failed && error) el_.title = error; else el_.removeAttribute('title');
+}
+
+function boolRow(node, value) {
+  const el_ = el(node);
+  if (!el_) return;
+  el_.innerHTML = value ? '<span class="ok">true</span>' : '<span class="no">false</span>';
+}
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -149,6 +172,7 @@ function render() {
   text('activity-text', snapshot.activity || '');
 
   renderAlerts();
+  renderStatusStrip();
   renderCurrent();
   renderBest();
   renderGluetun();
@@ -164,6 +188,66 @@ function render() {
   renderStats();
 
   el('auto-switch').checked = Boolean(snapshot.selection.auto_switch);
+}
+
+// One line for "is everything working?".
+//
+// Every chip is derived from the same snapshot the cards use, so the two can never
+// disagree; the strip is a summary, not a second source of truth. Each carries the
+// detail as a tooltip, so a bad chip explains itself without hunting for the card.
+function renderStatusStrip() {
+  const gluetun = snapshot.gluetun;
+  const proton = snapshot.proton;
+  const servers = snapshot.servers_file;
+  const transfer = snapshot.transfer || {};
+  const selection = snapshot.selection;
+  const chips = [];
+
+  const chip = (label, value, level, detail) => chips.push(
+    `<span class="chip chip-${level}"${detail ? ` title="${escapeHTML(detail)}"` : ''}>`
+    + `<span class="chip-label">${escapeHTML(label)}</span><b>${escapeHTML(value)}</b></span>`);
+
+  // The tunnel first: nothing else matters if it is down.
+  if (!gluetun.reachable) {
+    chip('Gluetun', 'unreachable', 'bad', gluetun.last_error
+      || 'The control server did not answer. Switching is paused; the server list is still maintained.');
+  } else {
+    const running = gluetun.status === 'running';
+    chip('Tunnel', gluetun.status || 'unknown',
+      running ? 'good' : gluetun.status === 'crashed' ? 'bad' : 'warn',
+      running ? '' : 'The tunnel is not running, so it cannot be moved.');
+  }
+
+  chip('ProtonVPN', proton.last_fetch_error ? 'error' : proton.logged_in ? 'signed in' : 'signed out',
+    proton.last_fetch_error ? 'bad' : proton.logged_in ? 'good' : 'warn',
+    proton.last_fetch_error || (proton.from_cache ? 'Using the cached server list.' : ''));
+
+  // Whether the data written here is being read at all - silent when wrong.
+  chip('Server data', servers.ignored ? 'ignored' : servers.last_write ? 'written' : 'not written',
+    servers.ignored ? 'bad' : servers.last_write ? 'good' : 'warn',
+    servers.ignored_reason || '');
+
+  if (transfer.configured) {
+    chip('qBittorrent', transfer.reachable ? 'connected' : 'unreachable',
+      transfer.reachable ? 'good' : 'bad', transfer.last_error || '');
+    const verdict = transfer.port_forwarding || 'unknown';
+    chip('Port forwarding', verdict,
+      verdict === 'working' ? 'good' : verdict === 'unknown' || verdict === 'not requested' ? 'warn' : 'bad',
+      transfer.port_forwarding_detail || '');
+  }
+
+  // What the engine will actually do, which is the question behind all of the above.
+  if (transfer.busy) {
+    chip('Switching', 'on hold', 'warn',
+      `A transfer is in progress${transfer.deferred_for ? ` (${transfer.deferred_for})` : ''}, `
+      + 'so automatic switching is deferred.');
+  } else if (!selection.auto_switch) {
+    chip('Switching', 'manual only', 'warn', 'Automatic switching is turned off.');
+  } else {
+    chip('Switching', 'automatic', 'good', selection.explanation || '');
+  }
+
+  el('status-strip').innerHTML = chips.join('');
 }
 
 function renderAlerts() {
@@ -276,7 +360,6 @@ function renderCurrent() {
   text('current-rank', current && current.rank
     ? `#${current.rank} of ${snapshot.candidates_total}`
     : current && current.excluded ? 'not in allowed set' : '–');
-  text('current-ip', (gluetun.exit && gluetun.exit.ip) || '–');
   // Whether Gluetun even asks for a port distinguishes "not yet" from "never".
   const ports = gluetun.forwarded_ports || [];
   const requested = gluetun.port_forwarding_enabled;
@@ -284,18 +367,19 @@ function renderCurrent() {
     ? ports.join(', ') + (snapshot.gluetun.exit_current ? '' : ' (last seen)')
     : requested === false ? 'not requested' : 'none');
 
+  // A short value, with the reasoning available on hover rather than as a paragraph.
   const sources = {
-    'pinned': "Identified from Gluetun's own server selection, which is exact.",
-    'remembered': 'Identified from the hostname this tool last pinned; Gluetun could not be asked.',
-    'public-ip': "Identified by matching Gluetun's public IP to a Proton exit address — " +
-      'a weak signal, since Proton publishes the server address rather than the observed one.',
-    'unknown': 'Could not identify the server: the tunnel may be down, or the server is not in Proton’s current list.',
+    'pinned': ["Gluetun's own selection", "Read from Gluetun's server selection, which is exact."],
+    'remembered': ['remembered pin', 'The hostname this tool last pinned; Gluetun could not be asked.'],
+    'public-ip': ['public IP match',
+      "Matched Gluetun's public IP to a Proton exit address — a weak signal, since Proton " +
+      'publishes the server address rather than the observed one.'],
+    'unknown': ['unknown',
+      'The tunnel may be down, or the server is not in Proton’s current list.'],
   };
-  let note = sources[snapshot.selection.current_source] || '';
-  if (current && current.excluded) {
-    note = 'This server is outside your filters (country, load or features), which is why a switch is due. ' + note;
-  }
-  text('current-source', note);
+  const [label, why] = sources[snapshot.selection.current_source] || ['–', ''];
+  text('current-source', label);
+  if (why) el('current-source').title = why;
 }
 
 function renderBest() {
@@ -309,49 +393,72 @@ function renderBest() {
   el('best-load').innerHTML = best ? loadCell(best.load) : '–';
   text('best-rtt', best && best.rtt_known ? `${best.rtt_ms} ms` : 'unmeasured');
   text('best-score', best ? best.score.toFixed(3) : '–');
-  text('improvement', selection.improvement ? selection.improvement.toFixed(3) : '0.000');
+  // The improvement is the number that decides whether the best candidate is used at
+  // all, so it says so rather than leaving the reader to compare it against the
+  // threshold two rows below.
+  //
+  // Judged only when there is a current server to improve on: with none identified, a
+  // switch is due regardless and "too low" would be actively wrong.
+  const improvement = selection.improvement ? selection.improvement.toFixed(3) : '0.000';
+  const minimum = selection.min_improvement.toFixed(3);
+  const judged = Boolean(best && selection.current);
+  const enough = selection.improvement >= selection.min_improvement;
 
-  const parts = [];
-  if ((snapshot.gluetun.requirements_adopted || []).includes('port_forward_only')) {
-    // Name the setting. "Gluetun requires one" is bewildering to an operator who
-    // only ever set VPN_PORT_FORWARDING and never PORT_FORWARD_ONLY.
-    const because = snapshot.gluetun.port_forward_requirement_from === 'VPN_PORT_FORWARDING'
-      ? 'because Gluetun asks Proton for a forwarded port (VPN_PORT_FORWARDING), and Proton ' +
-        'forwards ports on P2P servers only'
-      : 'because Gluetun refuses anything else (PORT_FORWARD_ONLY)';
-    parts.push(`Only port-forwarding (P2P) servers are considered, ${because} — ` +
-      'so a busier server can legitimately win here.');
+  if (!judged) {
+    text('improvement', best ? improvement : '–');
+  } else if (enough) {
+    el('improvement').innerHTML = `<span class="ok">${improvement}</span>`
+      + ` <span class="muted">meets ${minimum}</span>`;
+    el('improvement').title = 'Big enough to switch on its own merits.';
+  } else {
+    el('improvement').innerHTML = `<span class="no">${improvement}</span>`
+      + ` <span class="no">too low</span> <span class="muted">needs ${minimum}</span>`;
+    el('improvement').title =
+      `The best candidate scores only ${improvement} better than the current server, and `
+      + `SWITCH_MIN_IMPROVEMENT requires ${minimum}. Reconnecting drops every connection through `
+      + 'the tunnel, so a gain this small is not worth it. Lower SWITCH_MIN_IMPROVEMENT to act on '
+      + 'smaller gains, or use "Reconnect to best" to switch anyway.';
   }
-  parts.push(`Needs ${selection.min_improvement.toFixed(3)} improvement to switch automatically.`);
-  if (selection.cooldown_remaining) parts.push(`Cooldown: ${selection.cooldown_remaining} left.`);
-  if (!selection.auto_switch) parts.push('Automatic switching is off.');
-  if (selection.mode === 'none') parts.push('Reconnect mode is "none": the tunnel is never touched.');
-  text('switch-note', parts.join(' '));
 
-  // The engine's own words for why it stayed put. "Nothing is happening" is the state
-  // that most needs explaining, and it used to be visible only at debug level.
-  text('switch-reasoning', selection.explanation
-    ? `Staying put: ${selection.explanation}.`
-    : '');
-}
-
-// parseDuration reads Go's duration format ("5m0s", "1h30m", "90s") into seconds.
-// The snapshot carries intervals as Go strings, and comparing against one is what
-// makes "overdue" mean a missed refresh rather than an arbitrary age.
-function parseDuration(value) {
-  if (!value) return 0;
-  let seconds = 0;
-  for (const [, amount, unit] of String(value).matchAll(/([\d.]+)(ms|h|m|s|us|ns)/g)) {
-    const scale = { h: 3600, m: 60, s: 1, ms: 1e-3, us: 1e-6, ns: 1e-9 }[unit] ?? 0;
-    seconds += parseFloat(amount) * scale;
+  // Same verdict in the comparison column, so it is visible without reading down.
+  if (!best) {
+    text('improvement-cell', '–');
+  } else if (!judged) {
+    el('improvement-cell').innerHTML = '#1';
+  } else {
+    el('improvement-cell').innerHTML = `#1 · <span class="${enough ? 'ok' : 'no'}">`
+      + `${improvement} better</span>`
+      + (enough ? '' : ' <span class="no">(too low)</span>');
   }
-  return seconds;
+
+  text('best-min-improvement', selection.min_improvement.toFixed(3));
+  boolRow('best-auto', selection.auto_switch);
+  text('best-cooldown', selection.cooldown_remaining
+    ? `${selection.cooldown_remaining} left` : 'none');
+
+  // Why the candidate set is narrower than the country filter would suggest. The long
+  // explanation lives on hover; the row itself just names the constraint.
+  const p2pOnly = (snapshot.gluetun.requirements_adopted || []).includes('port_forward_only');
+  const from = snapshot.gluetun.port_forward_requirement_from;
+  text('best-restriction', p2pOnly ? `P2P only (${from || 'port forwarding'})` : 'nothing');
+  el('best-restriction').title = p2pOnly
+    ? 'Proton forwards ports on P2P servers only, so a busier P2P server can legitimately '
+      + 'outrank a quieter one. Comes from ' + (from || 'a Gluetun port-forwarding setting') + '.'
+    : '';
+
+  // One line, in the engine's own words, for why nothing is happening.
+  const decision = selection.explanation
+    ? selection.explanation
+    : (selection.mode === 'none' ? 'reconnect mode is "none"' : 'switch is due');
+  text('best-decision', decision);
 }
 
 function renderGluetun() {
   const gluetun = snapshot.gluetun;
   text('gluetun-status', gluetun.status || 'unknown');
-  el('gluetun-reachable').innerHTML = boolMark(gluetun.reachable);
+  boolRow('gluetun-reachable', gluetun.reachable);
+  outcome('gluetun-outcome', !gluetun.last_check.startsWith('0001-01-01'),
+    !gluetun.reachable || Boolean(gluetun.last_error), gluetun.last_error);
   text('gluetun-version', gluetun.version || '–');
   text('gluetun-vpn', gluetun.vpn_type || '–');
   text('gluetun-provider', gluetun.provider || '–');
@@ -375,7 +482,7 @@ function renderExit() {
   // Proton's region is frequently the same word as the city ("Stockholm,
   // Stockholm, Sweden"), so duplicates are collapsed.
   const place = [...new Set([exit.city, exit.region, exit.country].filter(Boolean))].join(', ');
-  text('exit-where', place || (running ? '' : 'Tunnel is not running'));
+  text('exit-where', place || (running ? '–' : 'tunnel is not running'));
   text('exit-org', exit.organization || '–');
   text('exit-tz', exit.timezone || '–');
   text('exit-hostname', exit.hostname || '–');
@@ -396,7 +503,7 @@ function renderExit() {
       note = `Matches ${current.server_name}'s Proton exit address, which is how the current server is identified.`;
     }
   }
-  text('exit-note', note);
+  text('exit-note', note || '–');
 }
 
 // Everything else Gluetun's API reports, including the filters it is enforcing -
@@ -446,29 +553,25 @@ function renderGluetunDetail() {
   // was set. Calling them filters made that look like lost configuration.
   const selection = gluetun.selection || {};
   for (const [key, values] of Object.entries(selection)) {
-    entries.push([`Selected ${key}`, values.join(', ')]);
+    entries.push([`Selected ${key}`, values.join(', '),
+      'Gluetun\'s live selection, not the filters you configured: pinning a server replaces '
+      + 'its countries and cities with that server\'s own. Your SERVER_COUNTRIES is restored '
+      + 'when the Gluetun container restarts.']);
   }
 
   el('gluetun-detail').innerHTML = entries
-    .map(([key, value]) => `<div><dt>${escapeHTML(key)}</dt><dd>${escapeHTML(value)}</dd></div>`)
+    .map(([key, value, why]) => `<div${why ? ` title="${escapeHTML(why)}"` : ''}>`
+      + `<dt>${escapeHTML(key)}</dt><dd>${escapeHTML(value)}</dd></div>`)
     .join('');
 
-  // Explain the "Selected …" rows, because they are the single most surprising thing
-  // on this page: an operator who set SERVER_COUNTRIES to three countries sees one.
-  const pinnedByUs = (selection.hostnames || []).length > 0;
-  text('gluetun-detail-note', pinnedByUs
-    ? 'The "Selected …" rows are the selection Gluetun is applying right now, not the '
-      + 'filters you configured. Pinning a server replaces Gluetun\'s countries and '
-      + 'cities with that server\'s own — otherwise Gluetun would AND them together and '
-      + 'a server outside SERVER_COUNTRIES would match nothing, crashing its VPN loop. '
-      + 'Your original SERVER_COUNTRIES is restored when the Gluetun container restarts.'
-    : '');
 }
 
 function renderProton() {
   const proton = snapshot.proton;
   text('proton-count', `${proton.logicals_count} logical servers`);
-  el('proton-login').innerHTML = boolMark(proton.logged_in);
+  boolRow('proton-login', proton.logged_in);
+  outcome('proton-outcome', !proton.last_fetch.startsWith('0001-01-01'),
+    Boolean(proton.last_fetch_error), proton.last_fetch_error);
   // The account's tier decides which servers are usable at all: Proton lists
   // servers above it, and they refuse the connection.
   const tier = proton.account_tier;
@@ -484,13 +587,15 @@ function renderProton() {
 
 function renderServersFile() {
   const servers = snapshot.servers_file;
-  text('servers-count', `${servers.server_count} entries`);
+  text('servers-count', String(servers.server_count));
   text('servers-layout', servers.ignored ? `${servers.layout || '–'} (ignored)` : (servers.layout || '–'));
   text('servers-path', (servers.paths || [servers.path]).join(', '));
   el('servers-preferred-flag').innerHTML = boolMark(servers.preferred);
   text('servers-mode', servers.write_mode);
   text('servers-schema', String(servers.schema_version));
   text('servers-write', timeAgo(servers.last_write));
+  outcome('servers-outcome', !servers.last_write.startsWith('0001-01-01'),
+    Boolean(servers.last_error), servers.last_error);
   text('servers-preserved', (servers.preserved_keys || []).join(', ') || 'none');
   text('servers-error', servers.last_error || (servers.ignored ? 'Gluetun keeps no server data on disk, so this is not read.' : ''));
 }
@@ -515,13 +620,38 @@ function renderTransfer() {
     ? rate(transfer.busy_download_threshold) : 'not a trigger');
   text('transfer-up-limit', transfer.busy_upload_threshold
     ? rate(transfer.busy_upload_threshold) : 'not a trigger');
-  text('transfer-total', `${bytes(transfer.download_total)} ↓ / ${bytes(transfer.upload_total)} ↑`);
-  text('transfer-checked', transfer.last_check ? timeAgo(transfer.last_check) : 'never');
+  // qBittorrent's own caps, which give the rates context: 900 kB/s means something
+  // different against a 1 MB/s cap than against none. They are qBittorrent's settings,
+  // not ours, and have no bearing on the busy thresholds above.
+  const cap = (limit) => limit ? rate(limit) : 'unlimited';
+  text('transfer-down-cap', cap(transfer.download_limit));
+  text('transfer-up-cap', cap(transfer.upload_limit));
+  el('transfer-down-cap').title = el('transfer-up-cap').title =
+    "qBittorrent's own rate limit. Independent of the thresholds above, which are this tool's.";
 
-  // qBittorrent's own connectivity, worth showing next to a port-forwarding setup:
-  // "firewalled" there usually means the forwarded port is not reaching it.
-  const connection = transfer.connection_status;
-  text('transfer-state', connection ? `qBittorrent is ${connection}` : '');
+  text('transfer-total', `${bytes(transfer.download_total)} ↓ / ${bytes(transfer.upload_total)} ↑`);
+  text('transfer-checked', transfer.has_reading ? timeAgo(transfer.last_check) : 'never');
+  outcome('transfer-outcome', transfer.has_reading || Boolean(transfer.last_error),
+    !transfer.reachable, transfer.last_error);
+
+  // "Connected" means this tool can reach qBittorrent's API - nothing else.
+  //
+  // It used to show connection_status here, labelled "qBittorrent is connected",
+  // which reads as exactly that but actually reports qBittorrent's *peer*
+  // connectivity. Two different questions, and conflating them made a firewalled
+  // instance look unreachable and vice versa. connection_status now feeds the
+  // port-forwarding verdict, where it belongs.
+  el('transfer-connected').innerHTML = transfer.reachable
+    ? '<span class="ok">true</span>'
+    : '<span class="no">false</span>';
+
+  const verdict = transfer.port_forwarding || 'unknown';
+  const verdictClass = { working: 'ok', unreachable: 'no', mismatch: 'no' }[verdict] || 'muted';
+  const port = transfer.listen_port
+    ? ` <span class="muted">(qBittorrent listens on ${transfer.listen_port})</span>` : '';
+  el('transfer-portfwd').innerHTML = `<span class="${verdictClass}">${escapeHTML(verdict)}</span>${port}`;
+  el('transfer-portfwd').title = transfer.port_forwarding_detail || '';
+
 
   const tags = [];
   // "Not busy" and "never measured" are different claims, and only the first is
@@ -534,26 +664,32 @@ function renderTransfer() {
   } else {
     tags.push('<span class="tag">idle enough to switch</span>');
   }
+  if (verdict === 'mismatch') {
+    tags.push('<span class="tag tag-excluded">port mismatch</span>');
+  } else if (verdict === 'unreachable') {
+    tags.push('<span class="tag tag-blocked">port unreachable</span>');
+  } else if (verdict === 'working') {
+    tags.push('<span class="tag tag-p2p">port forwarding works</span>');
+  }
+  if (transfer.random_port) tags.push('<span class="tag tag-blocked">random port</span>');
   if (transfer.version) tags.push(`<span class="tag">${escapeHTML(transfer.version)}</span>`);
   if (!transfer.reachable) tags.push('<span class="tag tag-excluded">stale reading</span>');
   el('transfer-tags').innerHTML = tags.join('');
 
-  const notes = [];
+  // One line for whether switching is being held back, and why.
+  let switching;
   if (transfer.busy) {
-    notes.push(`A transfer is in progress, so automatic switching is deferred${
-      transfer.deferred_for ? ` (${transfer.deferred_for} so far)` : ''}.`);
-    notes.push(transfer.max_defer
-      ? `It will switch anyway after ${transfer.max_defer}.`
-      : 'It will wait for as long as the transfer lasts.');
+    switching = `on hold${transfer.deferred_for ? ` for ${transfer.deferred_for}` : ''}`
+      + (transfer.max_defer ? `, until ${transfer.max_defer}` : '');
   } else if (!transfer.has_reading) {
-    notes.push('qBittorrent has not answered yet, so nothing is known about current traffic. '
-      + 'Switching is not being held back — a misconfiguration here must not freeze the tunnel '
-      + 'on one server indefinitely.');
+    switching = 'not held back (nothing measured yet)';
   } else {
-    notes.push('Nothing is above the thresholds, so switching is not being held back.');
+    switching = 'not held back';
   }
-  notes.push('"Reconnect to best" always proceeds — an explicit instruction is never deferred.');
-  text('transfer-note', notes.join(' '));
+  text('transfer-switching', switching);
+  el('transfer-switching').title =
+    'Only automatic switching is deferred. "Reconnect to best" and the per-row Use '
+    + 'buttons always proceed — an explicit instruction is never overridden.';
 
   // An unreachable qBittorrent is shown as an error, but the rates above are kept:
   // the last known values keep deferring switches rather than falling open.
@@ -567,6 +703,8 @@ function renderLatency() {
   text('latency-failed', String(latency.failed || 0));
   text('latency-best', nanos(latency.best_ns));
   text('latency-worst', nanos(latency.worst_ns));
+  text('latency-last', latency.last_run && !latency.last_run.startsWith('0001-01-01')
+    ? timeAgo(latency.last_run) : 'never');
   text('latency-next', snapshot.next_runs.latency || '–');
 
   // Coverage tells the operator whether the probe budget is large enough.
@@ -789,9 +927,45 @@ async function refreshLogs() {
   } catch { /* the stream will retry */ }
 }
 
+/* ---------- collapsing ---------- */
+
+// The candidate table is the tallest thing on the page and not always wanted. The
+// choice is remembered, because re-hiding it on every reload would be worse than not
+// offering the toggle at all.
+const collapseKey = (target) => `collapsed:${target}`;
+
+function applyCollapse(button) {
+  const target = button.dataset.collapse;
+  const body = el(target);
+  if (!body) return;
+  let hidden = false;
+  try {
+    hidden = localStorage.getItem(collapseKey(target)) === '1';
+  } catch { /* storage can be unavailable; defaulting to shown is the safe way round */ }
+  body.hidden = hidden;
+  button.textContent = hidden ? 'Show' : 'Hide';
+  button.setAttribute('aria-expanded', String(!hidden));
+}
+
+function toggleCollapse(button) {
+  const target = button.dataset.collapse;
+  const body = el(target);
+  if (!body) return;
+  const hidden = !body.hidden;
+  try {
+    localStorage.setItem(collapseKey(target), hidden ? '1' : '0');
+  } catch { /* not being able to remember it is not a reason to refuse the toggle */ }
+  applyCollapse(button);
+}
+
 /* ---------- wiring ---------- */
 
 document.addEventListener('click', (event) => {
+  const collapse = event.target.closest('button[data-collapse]');
+  if (collapse) {
+    toggleCollapse(collapse);
+    return;
+  }
   const action = event.target.closest('button[data-action]');
   if (action) {
     runAction(action, action.dataset.action, {}, 'Requested.');
@@ -883,6 +1057,11 @@ function renderExplanations(query, matches) {
       <ul class="explain-physical">${physical}</ul>
     </div>`;
   }).join('');
+}
+
+// Restore any remembered collapsed panels before the first render.
+for (const button of document.querySelectorAll('button[data-collapse]')) {
+  applyCollapse(button);
 }
 
 el('filter').addEventListener('input', (event) => {

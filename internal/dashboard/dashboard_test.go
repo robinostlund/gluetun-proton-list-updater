@@ -136,7 +136,7 @@ func TestServesTheEmbeddedPage(t *testing.T) {
 			t.Error("the page appears to reference an external resource")
 		}
 	}
-	for _, want := range []string{"style.css", "app.js", "Current server"} {
+	for _, want := range []string{"style.css", "app.js", "Server selection"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("page is missing %q", want)
 		}
@@ -604,6 +604,11 @@ func TestEveryPageElementIsFilled(t *testing.T) {
 		"auto-switch": true, "explain-form": true, "explain-query": true,
 		"explain-result": true, "totp-form": true, "totp-code": true,
 		"activity": true, "gluetun-detail": true,
+		// Addressed through data-collapse rather than by id, and it carries its own
+		// label text in the markup, so it can never show a placeholder dash.
+		"toggle-candidates": true,
+		// A container for the table, not a value slot.
+		"candidates-body": true,
 	}
 
 	var unused []string
@@ -671,13 +676,14 @@ func TestThePortForwardingReasonIsShown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The setting's name is interpolated from the snapshot rather than hard-coded, so
+	// what matters is that the field is read and rendered as the restriction's cause.
 	for _, fragment := range []string{
 		"port_forward_requirement_from",
-		"VPN_PORT_FORWARDING",
-		"PORT_FORWARD_ONLY",
+		"best-restriction",
 	} {
 		if !bytes.Contains(script, []byte(fragment)) {
-			t.Errorf("app.js does not mention %q, so the restriction cannot explain itself", fragment)
+			t.Errorf("app.js does not use %q, so the restriction cannot explain itself", fragment)
 		}
 	}
 }
@@ -953,16 +959,11 @@ func TestTheDashboardRendersTheNewDiagnostics(t *testing.T) {
 			fields:  []string{"gluetun.known_hostnames"},
 		},
 		{
-			name:     "why nothing is happening",
-			element:  `id="switch-reasoning"`,
-			fields:   []string{"selection.explanation"},
-			selector: ".reasoning",
-		},
-		{
-			name:     "selection explanation note",
-			element:  `id="gluetun-detail-note"`,
-			fields:   []string{"selection.hostnames"},
-			selector: ".panel-note",
+			// The reasoning is now a labelled row rather than a paragraph, but it must
+			// still be shown: it is the answer to "why is nothing happening".
+			name:    "why nothing is happening",
+			element: `id="best-decision"`,
+			fields:  []string{"selection.explanation"},
 		},
 	} {
 		t.Run(addition.name, func(t *testing.T) {
@@ -999,10 +1000,8 @@ func TestGluetunsLiveSelectionIsNotLabelledAsAFilter(t *testing.T) {
 	if !bytes.Contains(script, []byte("`Selected ${key}`")) {
 		t.Error("the live-selection rows are not labelled")
 	}
-	// And the surprise has to be explained, not merely relabelled.
-	if !bytes.Contains(script, []byte("gluetun-detail-note")) {
-		t.Error("nothing explains why the selection is narrower than SERVER_COUNTRIES")
-	}
+	// And the surprise has to be explained, not merely relabelled - now as a tooltip on
+	// the rows themselves rather than a paragraph under the panel.
 	for _, phrase := range []string{"SERVER_COUNTRIES", "restarts"} {
 		if !bytes.Contains(script, []byte(phrase)) {
 			t.Errorf("the explanation does not mention %q", phrase)
@@ -1028,7 +1027,8 @@ func TestTheTransferCardRendersWhatTheEnginePublishes(t *testing.T) {
 	for _, element := range []string{
 		"transfer-card", "transfer-rates", "transfer-down", "transfer-up",
 		"transfer-down-limit", "transfer-up-limit", "transfer-total",
-		"transfer-checked", "transfer-note", "transfer-error", "transfer-tags",
+		"transfer-checked", "transfer-error", "transfer-tags",
+		"transfer-connected", "transfer-portfwd", "transfer-outcome", "transfer-switching",
 	} {
 		if !bytes.Contains(page, []byte(`id="`+element+`"`)) {
 			t.Errorf("index.html has no %q element", element)
@@ -1036,11 +1036,17 @@ func TestTheTransferCardRendersWhatTheEnginePublishes(t *testing.T) {
 	}
 
 	// Field names must match the JSON tags on TransferStatus exactly.
+	//
+	// connection_status is deliberately absent: it feeds the port-forwarding verdict
+	// in the engine, where the comparison against Gluetun's forwarded port lives, and
+	// the page renders that verdict rather than re-deriving it.
 	for _, field := range []string{
 		"transfer.configured", "transfer.reachable", "transfer.download_speed",
 		"transfer.upload_speed", "transfer.busy_download_threshold",
 		"transfer.busy_upload_threshold", "transfer.busy", "transfer.deferred_for",
-		"transfer.max_defer", "transfer.connection_status", "transfer.version",
+		"transfer.max_defer", "transfer.version",
+		"transfer.port_forwarding", "transfer.port_forwarding_detail",
+		"transfer.listen_port", "transfer.random_port",
 	} {
 		if !bytes.Contains(script, []byte(field)) {
 			t.Errorf("app.js never reads %q", field)
@@ -1071,5 +1077,288 @@ func TestTheTransferCardHidesItselfWhenNotConfigured(t *testing.T) {
 	}
 	if !bytes.Contains(script, []byte("if (!transfer.configured) return;")) {
 		t.Error("rendering should stop early when the feature is off")
+	}
+}
+
+// "Connected" must mean "this tool can reach qBittorrent's API", and nothing else.
+//
+// The card used to render connection_status under the words "qBittorrent is
+// connected", which reads as exactly that but actually reports qBittorrent's *peer*
+// connectivity. So a firewalled-but-perfectly-reachable instance looked unreachable,
+// and the genuinely useful signal - can we talk to it at all - was not shown.
+func TestConnectedMeansThisToolCanReachQBittorrent(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(script, []byte("el('transfer-connected').innerHTML = transfer.reachable")) {
+		t.Error(`the Connected row is not driven by transfer.reachable`)
+	}
+	// The old conflation must not come back.
+	if bytes.Contains(script, []byte("qBittorrent is ${connection}")) {
+		t.Error(`the card is labelling peer connectivity as "qBittorrent is connected" again`)
+	}
+	// The port verdict must be rendered, not re-derived in the browser.
+	if !bytes.Contains(script, []byte("transfer.port_forwarding")) {
+		t.Error("the port-forwarding verdict is not rendered")
+	}
+	if bytes.Contains(script, []byte("=== 'firewalled'")) {
+		t.Error("the browser is re-deriving the verdict from connection_status; " +
+			"that comparison needs Gluetun's forwarded port and belongs in the engine")
+	}
+}
+
+// The cards were consolidated from eight to four, and every one of them now answers
+// the same questions in the same shape. This pins that structure, because it is the
+// kind of thing that erodes one ad-hoc addition at a time.
+func TestTheCardsAreConsolidatedAndConsistent(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards := regexp.MustCompile(`(?s)<section class="cards">.*?</section>`).Find(page)
+	if cards == nil {
+		t.Fatal("could not find the cards section")
+	}
+
+	var titles []string
+	for _, match := range regexp.MustCompile(`<h2>([^<]*)</h2>`).FindAllSubmatch(cards, -1) {
+		titles = append(titles, string(match[1]))
+	}
+	want := []string{"Server selection", "Gluetun", "ProtonVPN", "qBittorrent"}
+	if strings.Join(titles, "|") != strings.Join(want, "|") {
+		t.Errorf("cards = %v, want %v", titles, want)
+	}
+
+	// Every integration answers "can we reach it" and "did the last exchange work" in
+	// the same words, so the three cards can be read the same way.
+	for _, id := range []string{
+		"gluetun-reachable", "gluetun-outcome",
+		"proton-login", "proton-outcome",
+		"transfer-connected", "transfer-outcome",
+	} {
+		if !bytes.Contains(cards, []byte(`id="`+id+`"`)) {
+			t.Errorf("the cards are missing %q, so the integrations are not consistent", id)
+		}
+	}
+	for _, label := range []string{"<dt>Connected</dt>"} {
+		if count := bytes.Count(cards, []byte(label)); count != 3 {
+			t.Errorf("%q appears %d times, want once per integration (3)", label, count)
+		}
+	}
+
+	// The prose paragraphs are gone. Only genuine error lines may remain, since those
+	// report a failure rather than describing the UI.
+	for _, gone := range []string{
+		`class="card-note"></p>`, `class="reasoning"`, `class="panel-note"`,
+	} {
+		if bytes.Contains(page, []byte(gone)) {
+			t.Errorf("a descriptive paragraph is back: %q", gone)
+		}
+	}
+	if notes := bytes.Count(page, []byte(`class="card-note error"`)); notes == 0 {
+		t.Error("the error lines were removed too; failures still need reporting")
+	}
+}
+
+// Current and best are one card now, laid out as a comparison. If the two ever drift
+// into separate row sets, reading across stops working - which was the point.
+func TestCurrentAndBestAreOneComparison(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	compare := regexp.MustCompile(`(?s)<div class="compare">.*?</div>\s*</div>`).Find(page)
+	if compare == nil {
+		t.Fatal("the comparison grid is gone")
+	}
+	// Each labelled row must have exactly one current and one best cell.
+	for _, pair := range [][2]string{
+		{"current-load", "best-load"},
+		{"current-rtt", "best-rtt"},
+		{"current-score", "best-score"},
+	} {
+		for _, id := range pair {
+			if !bytes.Contains(page, []byte(`id="`+id+`"`)) {
+				t.Errorf("comparison row %q is missing", id)
+			}
+		}
+	}
+	if !bytes.Contains(styles, []byte(".compare {")) {
+		t.Error("style.css has no .compare rule, so the columns will not line up")
+	}
+	if !bytes.Contains(styles, []byte(".card-wide")) {
+		t.Error("style.css has no .card-wide rule, so the merged cards have no room")
+	}
+}
+
+// The improvement is the number that decides whether the best candidate is used, and a
+// bare "0.021" next to a threshold two rows below left the reader to do the comparison.
+// It now states the verdict, in colour.
+func TestTheImprovementSaysWhetherItIsEnough(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fragment := range []string{
+		// Compared against the configured threshold, not a hard-coded number.
+		"selection.improvement >= selection.min_improvement",
+		// Said in words as well as colour, so it does not depend on colour alone.
+		"too low",
+		// And the good case is distinguishable, or "not red" would carry the meaning.
+		`<span class="ok">${improvement}</span>`,
+		// The explanation of what to do about it stays available on hover.
+		"SWITCH_MIN_IMPROVEMENT requires",
+	} {
+		if !bytes.Contains(script, []byte(fragment)) {
+			t.Errorf("app.js does not contain %q", fragment)
+		}
+	}
+
+	// With no current server a switch is due regardless, so the verdict must be
+	// withheld rather than claiming the gain is too small.
+	if !bytes.Contains(script, []byte("const judged = Boolean(best && selection.current)")) {
+		t.Error("the verdict is not withheld when there is no current server to improve on")
+	}
+}
+
+// The strip answers "is everything working?" without reading four cards. It must be
+// derived from the same snapshot the cards use - a second source of truth that could
+// disagree with the card below it would be worse than no strip at all.
+func TestTheStatusStripSummarisesEverySubsystem(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(page, []byte(`id="status-strip"`)) {
+		t.Fatal("index.html has no status strip")
+	}
+	// Above the cards, or it is not a summary of them.
+	if bytes.Index(page, []byte(`id="status-strip"`)) > bytes.Index(page, []byte(`class="cards"`)) {
+		t.Error("the strip should come before the cards")
+	}
+
+	// Every subsystem a card covers has to be represented.
+	for _, subject := range []string{"Tunnel", "ProtonVPN", "Server data", "qBittorrent",
+		"Port forwarding", "Switching"} {
+		if !bytes.Contains(script, []byte(`'`+subject+`'`)) {
+			t.Errorf("the strip does not report %q", subject)
+		}
+	}
+	// Read from the snapshot, not from the DOM the cards already rendered.
+	for _, source := range []string{"snapshot.gluetun", "snapshot.proton",
+		"snapshot.servers_file", "snapshot.transfer"} {
+		if !bytes.Contains(script, []byte(source)) {
+			t.Errorf("renderStatusStrip does not read %q", source)
+		}
+	}
+	// Colour must not be the only carrier: each chip states its value in words.
+	if !bytes.Contains(script, []byte("chip-label")) {
+		t.Error("chips have no textual label")
+	}
+	for _, level := range []string{".chip-good", ".chip-warn", ".chip-bad"} {
+		if !bytes.Contains(styles, []byte(level)) {
+			t.Errorf("style.css has no %q rule", level)
+		}
+	}
+}
+
+// Reference panels fold away, and the tall candidate table can be hidden. The choice
+// has to survive a reload, or re-hiding it every time is worse than no toggle.
+func TestReferencePanelsFoldAndTheChoiceIsRemembered(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Native <details>: no JavaScript, and keyboard accessible for free.
+	if folds := bytes.Count(page, []byte(`<details class="panel panel-fold">`)); folds != 3 {
+		t.Errorf("found %d folding panels, want 3 (Gluetun's own view, settings, filtering)", folds)
+	}
+	// A form inside <summary> would toggle the panel shut instead of focusing the field.
+	summaries := regexp.MustCompile(`(?s)<summary[^>]*>.*?</summary>`).FindAll(page, -1)
+	for _, summary := range summaries {
+		if bytes.Contains(summary, []byte("<form")) || bytes.Contains(summary, []byte("<input")) {
+			t.Errorf("a summary contains a form or input, which cannot be used: %s", summary)
+		}
+	}
+
+	if !bytes.Contains(page, []byte(`data-collapse="candidates-body"`)) {
+		t.Error("the candidate table cannot be collapsed")
+	}
+	for _, fragment := range []string{"localStorage.getItem", "localStorage.setItem", "applyCollapse"} {
+		if !bytes.Contains(script, []byte(fragment)) {
+			t.Errorf("app.js does not use %q, so the choice is not remembered", fragment)
+		}
+	}
+	// Storage can be unavailable; that must not break the toggle.
+	if !bytes.Contains(script, []byte("} catch {")) {
+		t.Error("localStorage access is not guarded")
+	}
+}
+
+// The caps were fetched into the snapshot and rendered nowhere. They give the rates
+// context, and must be clearly qBittorrent's rather than ours.
+func TestQBittorrentsOwnCapsAreShown(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"transfer-down-cap", "transfer-up-cap"} {
+		if !bytes.Contains(page, []byte(`id="`+id+`"`)) {
+			t.Errorf("index.html has no %q row", id)
+		}
+	}
+	for _, field := range []string{"transfer.download_limit", "transfer.upload_limit"} {
+		if !bytes.Contains(script, []byte(field)) {
+			t.Errorf("app.js never reads %q", field)
+		}
+	}
+	// Zero means no cap, which is a different statement from "0 B/s".
+	if !bytes.Contains(script, []byte("'unlimited'")) {
+		t.Error("an absent cap should read as unlimited, not as a zero rate")
+	}
+	// And they must not be confused with this tool's thresholds.
+	if !bytes.Contains(script, []byte("Independent of the thresholds above")) {
+		t.Error("nothing distinguishes qBittorrent's caps from our busy thresholds")
 	}
 }

@@ -99,6 +99,8 @@ type Engine struct {
 	qbittorrent        *qbittorrent.Client
 	qbittorrentVersion string
 	transfer           qbittorrent.Transfer
+	qbPreferences      qbittorrent.Preferences
+	qbPreferencesAt    time.Time
 	transferReachable  bool
 	transferErr        string
 	transferCheckedAt  time.Time
@@ -727,6 +729,15 @@ func (e *Engine) publish() {
 	// taking the write lock: sync.RWMutex is not reentrant.
 	nextRuns := e.nextRuns()
 
+	// Same reason, and the same rule: transferView reads Gluetun's forwarded ports
+	// out of the snapshot. Recomputing it here is what keeps the port-forwarding
+	// verdict in step with Gluetun, whose port arrives on a different tick.
+	var transfer *TransferStatus
+	if e.qbittorrent != nil {
+		view := e.transferView()
+		transfer = &view
+	}
+
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Version = e.version
 		snapshot.StartedAt = e.startedAt
@@ -746,6 +757,9 @@ func (e *Engine) publish() {
 		snapshot.Gluetun.RequirementsAdopted = requirementLabels(e.requirements)
 		snapshot.Gluetun.PortForwardRequirementFrom = e.portForwardReason
 		snapshot.Gluetun.KnownHostnames = len(e.gluetunKnownHosts)
+		if transfer != nil {
+			snapshot.Transfer = *transfer
+		}
 		snapshot.Selection.AutoSwitch = e.autoSwitchEnabled()
 		snapshot.Selection.Mode = e.cfg.Switch.Mode
 		snapshot.Selection.Current = current
