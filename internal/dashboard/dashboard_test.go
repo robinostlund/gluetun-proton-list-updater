@@ -1027,8 +1027,8 @@ func TestTheTransferCardRendersWhatTheEnginePublishes(t *testing.T) {
 
 	for _, element := range []string{
 		"transfer-card", "transfer-down", "transfer-up",
-		"transfer-down-limit", "transfer-up-limit", "transfer-total",
-		"transfer-checked", "transfer-error",
+		"transfer-down-limit", "transfer-up-limit",
+		"transfer-checked", "transfer-error", "transfer-down-total", "transfer-up-total",
 		"transfer-connected", "transfer-portfwd", "transfer-outcome", "transfer-switching",
 		"transfer-version", "transfer-listen",
 		"transfer-down-now", "transfer-up-now", "transfer-window",
@@ -1293,7 +1293,7 @@ func TestSectionsAreBandsThatOwnTheirValues(t *testing.T) {
 	for _, band := range bands {
 		titles = append(titles, string(band[1]))
 	}
-	for _, want := range []string{"Tunnel", "Exit address", "Server list",
+	for _, want := range []string{"Tunnel", "Exit address", "Account and server list",
 		"Latency to Proton entry nodes"} {
 		if !slices.Contains(titles, want) {
 			t.Errorf("no band titled %q; found %v", want, titles)
@@ -1319,5 +1319,369 @@ func TestSectionsAreBandsThatOwnTheirValues(t *testing.T) {
 				t.Error("a band still uses the single-column list it was meant to replace")
 			}
 		}
+	}
+}
+
+// One value, one place. The improvement verdict belongs in the Decision column; the
+// Best-candidate column had it too, under a "Rank" label that was not showing a rank -
+// so the same number appeared twice in one card, worded differently.
+func TestTheImprovementVerdictAppearsOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	best := regexp.MustCompile(`(?s)<h3 class="card-section">Best candidate</h3>.*?</dl>`).Find(page)
+	if best == nil {
+		t.Fatal("could not find the best-candidate column")
+	}
+	var rows []string
+	for _, match := range regexp.MustCompile(`<dt>([^<]*)</dt>`).FindAllSubmatch(best, -1) {
+		rows = append(rows, string(match[1]))
+	}
+	want := []string{"Load", "Latency", "Score", "Rank"}
+	if strings.Join(rows, "|") != strings.Join(want, "|") {
+		t.Errorf("best column rows = %v, want %v", rows, want)
+	}
+	// The old element that carried both a rank and the verdict must be gone.
+	for _, gone := range [][]byte{[]byte("improvement-cell")} {
+		if bytes.Contains(page, gone) || bytes.Contains(script, gone) {
+			t.Errorf("%q is back; it labelled the improvement as a rank", gone)
+		}
+	}
+	// Rank shows a rank.
+	if !bytes.Contains(script, []byte("text('best-rank', best ? `#1 of ${snapshot.candidates_total}`")) {
+		t.Error("the Rank row does not show a rank")
+	}
+	// The verdict is *rendered* in exactly one place. Matching the markup rather than
+	// the bare words, so a comment mentioning it does not count.
+	if count := bytes.Count(script, []byte(`>too low</span>`)); count != 1 {
+		t.Errorf(`the "too low" verdict is rendered %d times, want once (the Improvement row)`,
+			count)
+	}
+}
+
+// Every card groups its values into bands, qBittorrent included. It was the last flat
+// list, and at eighteen rows it was the one that most needed grouping.
+func TestTheQBittorrentCardIsBandedLikeTheOthers(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := regexp.MustCompile(`(?s)<h2>qBittorrent</h2>.*?</article>`).Find(page)
+	if card == nil {
+		t.Fatal("could not find the qBittorrent card")
+	}
+
+	var bands []string
+	for _, match := range regexp.MustCompile(`<h3 class="card-section">([^<]*)</h3>`).FindAllSubmatch(card, -1) {
+		bands = append(bands, string(match[1]))
+	}
+	want := []string{"Connection", "Incoming connections", "Throughput", "Effect on switching"}
+	if strings.Join(bands, "|") != strings.Join(want, "|") {
+		t.Errorf("bands = %v, want %v", bands, want)
+	}
+	// No row may sit outside a band, or it belongs to nothing.
+	if outside := regexp.MustCompile(`(?s)<h2>qBittorrent</h2>\s*<dl`).Find(card); outside != nil {
+		t.Error("the card has rows before its first band")
+	}
+
+	// Every card in the section groups its rows the same way.
+	cards := regexp.MustCompile(`(?s)<section class="cards">.*?</section>`).Find(page)
+	for _, title := range []string{"Gluetun", "ProtonVPN", "qBittorrent"} {
+		one := regexp.MustCompile(`(?s)<h2>` + title + `</h2>.*?</article>`).Find(cards)
+		if one == nil {
+			t.Errorf("could not find the %s card", title)
+			continue
+		}
+		if !bytes.Contains(one, []byte(`<div class="band">`)) {
+			t.Errorf("the %s card has no bands", title)
+		}
+	}
+}
+
+// One vocabulary per direction. "Down threshold" beside "Download now", and caps
+// labelled with arrows while everything else used words, made the same direction read
+// three different ways in one card.
+func TestDirectionLabelsUseOneVocabulary(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := regexp.MustCompile(`(?s)<h2>qBittorrent</h2>.*?</article>`).Find(page)
+	if card == nil {
+		t.Fatal("could not find the qBittorrent card")
+	}
+	var rows []string
+	for _, match := range regexp.MustCompile(`<dt>([^<]*)</dt>`).FindAllSubmatch(card, -1) {
+		rows = append(rows, string(match[1]))
+	}
+
+	for _, row := range rows {
+		if strings.HasPrefix(row, "Down ") || strings.HasPrefix(row, "Up ") {
+			t.Errorf("%q abbreviates the direction; use Download/Upload throughout", row)
+		}
+		if strings.ContainsAny(row, "↓↑") {
+			t.Errorf("%q uses an arrow for the direction; use the word", row)
+		}
+	}
+	// Each directional measure exists for both directions.
+	for _, measure := range []string{"%s now", "%s average", "%s threshold", "%s cap",
+		"%sed this session"} {
+		down := strings.ReplaceAll(fmt.Sprintf(measure, "Download"), "Downloaded this", "Downloaded this")
+		up := fmt.Sprintf(measure, "Upload")
+		if !slices.Contains(rows, down) {
+			t.Errorf("missing row %q", down)
+		}
+		if !slices.Contains(rows, up) {
+			t.Errorf("missing row %q", up)
+		}
+	}
+}
+
+// Both address families are stated, so "IPv4 only" is a statement rather than something
+// inferred from a blank row.
+func TestBothTunnelAddressFamiliesAreShown(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"gluetun-ipv4", "gluetun-ipv6"} {
+		if !bytes.Contains(page, []byte(`id="`+id+`"`)) {
+			t.Errorf("index.html has no %q row", id)
+		}
+	}
+	for _, field := range []string{"gluetun.tunnel_ipv4", "gluetun.tunnel_ipv6"} {
+		if !bytes.Contains(script, []byte(field)) {
+			t.Errorf("app.js never reads %q", field)
+		}
+	}
+	// The Note row was empty in almost every state, so it only ever showed a dash.
+	if bytes.Contains(page, []byte("exit-note")) || bytes.Contains(script, []byte("exit-note")) {
+		t.Error("the empty Note row is back")
+	}
+}
+
+// The coordinates link out rather than embedding a map: the page is deliberately
+// self-contained, so map tiles are not an option. A malformed value must produce no link
+// rather than one pointing nowhere.
+func TestCoordinatesLinkOutAndAreValidated(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The id now matches its label; it used to be exit-location holding Coordinates
+	// while exit-where held Location.
+	if !bytes.Contains(page, []byte(`<dt>Coordinates</dt><dd id="exit-coords">`)) {
+		t.Error("the coordinates row is missing or misnamed")
+	}
+	for _, guard := range []string{
+		"Math.abs(lat) > 90", "Math.abs(lon) > 180", "Number.isFinite(lat)",
+	} {
+		if !bytes.Contains(script, []byte(guard)) {
+			t.Errorf("app.js does not validate coordinates with %q", guard)
+		}
+	}
+	// A link, not a subresource: nothing may be fetched by the page itself.
+	if !bytes.Contains(script, []byte(`rel="noreferrer noopener"`)) {
+		t.Error("the outbound link is missing rel=noreferrer noopener")
+	}
+	if !bytes.Contains(script, []byte(`target="_blank"`)) {
+		t.Error("the link should open in a new tab rather than navigating away")
+	}
+	// And the page must still make no external requests of its own.
+	if regexp.MustCompile(`(?:src|href)="https?://`).Match(page) {
+		t.Error("index.html references an external resource; the page must be self-contained")
+	}
+}
+
+// The strip answers "is everything working?" without reading four cards. It must be
+// derived from the same snapshot the cards use - a second source of truth that could
+// disagree with the card below it would be worse than no strip at all.
+func TestTheStatusStripSummarisesEverySubsystem(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(page, []byte(`id="status-strip"`)) {
+		t.Fatal("index.html has no status strip")
+	}
+	// Above the cards, or it is not a summary of them.
+	if bytes.Index(page, []byte(`id="status-strip"`)) > bytes.Index(page, []byte(`class="cards"`)) {
+		t.Error("the strip should come before the cards")
+	}
+
+	for _, subject := range []string{"Tunnel", "ProtonVPN", "Server data", "qBittorrent",
+		"Port forwarding", "Switching"} {
+		if !bytes.Contains(script, []byte(`'`+subject+`'`)) {
+			t.Errorf("the strip does not report %q", subject)
+		}
+	}
+	// Read from the snapshot, not from the DOM the cards already rendered.
+	for _, source := range []string{"snapshot.gluetun", "snapshot.proton",
+		"snapshot.servers_file", "snapshot.transfer"} {
+		if !bytes.Contains(script, []byte(source)) {
+			t.Errorf("renderStatusStrip does not read %q", source)
+		}
+	}
+	// Colour must not be the only carrier: each chip states its value in words.
+	if !bytes.Contains(script, []byte("chip-label")) {
+		t.Error("chips have no textual label")
+	}
+	for _, level := range []string{".chip-good", ".chip-warn", ".chip-bad"} {
+		if !bytes.Contains(styles, []byte(level)) {
+			t.Errorf("style.css has no %q rule", level)
+		}
+	}
+}
+
+// The candidate table is the tallest thing on the page and can be hidden. The choice has
+// to survive a reload, or re-hiding it every time is worse than no toggle.
+//
+// Nothing else collapses any more: the reference panels were folded away behind
+// summaries, and showing everything directly was the clearer default.
+func TestTheCandidateTableCollapsesAndRemembersIt(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(page, []byte(`data-collapse="candidates-body"`)) {
+		t.Error("the candidate table cannot be collapsed")
+	}
+	for _, fragment := range []string{"localStorage.getItem", "localStorage.setItem", "applyCollapse"} {
+		if !bytes.Contains(script, []byte(fragment)) {
+			t.Errorf("app.js does not use %q, so the choice is not remembered", fragment)
+		}
+	}
+	// Storage can be unavailable; that must not break the toggle.
+	if !bytes.Contains(script, []byte("} catch {")) {
+		t.Error("localStorage access is not guarded")
+	}
+	// And nothing else hides itself behind a disclosure any more.
+	if bytes.Contains(page, []byte("<details")) {
+		t.Error("a folding panel is back; everything should be shown directly")
+	}
+}
+
+// qBittorrent's own caps were fetched into the snapshot and rendered nowhere. They give
+// the rates context, and must be clearly qBittorrent's rather than ours.
+func TestQBittorrentsOwnCapsAreShown(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"transfer-down-cap", "transfer-up-cap"} {
+		if !bytes.Contains(page, []byte(`id="`+id+`"`)) {
+			t.Errorf("index.html has no %q row", id)
+		}
+	}
+	for _, field := range []string{"transfer.download_limit", "transfer.upload_limit"} {
+		if !bytes.Contains(script, []byte(field)) {
+			t.Errorf("app.js never reads %q", field)
+		}
+	}
+	// Zero means no cap, which is a different statement from "0 B/s".
+	if !bytes.Contains(script, []byte("'unlimited'")) {
+		t.Error("an absent cap should read as unlimited, not as a zero rate")
+	}
+	// And they must not be confused with this tool's thresholds.
+	if !bytes.Contains(script, []byte("Independent of the thresholds")) {
+		t.Error("nothing distinguishes qBittorrent's caps from our busy thresholds")
+	}
+}
+
+// Reading order: what you came to do, then what you came to read, then reference.
+//
+// The controls used to sit below the cards, so acting on what a card told you meant
+// scrolling back past it.
+func TestThePageIsOrderedDoThenRead(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	order := []string{
+		`id="alerts"`,
+		`id="status-strip"`,
+		`<h2>Controls</h2>`,
+		`<h2>Server selection</h2>`,
+		`<h2>Gluetun</h2>`,
+		`<h2>ProtonVPN</h2>`,
+		`<h2>qBittorrent</h2>`,
+		`id="candidates-body"`,
+		`<h2>Switch history</h2>`,
+		`<h2>Recent activity</h2>`,
+		`Updater settings`,
+	}
+	previous := -1
+	for _, marker := range order {
+		at := bytes.Index(page, []byte(marker))
+		if at < 0 {
+			t.Errorf("%q is missing from the page", marker)
+			continue
+		}
+		if at < previous {
+			t.Errorf("%q appears out of order", marker)
+		}
+		previous = at
+	}
+
+	// History and activity are full-width panels now, not a two-up split.
+	if bytes.Contains(page, []byte(`<div class="split">`)) {
+		t.Error("switch history and recent activity are back in a two-column split")
+	}
+	// The reference settings are shown, not folded away, and named for what they are.
+	if bytes.Contains(page, []byte("Effective settings")) {
+		t.Error(`"Effective settings" did not say whose settings they are`)
 	}
 }

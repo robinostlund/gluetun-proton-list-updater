@@ -246,6 +246,7 @@ func featureReasons(logical proton.LogicalServer, opts Options) (reasons []strin
 		{"P2P", opts.P2P, logical.P2P()},
 		{"STREAM", opts.Stream, logical.Streaming()},
 		{"FREE_TIER", opts.Free, logical.Free()},
+		{"IPV6", opts.IPv6, logical.IPv6()},
 	}
 
 	for _, check := range checks {

@@ -228,3 +228,25 @@ func TestItoa(t *testing.T) {
 		}
 	}
 }
+
+// The summary had no timestamp, so the dashboard read an absent field and showed "never"
+// however many sweeps had run - and the next-sweep countdown was computed from the last
+// evaluation instead, a different clock.
+func TestSummaryReportsWhenItLastRan(t *testing.T) {
+	t.Parallel()
+
+	prober := New(Options{})
+	if got := prober.Summarize().LastRun; !got.IsZero() {
+		t.Errorf("LastRun = %v before any probe, want zero", got)
+	}
+
+	older := time.Now().Add(-time.Hour)
+	newer := time.Now()
+	prober.record("10.0.0.1", Result{RTT: 5 * time.Millisecond, MeasuredAt: older, Samples: 1})
+	prober.record("10.0.0.2", Result{RTT: 7 * time.Millisecond, MeasuredAt: newer, Samples: 1})
+
+	got := prober.Summarize().LastRun
+	if !got.Equal(newer) {
+		t.Errorf("LastRun = %v, want the newest measurement %v", got, newer)
+	}
+}

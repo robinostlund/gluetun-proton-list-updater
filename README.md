@@ -775,6 +775,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `P2P` | `include` | `include` / `exclude` / `only` (Proton only forwards ports on P2P servers) |
 | `STREAM` | `include` | `include` / `exclude` / `only` |
 | `FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
+| `IPV6` | `include` | `include` / `exclude` / `only` — Proton's IPv6 capability flag. `only` restricts the tunnel to IPv6-capable servers. Distinct from `SERVERS_INCLUDE_IPV6`, which only decides whether a v6 *entry address* is written for Gluetun. |
 
 #### P2P servers are only required when Gluetun asks for a forwarded port
 

@@ -256,6 +256,12 @@ type Summary struct {
 	Best     time.Duration `json:"best_ns"`
 	Median   time.Duration `json:"median_ns"`
 	Worst    time.Duration `json:"worst_ns"`
+	// LastRun is the newest measurement timestamp, zero before anything is probed.
+	//
+	// The summary had no timestamp of its own, so the dashboard read an absent field and
+	// showed "never" for ever, and the next-sweep countdown was computed from the last
+	// *evaluation* instead - a different clock entirely.
+	LastRun time.Time `json:"last_run"`
 }
 
 // Summarize computes aggregate statistics over the stored measurements.
@@ -267,6 +273,9 @@ func (p *Prober) Summarize() (summary Summary) {
 	for _, result := range p.history {
 		if result.Err != nil {
 			summary.Failed++
+		}
+		if result.MeasuredAt.After(summary.LastRun) {
+			summary.LastRun = result.MeasuredAt
 		}
 		if result.RTT > 0 {
 			rtts = append(rtts, result.RTT)

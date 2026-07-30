@@ -173,12 +173,18 @@ type Filter struct {
 	Cities []string
 	// MaxLoad drops servers reporting a higher utilisation percentage.
 	MaxLoad int
-	// SecureCore, Tor, P2P, Stream and Free are tri-state filters.
+	// SecureCore, Tor, P2P, Stream, Free and IPv6 are tri-state filters.
 	SecureCore string
 	Tor        string
 	P2P        string
 	Stream     string
 	Free       string
+	// IPv6 filters on Proton's own IPv6 capability flag for the server.
+	//
+	// Distinct from SERVERS_INCLUDE_IPV6, which decides whether a server's v6 *entry
+	// address* is offered to Gluetun. This one decides which servers are candidates at
+	// all, so "only" restricts the tunnel to IPv6-capable servers.
+	IPv6 string
 	// VPNType is "auto", "wireguard" or "openvpn". "auto" asks Gluetun which
 	// protocol it is configured for and follows it.
 	VPNType string
@@ -370,6 +376,7 @@ func Load() (cfg Config, err error) {
 		SecureCore:       r.choice("SECURE_CORE", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
 		Tor:              r.choice("TOR", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
 		P2P:              r.choice("P2P", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
+		IPv6:             r.choice("IPV6", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
 		Stream:           r.choice("STREAM", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
 		Free:             r.choice("FREE_TIER", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
 		VPNType:          r.choice("VPN_TYPE", "auto", "auto", "wireguard", "openvpn"),

@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"net/netip"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/config"
@@ -548,5 +550,73 @@ func TestIPv6CapabilityIsCarriedIndependentlyOfTheEntryAddress(t *testing.T) {
 			t.Errorf("IncludeIPv6=%v: EntryIPv6 present = %v, want %v",
 				includeIPv6, got, includeIPv6)
 		}
+	}
+}
+
+// The IPv6 filter selects on Proton's capability flag, so a tunnel can be restricted to
+// IPv6-capable servers. It is a separate question from IncludeIPv6, which only decides
+// whether a v6 entry address is offered to Gluetun.
+func TestIPv6FilterSelectsOnCapability(t *testing.T) {
+	t.Parallel()
+
+	logicals := []proton.LogicalServer{{
+		ID: "v6", Name: "SE#V6", ExitCountry: "SE", Status: 1, Load: 10,
+		Features: proton.FeatureIPv6,
+		Servers: []proton.PhysicalServer{{
+			EntryIP: netip.MustParseAddr("10.0.0.1"), Domain: "node-v6.protonvpn.net",
+			Status: 1, X25519PublicKey: "k",
+		}},
+	}, {
+		ID: "v4", Name: "SE#V4", ExitCountry: "SE", Status: 1, Load: 10,
+		Servers: []proton.PhysicalServer{{
+			EntryIP: netip.MustParseAddr("10.0.0.2"), Domain: "node-v4.protonvpn.net",
+			Status: 1, X25519PublicKey: "k",
+		}},
+	}}
+
+	for _, testCase := range []struct {
+		filter string
+		want   []string
+	}{
+		{config.FilterInclude, []string{"SE#V4", "SE#V6"}},
+		{config.FilterOnly, []string{"SE#V6"}},
+		{config.FilterExclude, []string{"SE#V4"}},
+	} {
+		t.Run(testCase.filter, func(t *testing.T) {
+			candidates, _ := Build(logicals, Options{
+				VPNType: VPNWireguard, IPv6: testCase.filter,
+			})
+			var names []string
+			for _, candidate := range candidates {
+				names = append(names, candidate.ServerName)
+			}
+			sort.Strings(names)
+			if strings.Join(names, ",") != strings.Join(testCase.want, ",") {
+				t.Errorf("IPV6=%s gave %v, want %v", testCase.filter, names, testCase.want)
+			}
+		})
+	}
+}
+
+// And the explainer must name IPV6 as the reason, so "why is this server missing?" is
+// answerable for it like every other filter.
+func TestExplainNamesTheIPv6Filter(t *testing.T) {
+	t.Parallel()
+
+	logicals := []proton.LogicalServer{{
+		ID: "v4", Name: "SE#V4", ExitCountry: "SE", Status: 1, Load: 10,
+		Servers: []proton.PhysicalServer{{
+			EntryIP: netip.MustParseAddr("10.0.0.2"), Domain: "node-v4.protonvpn.net",
+			Status: 1, X25519PublicKey: "k",
+		}},
+	}}
+
+	explanations := Explain(logicals, Options{VPNType: VPNWireguard, IPv6: config.FilterOnly}, "SE#V4")
+	if len(explanations) != 1 {
+		t.Fatalf("got %d explanations, want 1", len(explanations))
+	}
+	joined := strings.Join(explanations[0].Reasons, " | ")
+	if !strings.Contains(joined, "IPV6") {
+		t.Errorf("reasons = %q, want IPV6 named", joined)
 	}
 }

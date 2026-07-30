@@ -102,6 +102,8 @@ services:
 
       # Which countries the tunnel may use.
       COUNTRIES: ${COUNTRIES:-Sweden,Netherlands,Germany}
+      # Tri-state feature filters: include | exclude | only.
+      # IPV6: only   # restrict selection to IPv6-capable Proton servers
       MAX_LOAD: "85"
 
       # Scoring: utilisation first, latency as a strong secondary signal.

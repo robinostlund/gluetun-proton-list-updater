@@ -30,11 +30,26 @@
          reading four cards. Each pill carries the detail as a tooltip. -->
     <section id="status-strip" class="strip" aria-label="Overall status"></section>
 
+    <!-- Above the cards: the things you came to do, before the things you came to read. -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Controls</h2>
+        <label class="toggle">
+          <input type="checkbox" id="auto-switch">
+          <span>Automatic switching</span>
+        </label>
+      </div>
+      <div class="toolbar">
+        <button data-action="/api/reconnect" class="primary">Reconnect to best</button>
+        <button data-action="/api/refresh">Refresh server list</button>
+        <button data-action="/api/loads">Refresh loads</button>
+        <button data-action="/api/probe">Probe latency</button>
+        <button data-action="/api/evaluate">Re-evaluate</button>
+        <button data-action="/api/servers/write">Rewrite servers.json</button>
+      </div>
+    </section>
+
     <section class="cards">
-      <!-- Current and best side by side. The whole question this tool answers is
-           "should the tunnel move?", and that is a comparison - so the two are laid
-           out as one, sharing row labels, to be read across rather than back and
-           forth between two cards. -->
       <!-- Three columns: the current server, the candidate that would replace it, and
            the decision between them. Current and best carry identical row labels so the
            two read across, and the decision sits beside rather than below them - it is
@@ -68,7 +83,7 @@
               <div><dt>Load</dt><dd id="best-load">–</dd></div>
               <div><dt>Latency</dt><dd id="best-rtt">–</dd></div>
               <div><dt>Score</dt><dd id="best-score">–</dd></div>
-              <div><dt>Rank</dt><dd id="improvement-cell">–</dd></div>
+              <div><dt>Rank</dt><dd id="best-rank">–</dd></div>
             </dl>
           </div>
 
@@ -86,129 +101,146 @@
         </div>
       </article>
 
-      <!-- Everything about Gluetun in one place: the tunnel, where it comes out, and
-           the server data written for it. They were three cards answering one
-           question. -->
+      <!-- Everything about Gluetun, including what its own control server reports. Those
+           were separate before and repeated a dozen values under different names. -->
       <article class="card">
         <h2>Gluetun</h2>
         <p id="gluetun-status" class="card-headline">–</p>
         <div class="band">
-        <h3 class="card-section">Tunnel</h3>
-        <dl class="kv">
-          <div><dt>Connected</dt><dd id="gluetun-reachable">–</dd></div>
-          <div><dt>Last check</dt><dd id="gluetun-check">–</dd></div>
-          <div><dt>Last check result</dt><dd id="gluetun-outcome">–</dd></div>
-          <div><dt>Version</dt><dd id="gluetun-version">–</dd></div>
-          <div><dt>Protocol</dt><dd id="gluetun-vpn">–</dd></div>
-          <div><dt>Provider</dt><dd id="gluetun-provider">–</dd></div>
-          <div><dt>DNS</dt><dd id="gluetun-dns">–</dd></div>
-          <div class="wide"><dt>Tunnel IPv6</dt><dd id="gluetun-ipv6">–</dd></div>
-        </dl>
+          <h3 class="card-section">Tunnel</h3>
+          <dl class="kv">
+            <div><dt>Connected</dt><dd id="gluetun-reachable">–</dd></div>
+            <div><dt>Last check</dt><dd id="gluetun-check">–</dd></div>
+            <div><dt>Last check result</dt><dd id="gluetun-outcome">–</dd></div>
+            <div><dt>Version</dt><dd id="gluetun-version">–</dd></div>
+            <div><dt>Protocol</dt><dd id="gluetun-vpn">–</dd></div>
+            <div><dt>Provider</dt><dd id="gluetun-provider">–</dd></div>
+            <div><dt>DNS</dt><dd id="gluetun-dns">–</dd></div>
+            <div><dt>Tunnel IPv4</dt><dd id="gluetun-ipv4">–</dd></div>
+            <div><dt>Tunnel IPv6</dt><dd id="gluetun-ipv6">–</dd></div>
+          </dl>
         </div>
         <div class="band">
-        <h3 class="card-section">Exit address</h3>
-        <dl class="kv">
-          <div><dt>Public IP</dt><dd id="exit-ip">–</dd></div>
-          <div><dt>Location</dt><dd id="exit-where">–</dd></div>
-          <div class="wide"><dt>Organisation</dt><dd id="exit-org" class="prose">–</dd></div>
-          <div class="wide"><dt>Reverse DNS</dt><dd id="exit-hostname">–</dd></div>
-          <div><dt>Timezone</dt><dd id="exit-tz">–</dd></div>
-          <div><dt>Coordinates</dt><dd id="exit-location">–</dd></div>
-          <div class="wide"><dt>Note</dt><dd id="exit-note" class="prose">–</dd></div>
-        </dl>
+          <h3 class="card-section">Exit address</h3>
+          <dl class="kv">
+            <div><dt>Public IP</dt><dd id="exit-ip">–</dd></div>
+            <div><dt>Location</dt><dd id="exit-where">–</dd></div>
+            <div><dt>Coordinates</dt><dd id="exit-coords">–</dd></div>
+            <div><dt>Timezone</dt><dd id="exit-tz">–</dd></div>
+            <div class="wide"><dt>Organisation</dt><dd id="exit-org" class="prose">–</dd></div>
+            <div class="wide"><dt>Reverse DNS</dt><dd id="exit-hostname">–</dd></div>
+          </dl>
         </div>
         <div class="band">
-        <h3 class="card-section">Server data written for Gluetun</h3>
-        <dl class="kv">
-          <div><dt>Entries</dt><dd id="servers-count">–</dd></div>
-          <div><dt>Layout</dt><dd id="servers-layout">–</dd></div>
-          <div class="wide"><dt>Paths</dt><dd id="servers-path">–</dd></div>
-          <div><dt>Mode</dt><dd id="servers-mode">–</dd></div>
-          <div><dt>Preferred</dt><dd id="servers-preferred-flag">–</dd></div>
-          <div><dt>Schema version</dt><dd id="servers-schema">–</dd></div>
-          <div><dt>Last write</dt><dd id="servers-write">–</dd></div>
-          <div><dt>Last write result</dt><dd id="servers-outcome">–</dd></div>
-          <div class="wide"><dt>Preserved</dt><dd id="servers-preserved">–</dd></div>
-        </dl>
+          <h3 class="card-section">Server data written for Gluetun</h3>
+          <dl class="kv">
+            <div><dt>Entries</dt><dd id="servers-count">–</dd></div>
+            <div><dt>Layout</dt><dd id="servers-layout">–</dd></div>
+            <div><dt>Mode</dt><dd id="servers-mode">–</dd></div>
+            <div><dt>Preferred</dt><dd id="servers-preferred-flag">–</dd></div>
+            <div><dt>Schema version</dt><dd id="servers-schema">–</dd></div>
+            <div><dt>Last write</dt><dd id="servers-write">–</dd></div>
+            <div><dt>Last write result</dt><dd id="servers-outcome">–</dd></div>
+            <div class="wide"><dt>Paths</dt><dd id="servers-path">–</dd></div>
+            <div class="wide"><dt>Preserved</dt><dd id="servers-preserved">–</dd></div>
+          </dl>
+        </div>
+        <div class="band">
+          <h3 class="card-section">Gluetun's own view <span class="muted">what its control server reports</span></h3>
+          <dl id="gluetun-detail" class="kv"></dl>
         </div>
         <p id="gluetun-error" class="card-note error"></p>
         <p id="servers-error" class="card-note error"></p>
       </article>
 
-      <!-- Latency belongs here: it is measured against Proton's entry nodes, and it is
-           one of the two inputs to the score alongside Proton's own load figures. -->
+      <!-- Latency and filtering belong here: both are measured against, or applied to,
+           Proton's own server list. -->
       <article class="card">
         <h2>ProtonVPN</h2>
-        <p id="proton-count" class="card-headline">–</p>
         <div class="band">
-        <h3 class="card-section">Server list</h3>
-        <dl class="kv">
-          <div><dt>Connected</dt><dd id="proton-login">–</dd></div>
-          <div><dt>Plan</dt><dd id="proton-plan">–</dd></div>
-          <div><dt>Candidates</dt><dd id="candidate-count">–</dd></div>
-          <div><dt>Last fetch</dt><dd id="proton-fetch">–</dd></div>
-          <div><dt>Last fetch result</dt><dd id="proton-outcome">–</dd></div>
-          <div><dt>Loads refreshed</dt><dd id="proton-loads">–</dd></div>
-          <div><dt>Next fetch</dt><dd id="proton-next">–</dd></div>
-        </dl>
+          <h3 class="card-section">Account and server list</h3>
+          <dl class="kv">
+            <div><dt>Connected</dt><dd id="proton-login">–</dd></div>
+            <div><dt>Plan</dt><dd id="proton-plan">–</dd></div>
+            <div><dt>Logical servers</dt><dd id="proton-count">–</dd></div>
+            <div><dt>Candidates</dt><dd id="candidate-count">–</dd></div>
+            <div><dt>Filtered out</dt><dd id="proton-filtered">–</dd></div>
+            <div><dt>Last fetch</dt><dd id="proton-fetch">–</dd></div>
+            <div><dt>Last fetch result</dt><dd id="proton-outcome">–</dd></div>
+            <div><dt>Loads refreshed</dt><dd id="proton-loads">–</dd></div>
+            <div><dt>Next fetch</dt><dd id="proton-next">–</dd></div>
+          </dl>
         </div>
         <div class="band">
-        <h3 class="card-section">Latency to Proton entry nodes</h3>
-        <dl class="kv">
-          <div><dt>Median</dt><dd id="latency-median">–</dd></div>
-          <div><dt>Measured</dt><dd id="latency-measured">–</dd></div>
-          <div><dt>Failed</dt><dd id="latency-failed">–</dd></div>
-          <div><dt>Best</dt><dd id="latency-best">–</dd></div>
-          <div><dt>Worst</dt><dd id="latency-worst">–</dd></div>
-          <div><dt>Coverage</dt><dd id="latency-coverage">–</dd></div>
-          <div><dt>Last sweep</dt><dd id="latency-last">–</dd></div>
-          <div><dt>Next sweep</dt><dd id="latency-next">–</dd></div>
-        </dl>
+          <h3 class="card-section">Latency to Proton entry nodes</h3>
+          <dl class="kv">
+            <div><dt>Median</dt><dd id="latency-median">–</dd></div>
+            <div><dt>Best</dt><dd id="latency-best">–</dd></div>
+            <div><dt>Worst</dt><dd id="latency-worst">–</dd></div>
+            <div><dt>Measured</dt><dd id="latency-measured">–</dd></div>
+            <div><dt>Failed</dt><dd id="latency-failed">–</dd></div>
+            <div><dt>Coverage</dt><dd id="latency-coverage">–</dd></div>
+            <div><dt>Last sweep</dt><dd id="latency-last">–</dd></div>
+            <div><dt>Next sweep</dt><dd id="latency-next">–</dd></div>
+          </dl>
+        </div>
+        <div class="band">
+          <h3 class="card-section">Filtering <span class="muted">how the list was reduced</span></h3>
+          <dl id="stats" class="kv"></dl>
+        </div>
+        <div class="band">
+          <h3 class="card-section">Why is a server missing?</h3>
+          <form id="explain-form">
+            <input type="search" id="explain-query" placeholder="Why is SE#444 missing?" autocomplete="off">
+            <button type="submit" class="small">Explain</button>
+          </form>
+          <div id="explain-result"></div>
         </div>
         <p id="proton-error" class="card-note error"></p>
       </article>
 
       <article id="transfer-card" class="card" hidden>
         <h2>qBittorrent</h2>
-        <dl class="kv">
-          <div><dt>Connected</dt><dd id="transfer-connected">–</dd></div>
-          <div><dt>Version</dt><dd id="transfer-version">–</dd></div>
-          <div><dt>Last read</dt><dd id="transfer-checked">–</dd></div>
-          <div><dt>Last read result</dt><dd id="transfer-outcome">–</dd></div>
-          <div><dt>Port forwarding</dt><dd id="transfer-portfwd">–</dd></div>
-          <div><dt>Download now</dt><dd id="transfer-down-now">–</dd></div>
-          <div><dt>Upload now</dt><dd id="transfer-up-now">–</dd></div>
-          <div><dt>Download average</dt><dd id="transfer-down">–</dd></div>
-          <div><dt>Upload average</dt><dd id="transfer-up">–</dd></div>
-          <div><dt>Averaged over</dt><dd id="transfer-window">–</dd></div>
-          <div><dt>Down threshold</dt><dd id="transfer-down-limit">–</dd></div>
-          <div><dt>Up threshold</dt><dd id="transfer-up-limit">–</dd></div>
-          <div><dt>qBittorrent cap ↓</dt><dd id="transfer-down-cap">–</dd></div>
-          <div><dt>qBittorrent cap ↑</dt><dd id="transfer-up-cap">–</dd></div>
-          <div><dt>Listen port</dt><dd id="transfer-listen">–</dd></div>
-          <div><dt>Session total</dt><dd id="transfer-total">–</dd></div>
-          <div class="wide"><dt>Switching</dt><dd id="transfer-switching" class="prose">–</dd></div>
-        </dl>
+        <div class="band">
+          <h3 class="card-section">Connection</h3>
+          <dl class="kv">
+            <div><dt>Connected</dt><dd id="transfer-connected">–</dd></div>
+            <div><dt>Version</dt><dd id="transfer-version">–</dd></div>
+            <div><dt>Last read</dt><dd id="transfer-checked">–</dd></div>
+            <div><dt>Last read result</dt><dd id="transfer-outcome">–</dd></div>
+          </dl>
+        </div>
+        <div class="band">
+          <h3 class="card-section">Incoming connections</h3>
+          <dl class="kv">
+            <div><dt>Port forwarding</dt><dd id="transfer-portfwd">–</dd></div>
+            <div><dt>Listen port</dt><dd id="transfer-listen">–</dd></div>
+          </dl>
+        </div>
+        <div class="band">
+          <h3 class="card-section">Throughput</h3>
+          <dl class="kv">
+            <div><dt>Download now</dt><dd id="transfer-down-now">–</dd></div>
+            <div><dt>Upload now</dt><dd id="transfer-up-now">–</dd></div>
+            <div><dt>Download average</dt><dd id="transfer-down">–</dd></div>
+            <div><dt>Upload average</dt><dd id="transfer-up">–</dd></div>
+            <div><dt>Averaged over</dt><dd id="transfer-window">–</dd></div>
+            <div><dt>Download cap</dt><dd id="transfer-down-cap">–</dd></div>
+            <div><dt>Upload cap</dt><dd id="transfer-up-cap">–</dd></div>
+            <div><dt>Downloaded this session</dt><dd id="transfer-down-total">–</dd></div>
+            <div><dt>Uploaded this session</dt><dd id="transfer-up-total">–</dd></div>
+          </dl>
+        </div>
+        <div class="band">
+          <h3 class="card-section">Effect on switching</h3>
+          <dl class="kv">
+            <div><dt>Download threshold</dt><dd id="transfer-down-limit">–</dd></div>
+            <div><dt>Upload threshold</dt><dd id="transfer-up-limit">–</dd></div>
+            <div class="wide"><dt>Switching</dt><dd id="transfer-switching" class="prose">–</dd></div>
+          </dl>
+        </div>
         <p id="transfer-error" class="card-note error"></p>
       </article>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Controls</h2>
-        <label class="toggle">
-          <input type="checkbox" id="auto-switch">
-          <span>Automatic switching</span>
-        </label>
-      </div>
-      <div class="toolbar">
-        <button data-action="/api/reconnect" class="primary">Reconnect to best</button>
-        <button data-action="/api/refresh">Refresh server list</button>
-        <button data-action="/api/loads">Refresh loads</button>
-        <button data-action="/api/probe">Probe latency</button>
-        <button data-action="/api/evaluate">Re-evaluate</button>
-        <button data-action="/api/servers/write">Rewrite servers.json</button>
-      </div>
     </section>
 
     <section class="panel">
@@ -240,60 +272,35 @@
       </div>
     </section>
 
-    <div class="split">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Switch history</h2>
-          <button id="clear-history" class="small" title="Discard the recorded switches. This cannot be undone.">Clear</button>
-        </div>
-        <div class="table-scroll short">
-          <table id="history">
-            <thead>
-              <tr><th>When</th><th>From → to</th><th class="num">Score</th><th>Result</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Recent activity</h2>
-          <button id="clear-logs" class="small" title="Empty the log this page reads. The container's own log stream is untouched.">Clear</button>
-        </div>
-        <ol id="logs" class="logs"></ol>
-      </section>
-    </div>
-
-    <details class="panel panel-fold">
-      <summary class="panel-head">
-        <h2>Gluetun's own view <span class="muted">what its control server reports</span></h2>
-      </summary>
-      <dl id="gluetun-detail" class="settings"></dl>
-    </details>
-
-    <details class="panel panel-fold">
-      <summary class="panel-head">
-        <h2>Effective settings <span class="muted">reference: read once during setup</span></h2>
-      </summary>
-      <dl id="settings" class="settings"></dl>
-    </details>
-
-    <!-- The search form lives in the body rather than the summary: a click on an input
-         inside a <summary> toggles the panel shut instead of focusing the field. -->
-    <details class="panel panel-fold">
-      <summary class="panel-head">
-        <h2>Filtering <span class="muted">why servers were excluded, and a per-server explainer</span></h2>
-      </summary>
-      <div class="panel-body">
-        <form id="explain-form">
-          <input type="search" id="explain-query" placeholder="Why is SE#444 missing?" autocomplete="off">
-          <button type="submit" class="small">Explain</button>
-        </form>
-        <dl id="stats" class="settings"></dl>
-        <div id="explain-result"></div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Switch history</h2>
+        <button id="clear-history" class="small" title="Discard the recorded switches. This cannot be undone.">Clear</button>
       </div>
-    </details>
+      <div class="table-scroll short">
+        <table id="history">
+          <thead>
+            <tr><th>When</th><th>From → to</th><th class="num">Score</th><th>Result</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Recent activity</h2>
+        <button id="clear-logs" class="small" title="Empty the log this page reads. The container's own log stream is untouched.">Clear</button>
+      </div>
+      <ol id="logs" class="logs"></ol>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Updater settings <span class="muted">how this container is configured</span></h2>
+      </div>
+      <dl id="settings" class="settings"></dl>
+    </section>
   </main>
 
   <div id="toast" class="toast" hidden></div>

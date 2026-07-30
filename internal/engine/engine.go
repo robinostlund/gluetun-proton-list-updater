@@ -595,6 +595,7 @@ func (e *Engine) catalogOptions() catalog.Options {
 		SecureCore:       e.cfg.Filter.SecureCore,
 		Tor:              e.cfg.Filter.Tor,
 		P2P:              e.cfg.Filter.P2P,
+		IPv6:             e.cfg.Filter.IPv6,
 		Stream:           e.cfg.Filter.Stream,
 		Free:             e.cfg.Filter.Free,
 		VPNType:          e.effectiveVPNType(),
@@ -845,12 +846,7 @@ func (e *Engine) nextRuns() map[string]string {
 }
 
 func latencyLastRun(snapshot Snapshot) time.Time {
-	// The latency summary has no timestamp of its own; the evaluation time is a
-	// good enough proxy for display purposes once probing has run at least once.
-	if snapshot.Latency.Measured == 0 {
-		return time.Time{}
-	}
-	return snapshot.Selection.LastEvaluation
+	return snapshot.Latency.LastRun
 }
 
 func (e *Engine) settingsView() SettingsView {
@@ -863,6 +859,7 @@ func (e *Engine) settingsView() SettingsView {
 		SecureCore:          e.cfg.Filter.SecureCore,
 		Tor:                 e.cfg.Filter.Tor,
 		P2P:                 e.cfg.Filter.P2P,
+		IPv6Filter:          e.cfg.Filter.IPv6,
 		Stream:              e.cfg.Filter.Stream,
 		FreeTier:            e.cfg.Filter.Free,
 		LoadWeight:          e.cfg.Score.LoadWeight,

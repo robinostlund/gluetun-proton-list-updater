@@ -101,6 +101,7 @@ type Options struct {
 	P2P        string
 	Stream     string
 	Free       string
+	IPv6       string
 	// VPNType restricts candidates to machines that support this protocol.
 	// Empty accepts both.
 	VPNType string
@@ -240,7 +241,8 @@ func Build(logicals []proton.LogicalServer, opts Options) (candidates []Candidat
 			!featureAllowed(opts.Tor, logical.Tor()) ||
 			!featureAllowed(opts.P2P, logical.P2P()) ||
 			!featureAllowed(opts.Stream, logical.Streaming()) ||
-			!featureAllowed(opts.Free, logical.Free()) {
+			!featureAllowed(opts.Free, logical.Free()) ||
+			!featureAllowed(opts.IPv6, logical.IPv6()) {
 			continue
 		}
 		if opts.MaxLoad > 0 && int(logical.Load) > opts.MaxLoad {

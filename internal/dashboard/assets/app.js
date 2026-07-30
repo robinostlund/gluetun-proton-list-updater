@@ -156,6 +156,20 @@ function boolRow(node, value) {
   el_.innerHTML = value ? '<span class="ok">true</span>' : '<span class="no">false</span>';
 }
 
+// parseCoordinates reads Gluetun's "lat,lon" location string.
+//
+// Returns null unless both values parse and fall inside the valid ranges, so a partial
+// or malformed value produces no link rather than one pointing nowhere.
+function parseCoordinates(location) {
+  const parts = String(location || '').split(',');
+  if (parts.length !== 2) return null;
+  const lat = Number(parts[0]);
+  const lon = Number(parts[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return [lat, lon];
+}
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -421,16 +435,9 @@ function renderBest() {
       + 'smaller gains, or use "Reconnect to best" to switch anyway.';
   }
 
-  // Same verdict in the comparison column, so it is visible without reading down.
-  if (!best) {
-    text('improvement-cell', '–');
-  } else if (!judged) {
-    el('improvement-cell').innerHTML = '#1';
-  } else {
-    el('improvement-cell').innerHTML = `#1 · <span class="${enough ? 'ok' : 'no'}">`
-      + `${improvement} better</span>`
-      + (enough ? '' : ' <span class="no">(too low)</span>');
-  }
+  // Rank is a rank. It used to carry the improvement as well, which meant the same
+  // number appeared under two different labels in the same card.
+  text('best-rank', best ? `#1 of ${snapshot.candidates_total}` : '–');
 
   text('best-min-improvement', selection.min_improvement.toFixed(3));
   boolRow('best-auto', selection.auto_switch);
@@ -482,12 +489,14 @@ function renderGluetun() {
   // address, so there is no separate public IPv6 exit to report; whether the tunnel
   // carries IPv6 at all is the answerable question, and it comes from the tunnel
   // interface's own addresses.
+  const ipv4 = gluetun.tunnel_ipv4 || [];
   const ipv6 = gluetun.tunnel_ipv6 || [];
-  text('gluetun-ipv6', ipv6.length ? ipv6.join(', ') : 'none (IPv4 only)');
-  el('gluetun-ipv6').title = ipv6.length
-    ? "The tunnel interface's IPv6 addresses, from Gluetun's WireGuard settings."
-    : 'The tunnel has no IPv6 address. Gluetun reports a single public IP, so there is '
-      + 'no separate public IPv6 exit address to show either.';
+  text('gluetun-ipv4', ipv4.length ? ipv4.join(', ') : 'none');
+  text('gluetun-ipv6', ipv6.length ? ipv6.join(', ') : 'none');
+  el('gluetun-ipv4').title = el('gluetun-ipv6').title =
+    "The tunnel interface's own addresses, from Gluetun's WireGuard settings. This is the "
+    + 'only IPv6 fact Gluetun exposes: its public-IP endpoint returns a single address, so '
+    + 'there is no separate public IPv6 exit address to show.';
 
   text('gluetun-check', timeAgo(gluetun.last_check));
   text('gluetun-error', gluetun.reachable ? (gluetun.last_error || '') : '');
@@ -511,24 +520,23 @@ function renderExit() {
   text('exit-org', exit.organization || '–');
   text('exit-tz', exit.timezone || '–');
   text('exit-hostname', exit.hostname || '–');
-  text('exit-location', exit.location || '–');
-
-  let note = '';
-  if (exit.ip && !current) {
-    note = `Last seen ${timeAgo(snapshot.gluetun.exit_observed_at)}, while the tunnel was up — ` +
-      'not a current reading. It is kept rather than blanked so a poll landing mid-reconnect ' +
-      'does not hide a working connection.';
-  } else if (!running) {
-    note = 'Only queried while the tunnel is running: with it down, Gluetun would report your real address.';
-  } else if (!exit.ip) {
-    note = 'Gluetun has not resolved the public IP yet.';
+  // Gluetun reports "lat,lon". Rendered as a link rather than an embedded map: the
+  // page is deliberately self-contained - a strict CSP and no CDN, so it works on an
+  // air-gapped network - which rules out map tiles. The link is navigation, not a
+  // subresource, so nothing is fetched unless it is clicked.
+  const coords = parseCoordinates(exit.location);
+  if (coords) {
+    const [lat, lon] = coords;
+    el('exit-coords').innerHTML =
+      `<a href="https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=8/${lat}/${lon}"`
+      + ` target="_blank" rel="noreferrer noopener">${lat}, ${lon} ↗</a>`;
+    el('exit-coords').title =
+      "Opens OpenStreetMap in a new tab. Nothing is loaded until you click: the dashboard "
+      + 'itself makes no external requests.';
   } else {
-    const current = snapshot.selection.current;
-    if (current && current.exit_ip && current.exit_ip === exit.ip) {
-      note = `Matches ${current.server_name}'s Proton exit address, which is how the current server is identified.`;
-    }
+    text('exit-coords', exit.location || '–');
   }
-  text('exit-note', note || '–');
+
 }
 
 // Everything else Gluetun's API reports, including the filters it is enforcing -
@@ -536,26 +544,17 @@ function renderExit() {
 function renderGluetunDetail() {
   const gluetun = snapshot.gluetun;
   const entries = [
-    ['Control server', gluetun.reachable ? 'reachable' : 'unreachable'],
-    ['Tunnel status', gluetun.status || 'unknown'],
-    ['Version', gluetun.version || '–'],
+    // Only what the Gluetun card does not already show. Repeating a dozen values here
+    // under different names - "Control server" for Connected, "VPN type" for Protocol,
+    // "Servers written to" for Paths - meant the same fact read differently depending
+    // on where you happened to look.
+    ["Gluetun's own updater", gluetun.updater_status || '–'],
     ['Commit', gluetun.commit || '–'],
     ['Built', gluetun.created || '–'],
-    ['VPN type', gluetun.vpn_type || '–'],
-    ['Provider', gluetun.provider || '–'],
-    ['DNS status', gluetun.dns_status || '–'],
-    ["Gluetun's own updater", gluetun.updater_status || '–'],
-    ['Settings readable', gluetun.settings_readable ? 'yes' : 'no — PUT /v1/vpn/settings will also be refused'],
-    ['Public IP', (gluetun.exit && gluetun.exit.ip) || '–'],
-    // Whether Gluetun asks for a forwarded port at all. The port itself is on the
-    // Current server card, and the P2P consequence is on the Best candidate card,
-    // so this only needs to answer the plain question.
-    ['Port forwarding', portForwardingState(gluetun)],
-    ['Forwarded ports', (gluetun.forwarded_ports || []).join(', ') || 'none'],
-    ['Servers layout', snapshot.servers_file.layout || '–'],
-    ['Servers written to', (snapshot.servers_file.paths || []).join(', ') || '–'],
-    ['Preferred flag', snapshot.servers_file.preferred ? 'yes' : 'no'],
-    ['Schema version', String(snapshot.servers_file.schema_version || '–')],
+    ['Port forwarding requested', portForwardingState(gluetun)],
+    ['Settings readable', gluetun.settings_readable
+      ? 'yes'
+      : 'no — PUT /v1/vpn/settings will also be refused'],
   ];
 
   const adopted = gluetun.requirements_adopted || [];
@@ -584,6 +583,8 @@ function renderGluetunDetail() {
       + 'when the Gluetun container restarts.']);
   }
 
+  // Rendered into a .kv grid now that this is a band of the Gluetun card rather than a
+   // panel of its own, so the rows match every other row on the page.
   el('gluetun-detail').innerHTML = entries
     .map(([key, value, why]) => `<div${why ? ` title="${escapeHTML(why)}"` : ''}>`
       + `<dt>${escapeHTML(key)}</dt><dd>${escapeHTML(value)}</dd></div>`)
@@ -593,7 +594,17 @@ function renderGluetunDetail() {
 
 function renderProton() {
   const proton = snapshot.proton;
-  text('proton-count', `${proton.logicals_count} logical servers`);
+  text('proton-count', proton.logicals_count ? String(proton.logicals_count) : '–');
+  // What the filters removed, which is the question the raw counts prompt.
+  const stats = snapshot.stats || {};
+  const kept = snapshot.candidates_total || 0;
+  const physical = stats.physical_total || 0;
+  text('proton-filtered', physical
+    ? `${physical - kept} of ${physical} physical servers`
+    : '–');
+  el('proton-filtered').title =
+    'Physical servers Proton listed, minus those that survived every filter. The Filtering '
+    + 'band below breaks down which rule removed what.';
   boolRow('proton-login', proton.logged_in);
   outcome('proton-outcome', !proton.last_fetch.startsWith('0001-01-01'),
     Boolean(proton.last_fetch_error), proton.last_fetch_error);
@@ -664,9 +675,11 @@ function renderTransfer() {
   text('transfer-down-cap', cap(transfer.download_limit));
   text('transfer-up-cap', cap(transfer.upload_limit));
   el('transfer-down-cap').title = el('transfer-up-cap').title =
-    "qBittorrent's own rate limit. Independent of the thresholds above, which are this tool's.";
+    "qBittorrent's own rate limit, set in qBittorrent. Independent of the thresholds "
+    + "above, which are this tool's and decide when switching is deferred.";
 
-  text('transfer-total', `${bytes(transfer.download_total)} ↓ / ${bytes(transfer.upload_total)} ↑`);
+  text('transfer-down-total', bytes(transfer.download_total));
+  text('transfer-up-total', bytes(transfer.upload_total));
   text('transfer-checked', transfer.has_reading ? timeAgo(transfer.last_check) : 'never');
   outcome('transfer-outcome', transfer.has_reading || Boolean(transfer.last_error),
     !transfer.reachable, transfer.last_error);
@@ -831,6 +844,7 @@ function renderSettings() {
     ['Secure core', settings.secure_core],
     ['Tor', settings.tor],
     ['P2P', settings.p2p],
+    ['IPv6', settings.ipv6_filter],
     ['Streaming', settings.stream],
     ['Free tier', settings.free_tier],
     ['Load weight', settings.load_weight],
