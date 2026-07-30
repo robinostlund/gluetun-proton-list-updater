@@ -3075,3 +3075,208 @@ func TestAnIsolatedSpikeDoesNotHoldTheTunnel(t *testing.T) {
 		t.Errorf("still busy after one spike and 30 quiet readings (average %d B/s)", down)
 	}
 }
+
+// Gluetun's own updater fetches from Proton and then *persists* what it fetched:
+// SetServers calls flushToFile, which opens the servers file with O_TRUNC. So triggering
+// it overwrites the curated list written here, and the file has to be rewritten
+// afterwards - otherwise it stays Gluetun's until the next full Proton refresh, and a
+// Gluetun restart in that window comes up on an unfiltered list.
+func TestTheServerFileIsRewrittenAfterGluetunsUpdaterRuns(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	before := engine.Snapshot().Servers.LastWrite
+	if before.IsZero() {
+		t.Fatal("expected the servers file to have been written during startup")
+	}
+
+	// Stand in for Gluetun's updater having clobbered the file.
+	time.Sleep(10 * time.Millisecond)
+	if !engine.refreshGluetunServerList(context.Background()) {
+		t.Fatal("the fake should accept an updater refresh")
+	}
+
+	after := engine.Snapshot().Servers.LastWrite
+	if !after.After(before) {
+		t.Error("the servers file was not rewritten after the updater ran; " +
+			"Gluetun's own fetch would remain on disk")
+	}
+}
+
+// And it must never be triggered as part of a normal write: that would ask Gluetun to
+// replace the list just written with its own.
+func TestTheUpdaterIsNotTriggeredByAWrite(t *testing.T) {
+	var fake *fakeGluetun
+	harness := newHarness(t, false, nil)
+	fake = harness.gluetun
+	harness.run(t, func() bool { return harness.engine.Snapshot().Servers.LastWrite.IsZero() == false })
+
+	fake.mu.Lock()
+	before := fake.updaterCalls
+	fake.mu.Unlock()
+
+	harness.engine.writeServersFile()
+
+	fake.mu.Lock()
+	after := fake.updaterCalls
+	fake.mu.Unlock()
+	if after != before {
+		t.Errorf("writing the servers file triggered Gluetun's updater %d time(s); "+
+			"that would overwrite the list just written", after-before)
+	}
+}
+
+// The trace must not splice two servers' figures into one line. A switch from a busy
+// server to a quiet one would otherwise look like the busy server recovering - the
+// opposite of what happened, drawn as a trend.
+func TestTheLoadTraceStopsAtAServerChange(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	now := time.Now()
+	if err := engine.state.update(func(state *persistedState) {
+		state.LoadSamples = []LoadSample{
+			{At: now.Add(-50 * time.Minute), Hostname: "old.protonvpn.net", Load: 90},
+			{At: now.Add(-40 * time.Minute), Hostname: "old.protonvpn.net", Load: 88},
+			{At: now.Add(-30 * time.Minute), Hostname: "new.protonvpn.net", Load: 10},
+			{At: now.Add(-20 * time.Minute), Hostname: "new.protonvpn.net", Load: 12},
+			{At: now.Add(-10 * time.Minute), Hostname: "new.protonvpn.net", Load: 11},
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	trace := engine.loadTrace("new.protonvpn.net")
+	if len(trace) != 3 {
+		t.Fatalf("trace has %d points, want the 3 belonging to the current server", len(trace))
+	}
+	for _, point := range trace {
+		if point.Load > 20 {
+			t.Errorf("trace contains %d%%, which belongs to the previous server", point.Load)
+		}
+	}
+
+	// A server with no samples of its own gets no trace rather than someone else's.
+	if got := engine.loadTrace("unrelated.protonvpn.net"); got != nil {
+		t.Errorf("trace for an unseen server = %v, want none", got)
+	}
+	if got := engine.loadTrace(""); got != nil {
+		t.Errorf("trace for an unknown hostname = %v, want none", got)
+	}
+}
+
+// Samples accumulate as loads are refreshed, and are bounded so the state file cannot
+// grow without limit.
+func TestLoadSamplesAreRecordedAndBounded(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	hostname, _ := engine.currentHostname()
+	if hostname == "" {
+		t.Skip("no current server identified in this harness run")
+	}
+
+	// Well past the cap, to prove the trim.
+	if err := engine.state.update(func(state *persistedState) {
+		state.LoadSamples = nil
+		for i := range maxLoadSamples + 40 {
+			state.LoadSamples = append(state.LoadSamples, LoadSample{
+				At:       time.Now().Add(-time.Duration(maxLoadSamples+40-i) * time.Minute),
+				Hostname: hostname,
+				Load:     uint8(i % 100),
+			})
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := len(engine.state.snapshot().LoadSamples); got != maxLoadSamples {
+		t.Errorf("kept %d samples, want the cap of %d", got, maxLoadSamples)
+	}
+
+	// And a refresh appends rather than replacing the trace.
+	before := len(engine.loadTrace(hostname))
+	engine.recordCurrentLoad()
+	if after := len(engine.loadTrace(hostname)); after < before {
+		t.Errorf("trace shrank from %d to %d on a new sample", before, after)
+	}
+}
+
+// "On this server" is only knowable when this tool made the switch. Reporting the last
+// switch time regardless would attribute someone else's reconnect to us.
+func TestOnCurrentSinceIsOnlyKnownWhenWePinnedTheServer(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	switched := time.Now().Add(-3 * time.Hour)
+	if err := engine.state.update(func(state *persistedState) {
+		state.PinnedHostname = "ours.protonvpn.net"
+		state.LastSwitchAt = switched
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := engine.onCurrentSince("ours.protonvpn.net"); !got.Equal(switched) {
+		t.Errorf("onCurrentSince = %v, want the switch time %v", got, switched)
+	}
+	// Gluetun moved on its own, or the tunnel predates this container.
+	if got := engine.onCurrentSince("someone-elses.protonvpn.net"); !got.IsZero() {
+		t.Errorf("onCurrentSince = %v for a server we did not pin, want zero", got)
+	}
+	if got := engine.onCurrentSince(""); !got.IsZero() {
+		t.Errorf("onCurrentSince = %v for an unknown server, want zero", got)
+	}
+}
+
+// The trace is persisted, because its whole value is showing a trend and a trace that
+// restarted empty on every container restart would rarely be long enough to show one.
+func TestTheLoadTraceSurvivesARestart(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	hostname := "node-se-20.protonvpn.net"
+	now := time.Now()
+
+	// First run: record a few samples through the real store, which writes to disk.
+	first := newStateStore(directory)
+	if err := first.load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.update(func(state *persistedState) {
+		state.PinnedHostname = hostname
+		state.LastSwitchAt = now.Add(-2 * time.Hour)
+		for i := range 5 {
+			state.LoadSamples = append(state.LoadSamples, LoadSample{
+				At:       now.Add(time.Duration(i-5) * time.Minute),
+				Hostname: hostname,
+				Load:     uint8(20 + i),
+			})
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second run: a fresh store over the same directory, as a restart would be.
+	second := newStateStore(directory)
+	if err := second.load(); err != nil {
+		t.Fatal(err)
+	}
+	restored := second.snapshot()
+	if got := len(restored.LoadSamples); got != 5 {
+		t.Fatalf("restored %d samples, want 5", got)
+	}
+	if restored.LoadSamples[0].Hostname != hostname {
+		t.Errorf("hostname = %q, want %q", restored.LoadSamples[0].Hostname, hostname)
+	}
+	if restored.LoadSamples[4].Load != 24 {
+		t.Errorf("last load = %d, want 24", restored.LoadSamples[4].Load)
+	}
+	if !restored.LastSwitchAt.Equal(now.Add(-2*time.Hour).Truncate(0)) &&
+		restored.LastSwitchAt.Sub(now.Add(-2*time.Hour)).Abs() > time.Second {
+		t.Errorf("LastSwitchAt = %v, want it preserved", restored.LastSwitchAt)
+	}
+}

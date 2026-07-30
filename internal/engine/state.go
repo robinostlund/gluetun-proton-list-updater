@@ -23,6 +23,13 @@ const (
 // that is needed to keep the state bounded.
 const maxHistory = 100
 
+// maxLoadSamples bounds the utilisation trace kept for the current server: 96 samples is
+// 24 hours at the default PROTON_LOAD_REFRESH_INTERVAL of 15 minutes.
+//
+// It is persisted because its whole value is showing a trend, and a trace that restarted
+// empty on every container restart would rarely be long enough to show one.
+const maxLoadSamples = 96
+
 // SwitchRecord is one entry of the switch history shown on the dashboard.
 type SwitchRecord struct {
 	At   time.Time `json:"at"`
@@ -45,6 +52,13 @@ type SwitchRecord struct {
 	PublicIP string `json:"public_ip,omitempty"`
 }
 
+// LoadSample is one utilisation reading for whichever server the tunnel was on.
+type LoadSample struct {
+	At       time.Time `json:"at"`
+	Hostname string    `json:"hostname"`
+	Load     uint8     `json:"load"`
+}
+
 // persistedState is what survives a restart.
 type persistedState struct {
 	// PinnedHostname is the server this tool last asked Gluetun to use. On
@@ -65,6 +79,11 @@ type persistedState struct {
 	// noise.
 	GluetunHadServerData bool           `json:"gluetun_had_server_data,omitempty"`
 	History              []SwitchRecord `json:"history,omitempty"`
+	// LoadSamples is the utilisation trace for the server the tunnel has been on.
+	//
+	// Each sample carries its hostname so a switch is visible in the data rather than
+	// silently splicing two servers' figures into one misleading line.
+	LoadSamples []LoadSample `json:"load_samples,omitempty"`
 }
 
 // stateStore persists engine state atomically.
@@ -110,6 +129,9 @@ func (s *stateStore) update(mutate func(state *persistedState)) (err error) {
 	mutate(&s.state)
 	if len(s.state.History) > maxHistory {
 		s.state.History = s.state.History[len(s.state.History)-maxHistory:]
+	}
+	if len(s.state.LoadSamples) > maxLoadSamples {
+		s.state.LoadSamples = s.state.LoadSamples[len(s.state.LoadSamples)-maxLoadSamples:]
 	}
 	state := s.state
 	s.mu.Unlock()

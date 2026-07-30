@@ -369,17 +369,17 @@ func Load() (cfg Config, err error) {
 	}
 
 	cfg.Filter = Filter{
-		Countries:        r.csv("COUNTRIES"),
-		ExcludeCountries: r.csv("EXCLUDE_COUNTRIES"),
-		Cities:           r.csv("CITIES"),
-		MaxLoad:          r.integer("MAX_LOAD", 90),
-		SecureCore:       r.choice("SECURE_CORE", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
-		Tor:              r.choice("TOR", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
-		P2P:              r.choice("P2P", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
-		IPv6:             r.choice("IPV6", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
-		Stream:           r.choice("STREAM", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
-		Free:             r.choice("FREE_TIER", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
-		VPNType:          r.choice("VPN_TYPE", "auto", "auto", "wireguard", "openvpn"),
+		Countries:        r.csv("FILTER_COUNTRIES"),
+		ExcludeCountries: r.csv("FILTER_EXCLUDE_COUNTRIES"),
+		Cities:           r.csv("FILTER_CITIES"),
+		MaxLoad:          r.integer("FILTER_MAX_LOAD", 90),
+		SecureCore:       r.choice("FILTER_SECURE_CORE", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
+		Tor:              r.choice("FILTER_TOR", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
+		P2P:              r.choice("FILTER_P2P", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
+		IPv6:             r.choice("FILTER_IPV6", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
+		Stream:           r.choice("FILTER_STREAM", FilterInclude, FilterInclude, FilterExclude, FilterOnly),
+		Free:             r.choice("FILTER_FREE_TIER", FilterExclude, FilterInclude, FilterExclude, FilterOnly),
+		VPNType:          r.choice("FILTER_VPN_TYPE", "auto", "auto", "wireguard", "openvpn"),
 	}
 
 	cfg.Score = Score{
@@ -441,14 +441,14 @@ func Load() (cfg Config, err error) {
 }
 
 func (cfg *Config) normalizeAndValidate(r *reader) {
-	cfg.Filter.Countries = normalizeCountries(r, "COUNTRIES", cfg.Filter.Countries)
-	cfg.Filter.ExcludeCountries = normalizeCountries(r, "EXCLUDE_COUNTRIES", cfg.Filter.ExcludeCountries)
+	cfg.Filter.Countries = normalizeCountries(r, "FILTER_COUNTRIES", cfg.Filter.Countries)
+	cfg.Filter.ExcludeCountries = normalizeCountries(r, "FILTER_EXCLUDE_COUNTRIES", cfg.Filter.ExcludeCountries)
 
 	if cfg.Filter.MaxLoad < 1 || cfg.Filter.MaxLoad > 100 {
-		r.errorf("MAX_LOAD: %d must be between 1 and 100", cfg.Filter.MaxLoad)
+		r.errorf("FILTER_MAX_LOAD: %d must be between 1 and 100", cfg.Filter.MaxLoad)
 	}
 	if cfg.Servers.OnlyAllowedCountries && len(cfg.Filter.Countries) == 0 {
-		r.errorf("SERVERS_ONLY_ALLOWED_COUNTRIES requires COUNTRIES to be set")
+		r.errorf("SERVERS_ONLY_ALLOWED_COUNTRIES requires FILTER_COUNTRIES to be set")
 	}
 	if cfg.QBittorrent.Enabled() {
 		if !strings.HasPrefix(cfg.QBittorrent.URL, "http://") &&

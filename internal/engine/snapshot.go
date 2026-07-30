@@ -208,6 +208,18 @@ type SelectionStatus struct {
 	LastEvaluation    time.Time `json:"last_evaluation"`
 	LastSwitchAt      time.Time `json:"last_switch_at"`
 	CooldownRemaining string    `json:"cooldown_remaining,omitempty"`
+	// OnCurrentSince is when the tunnel arrived on the server it is on, zero when that
+	// is not known.
+	//
+	// It is only set when the current server is the one this tool pinned: if Gluetun
+	// moved on its own, or the tunnel was already up when this container started, the
+	// arrival time is genuinely unknown and a number would be a guess.
+	OnCurrentSince time.Time `json:"on_current_since,omitempty"`
+	// LoadTrace is the utilisation history for the current server, oldest first.
+	//
+	// Only the contiguous tail belonging to the current server: splicing two servers'
+	// figures into one line would show a trend that never happened.
+	LoadTrace []LoadPoint `json:"load_trace,omitempty"`
 	// Explanation is why the last evaluation did *not* switch, in the same words the
 	// decision was made in - "cooldown active for another 4m", "best server only
 	// 0.021 better than current, need 0.050".
@@ -302,6 +314,12 @@ type TransferStatus struct {
 	LastCheck             time.Time `json:"last_check"`
 	// Version is qBittorrent's reported version, proof the credentials work.
 	Version string `json:"version,omitempty"`
+}
+
+// LoadPoint is one point of the current server's utilisation trace.
+type LoadPoint struct {
+	At   time.Time `json:"at"`
+	Load uint8     `json:"load"`
 }
 
 // CandidateView is one ranked server, flattened for the UI.

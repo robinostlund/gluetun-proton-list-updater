@@ -92,7 +92,7 @@ func TestLoadMissingSecretFileIsAnError(t *testing.T) {
 // spelling.
 func TestLoadNormalizesCountries(t *testing.T) {
 	setMinimal(t)
-	t.Setenv("COUNTRIES", "se, netherlands ,DE,Sweden")
+	t.Setenv("FILTER_COUNTRIES", "se, netherlands ,DE,Sweden")
 
 	cfg, err := Load()
 	if err != nil {
@@ -112,7 +112,7 @@ func TestLoadNormalizesCountries(t *testing.T) {
 
 func TestLoadRejectsUnknownCountry(t *testing.T) {
 	setMinimal(t)
-	t.Setenv("COUNTRIES", "Sweden,Atlantis")
+	t.Setenv("FILTER_COUNTRIES", "Sweden,Atlantis")
 
 	_, err := Load()
 	if err == nil {
@@ -125,7 +125,7 @@ func TestLoadRejectsUnknownCountry(t *testing.T) {
 
 func TestLoadValidatesRanges(t *testing.T) {
 	tests := map[string]map[string]string{
-		"max load too high":       {"MAX_LOAD": "150"},
+		"max load too high":       {"FILTER_MAX_LOAD": "150"},
 		"zero weights":            {"SCORE_LOAD_WEIGHT": "0", "SCORE_LATENCY_WEIGHT": "0", "SCORE_PROTON_WEIGHT": "0"},
 		"bad port":                {"LATENCY_PORT": "70000"},
 		"smoothing out of range":  {"LATENCY_SMOOTHING": "2"},
@@ -165,15 +165,15 @@ func TestLoadOnlyAllowedCountriesNeedsCountries(t *testing.T) {
 func TestLoadAcceptsFullConfiguration(t *testing.T) {
 	setMinimal(t)
 	for key, value := range map[string]string{
-		"COUNTRIES":                    "Sweden,Norway",
-		"EXCLUDE_COUNTRIES":            "Norway",
-		"CITIES":                       "Stockholm",
-		"MAX_LOAD":                     "70",
-		"VPN_TYPE":                     "wireguard",
-		"SECURE_CORE":                  "only",
-		"TOR":                          "include",
-		"P2P":                          "only",
-		"FREE_TIER":                    "exclude",
+		"FILTER_COUNTRIES":             "Sweden,Norway",
+		"FILTER_EXCLUDE_COUNTRIES":     "Norway",
+		"FILTER_CITIES":                "Stockholm",
+		"FILTER_MAX_LOAD":              "70",
+		"FILTER_VPN_TYPE":              "wireguard",
+		"FILTER_SECURE_CORE":           "only",
+		"FILTER_TOR":                   "include",
+		"FILTER_P2P":                   "only",
+		"FILTER_FREE_TIER":             "exclude",
 		"SCORE_LOAD_WEIGHT":            "2",
 		"SCORE_LATENCY_WEIGHT":         "1.5",
 		"SCORE_PROTON_WEIGHT":          "0.25",
@@ -458,3 +458,51 @@ func TestTheBusyWindowDefaultsToFiveMinutes(t *testing.T) {
 		t.Errorf("BusyWindow = %s, want 5m", cfg.QBittorrent.BusyWindow)
 	}
 }
+
+// The selection filters are FILTER_* now: scattered across the namespace they gave no
+// hint of being one group, and names like TOR or P2P could collide with something else an
+// operator sets.
+func TestFilterVariablesUseTheFilterPrefix(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+	t.Setenv("FILTER_COUNTRIES", "Sweden")
+	t.Setenv("FILTER_MAX_LOAD", "70")
+	t.Setenv("FILTER_IPV6", "only")
+	t.Setenv("FILTER_P2P", "exclude")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Filter.Countries; len(got) != 1 || got[0] != "Sweden" {
+		t.Errorf("Countries = %v", got)
+	}
+	if cfg.Filter.MaxLoad != 70 {
+		t.Errorf("MaxLoad = %d, want 70", cfg.Filter.MaxLoad)
+	}
+	if cfg.Filter.IPv6 != FilterOnly {
+		t.Errorf("IPv6 = %q, want only", cfg.Filter.IPv6)
+	}
+	if cfg.Filter.P2P != FilterExclude {
+		t.Errorf("P2P = %q, want exclude", cfg.Filter.P2P)
+	}
+}
+
+// The error messages have to name the variable an operator now sets, or the fix is a
+// guess.
+func TestValidationErrorsNameTheCurrentVariable(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+	t.Setenv("FILTER_MAX_LOAD", "500")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "FILTER_MAX_LOAD") {
+		t.Errorf("error = %v, want it to name FILTER_MAX_LOAD", err)
+	}
+}
+
+// The rename is a hard break, and a removed name is refused rather than ignored.
+//

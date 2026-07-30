@@ -158,14 +158,19 @@ main {
   border-radius: var(--radius);
   padding: 14px 16px;
 }
-.card h2 {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-muted);
-  font-weight: 600;
-  margin-bottom: 6px;
+/* Card titles are headings: full-size and in the body colour, so a card announces
+   itself. The small muted uppercase treatment they used to share with band titles left
+   three levels of the hierarchy looking identical. */
+.card h2, .panel-head h2 {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin-bottom: 4px;
 }
+.card h2 { margin-bottom: 10px; }
+/* A qualifier after the title stays small and muted, so it reads as a subtitle. */
+.card h2 .muted, .panel-head h2 .muted { letter-spacing: 0; }
 .card-current { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 
 /* A merged card carries three sections' worth of rows, so it gets two columns of the
@@ -319,8 +324,12 @@ input[type="search"], input[type="text"] {
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
 }
-.panel-head h2 { font-size: 14px; font-weight: 600; }
+
 .muted { color: var(--text-muted); font-weight: 400; font-size: 12px; }
+/* The utilisation sparkline: full row width, fixed height, scales with the card. */
+.trace { white-space: normal; }
+.spark { width: 100%; max-width: 320px; height: 34px; display: block; margin-top: 2px; }
+
 .kv dd a { color: var(--accent); text-decoration: none; }
 .kv dd a:hover { text-decoration: underline; }
 

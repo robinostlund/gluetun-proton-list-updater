@@ -365,6 +365,18 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 // reads servers.json only at startup, and there is no route to re-read it, so
 // the only in-place remedy is to make Gluetun run its own updater, which
 // replaces its in-memory list.
+//
+// Two things about that updater are worth being explicit about, because they make it
+// the wrong tool for anything other than this narrow case:
+//
+//   - It fetches from Proton's API. It does *not* re-read the file written here, so
+//     triggering it cannot make Gluetun adopt the curated list - only its own.
+//   - It persists what it fetched. Gluetun's SetServers calls flushToFile, which opens
+//     the servers file with O_TRUNC, so running the updater overwrites the data written
+//     here. That is why the file is rewritten immediately afterwards.
+//
+// Together they are also why this is never called after a successful write: doing so
+// would replace the list just written with Gluetun's own.
 func (e *Engine) refreshGluetunServerList(ctx context.Context) (retryWorthwhile bool) {
 	if !e.cfg.Gluetun.RefreshServersOnReject {
 		return false
@@ -388,6 +400,12 @@ func (e *Engine) refreshGluetunServerList(ctx context.Context) (retryWorthwhile 
 	// of date. Keeping it would make the retry skip the very candidates the refresh
 	// was meant to unlock.
 	e.forgetGluetunHostnames()
+
+	// The updater flushed its own fetch over the servers file, so restore the curated
+	// data. Without this, the file stays Gluetun's until the next full Proton refresh -
+	// up to PROTON_REFRESH_INTERVAL later - and a Gluetun restart in that window would
+	// come up on an unfiltered, unpreferred list.
+	e.writeServersFile()
 	return true
 }
 

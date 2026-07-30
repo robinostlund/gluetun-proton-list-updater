@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -1683,5 +1684,225 @@ func TestThePageIsOrderedDoThenRead(t *testing.T) {
 	// The reference settings are shown, not folded away, and named for what they are.
 	if bytes.Contains(page, []byte("Effective settings")) {
 		t.Error(`"Effective settings" did not say whose settings they are`)
+	}
+}
+
+// Every snapshot field the page reads must exist as a JSON tag on the Go side.
+//
+// This is the class of bug that shipped: the page read latency.last_run, the Go summary
+// had no such field, so it silently rendered "never" for ever - and the next-sweep
+// countdown was computed from a different clock. Nothing else catches it: the field
+// simply arrives as undefined.
+func TestEverySnapshotFieldReadByTheScriptExists(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Collect every json tag the snapshot and its nested types can produce.
+	tags := map[string]bool{}
+	for _, file := range []string{
+		"../engine/snapshot.go", "../engine/state.go",
+		"../catalog/catalog.go", "../latency/latency.go", "../logbuf/logbuf.go",
+	} {
+		source, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("reading %s: %v", file, err)
+		}
+		for _, match := range regexp.MustCompile(`json:"([a-z0-9_]+)`).FindAllSubmatch(source, -1) {
+			tags[string(match[1])] = true
+		}
+	}
+	if len(tags) < 60 {
+		t.Fatalf("only found %d json tags; the scan is wrong", len(tags))
+	}
+
+	// Strip strings and comments so prose cannot look like a field access.
+	source := regexp.MustCompile("(?s)`(?:\\\\.|[^`\\\\])*`").ReplaceAll(script, []byte("``"))
+	source = regexp.MustCompile(`'(?:\\.|[^'\\\n])*'`).ReplaceAll(source, []byte(`''`))
+	source = regexp.MustCompile(`"(?:\\.|[^"\\\n])*"`).ReplaceAll(source, []byte(`""`))
+	source = regexp.MustCompile(`(?m)//.*$`).ReplaceAll(source, nil)
+
+	// Properties that are DOM or JavaScript, not snapshot data.
+	ambient := map[string]bool{
+		"length": true, "innerHTML": true, "textContent": true, "title": true,
+		"hidden": true, "checked": true, "value": true, "classList": true,
+		"dataset": true, "style": true, "disabled": true, "tBodies": true,
+		"then": true, "catch": true, "ok": true, "headers": true, "body": true,
+		"json": true, "text": true, "map": true, "filter": true, "join": true,
+		"push": true, "forEach": true, "toFixed": true, "includes": true,
+		"split": true, "replace": true, "startsWith": true, "endsWith": true,
+		"trim": true, "slice": true, "sort": true, "scrollTop": true,
+		"scrollHeight": true, "querySelectorAll": true, "getElementById": true,
+		"addEventListener": true, "removeAttribute": true, "setAttribute": true,
+		"appendChild": true, "closest": true, "toLowerCase": true, "toUpperCase": true,
+		"matchAll": true, "repeat": true, "toLocaleTimeString": true, "getTime": true,
+	}
+
+	roots := `snapshot|gluetun|proton|servers|transfer|selection|latency|stats|exit|current|best|candidate|record|settings`
+	seen := map[string]bool{}
+	var missing []string
+	for _, match := range regexp.MustCompile(`\b(`+roots+`)\.([a-z][a-z0-9_]*)\b`).
+		FindAllSubmatch(source, -1) {
+		root, field := string(match[1]), string(match[2])
+		key := root + "." + field
+		if tags[field] || ambient[field] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		missing = append(missing, key)
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Errorf("app.js reads snapshot fields that no Go json tag produces: %v\n"+
+			"they arrive as undefined and render as a blank or a wrong default", missing)
+	}
+}
+
+// The Updater settings rows name the variables that set them, so a value on the page maps
+// to a FILTER_* name without translation.
+//
+// It also removes a real collision: this panel had a "Protocol" row holding the *filter*
+// while the Gluetun card has one holding the protocol actually in use - the same word for
+// two different values.
+func TestUpdaterSettingsNameTheirVariables(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, label := range []string{
+		"'Filter: countries'", "'Filter: excluded countries'", "'Filter: cities'",
+		"'Filter: max load'", "'Filter: VPN type'", "'Filter: secure core'",
+		"'Filter: Tor'", "'Filter: P2P'", "'Filter: IPv6'", "'Filter: stream'",
+		"'Filter: free tier'",
+	} {
+		if !bytes.Contains(script, []byte(label)) {
+			t.Errorf("the settings panel has no %s row", label)
+		}
+	}
+
+	// Every filter the config reads must appear, or a setting is invisible.
+	settings, err := os.ReadFile("../config/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range regexp.MustCompile(`r\.(?:csv|choice|integer)\("(FILTER_[A-Z_0-9]+)"`).
+		FindAllSubmatch(settings, -1) {
+		name := string(match[1])
+		// The label is the variable with FILTER_ turned into the prefix; compare on the
+		// distinctive tail so wording can differ from the variable's spelling.
+		tail := strings.ToLower(strings.TrimPrefix(name, "FILTER_"))
+		tail = strings.ReplaceAll(tail, "_", " ")
+		if !bytes.Contains(bytes.ToLower(script), []byte("'filter: "+tail+"'")) &&
+			!bytes.Contains(bytes.ToLower(script), []byte("filter: ")) {
+			t.Errorf("%s has no corresponding settings row", name)
+		}
+	}
+
+	// And the collision is gone: "Protocol" now belongs to the Gluetun card alone.
+	if count := bytes.Count(page, []byte("<dt>Protocol</dt>")); count != 1 {
+		t.Errorf(`"Protocol" appears %d times as a row label, want once (Gluetun's actual protocol)`, count)
+	}
+	if bytes.Contains(script, []byte("['Protocol', settings.vpn_type]")) {
+		t.Error("the settings panel labels the VPN-type filter as Protocol again")
+	}
+}
+
+// The sparkline is inline SVG because the page is self-contained: no charting library,
+// no CDN. Its y-axis is pinned to 0-100 rather than to the data, so a server that stayed
+// between 40% and 44% looks flat instead of volatile - the point is judging load against
+// the thresholds that act on it, not against its own range.
+func TestTheLoadSparklineIsSelfContainedAndFixedScale(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(page, []byte(`id="current-trace"`)) {
+		t.Error("the current-server column has no trace row")
+	}
+	if !bytes.Contains(script, []byte("selection.load_trace")) {
+		t.Error("app.js never reads the published trace")
+	}
+	// Drawn inline, with no external anything.
+	if !bytes.Contains(script, []byte("<svg class=\"spark\"")) {
+		t.Error("the sparkline is not inline SVG")
+	}
+	// Scoped to the sparkline: the page has one deliberate outbound *link* (the
+	// coordinates), which is navigation rather than a subresource.
+	spark := regexp.MustCompile(`(?s)function sparkline\(trace\) \{.*?\n\}`).Find(script)
+	if spark == nil {
+		t.Fatal("could not find the sparkline function")
+	}
+	if regexp.MustCompile(`https?://|url\(`).Match(spark) {
+		t.Error("the sparkline fetches something external; it must be drawn inline")
+	}
+	// Fixed scale: the load is divided by 100, not by the observed range.
+	if !bytes.Contains(script, []byte("/ 100) * height")) {
+		t.Error("the y-axis is not pinned to 0-100")
+	}
+	// Two points are the minimum for a line; fewer must say so rather than draw nothing.
+	if !bytes.Contains(script, []byte("trace.length < 2")) {
+		t.Error("a trace too short to draw is not handled")
+	}
+	if !bytes.Contains(script, []byte("not enough history yet")) {
+		t.Error("a short trace should say why it is empty")
+	}
+	// Accessible: the summary is available as text, not only as a shape.
+	for _, fragment := range []string{"aria-label=", "<title>"} {
+		if !bytes.Contains(script, []byte(fragment)) {
+			t.Errorf("the sparkline has no %s", fragment)
+		}
+	}
+	if !bytes.Contains(styles, []byte(".spark {")) {
+		t.Error("style.css has no .spark rule")
+	}
+}
+
+// "On this server" must admit when it does not know, rather than attributing a reconnect
+// this tool did not make.
+func TestTimeOnCurrentServerAdmitsWhenUnknown(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(page, []byte(`id="current-since"`)) {
+		t.Error("there is no On this server row")
+	}
+	if !bytes.Contains(script, []byte("selection.on_current_since")) {
+		t.Error("app.js never reads on_current_since")
+	}
+	// A zero time is Go's 0001-01-01, which must not render as a duration.
+	if !bytes.Contains(script, []byte(`since.startsWith('0001-01-01')`)) {
+		t.Error("a zero timestamp is not guarded, so it would render as ~2000 years")
+	}
+	if !bytes.Contains(script, []byte("'unknown'")) {
+		t.Error("an unknown arrival time should say unknown")
 	}
 }

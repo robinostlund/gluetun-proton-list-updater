@@ -303,8 +303,20 @@ Every chip states its value in words as well as colour, and carries the detail o
 explains itself without hunting for the card. They are derived from the same snapshot the cards use,
 so the strip can never disagree with the card below it.
 
-**Server selection** — current and best candidate side by side, sharing row labels so the
-comparison reads across rather than between two panels: server, load, latency, score, rank. The
+**Server selection** — three columns: the current server, the candidate that would replace it, and
+the decision between them. Current and best carry identical row labels so the two read across.
+
+The current column also answers the two questions a single load figure prompts:
+
+- **On this server** — how long the tunnel has been where it is, which is the quickest answer to
+  "is it flapping?". It reads `unknown` unless this tool made the switch: if Gluetun moved on its
+  own, or the tunnel was already up when this container started, the arrival time is genuinely not
+  known and a number would be a guess.
+- **Load over time** — a sparkline of the current server's utilisation, one point per loads refresh,
+  persisted so it survives a restart and bounded to 24 hours at the default interval. The y-axis is
+  pinned to 0–100 %, not to the data: a server that stayed between 40 % and 44 % should look flat,
+  and the point is judging load against the thresholds that act on it. The line stops at a server
+  change — splicing two servers' figures together would draw a trend that never happened. The
 **Improvement** row states its own verdict — `0.021 too low, needs 0.100` in red, or `0.180 meets
 0.100` in green — because that single number decides whether the best candidate is used at all.
 Below it: the **Decision** in the engine's own words (`cooldown active for another 12m`), the
@@ -556,7 +568,7 @@ The dashboard shows this in three places:
   which servers need a subscription is visible rather than implied
 - the **Filtering** panel counts what was skipped as *above account tier*
 
-`FREE_TIER` remains a separate preference: it decides whether you *want* free-tier
+`FILTER_FREE_TIER` remains a separate preference: it decides whether you *want* free-tier
 servers (default `exclude`, since they are heavily loaded), while the tier check
 decides what is *possible*. A delinquent account is also flagged, because Proton
 refuses connections in that state and it looks identical to a server fault.
@@ -571,7 +583,7 @@ curl -s 'http://localhost:8080/api/explain?q=SE%23444' | jq
 ```
 
 or type the name into the box in the dashboard's *Filtering* panel. It names every rule that
-rejected the server — `MAX_LOAD`, a country or city filter, a feature filter, a filter Gluetun itself
+rejected the server — `FILTER_MAX_LOAD`, a country or city filter, a feature filter, a filter Gluetun itself
 enforces, a Proton `Status 0`, a missing WireGuard key — and lists each physical machine behind it.
 
 The most common answer is not an exclusion at all. **Proton groups one physical machine under several
@@ -673,10 +685,23 @@ All of these must hold:
 - the minimum interval and the cooldown have elapsed;
 - the best server beats the current one by at least `SWITCH_MIN_IMPROVEMENT`.
 
-A server the filters exclude (wrong country, over `MAX_LOAD`) counts as "must move", and the
+A server the filters exclude (wrong country, over `FILTER_MAX_LOAD`) counts as "must move", and the
 dashboard shows the current server with a *not in allowed set* marker rather than hiding it.
 
 ## Can Gluetun see a server it did not know at startup?
+
+> **Triggering Gluetun's updater does not make it read this tool's list, and it overwrites
+> that list.** Worth stating plainly, because the opposite is the natural assumption.
+>
+> `PUT /v1/updater/status` makes Gluetun fetch from **Proton's API** — not from
+> `servers.json`. There is no route that makes Gluetun re-read the file. And Gluetun then
+> *persists* what it fetched: `SetServers` calls `flushToFile`, which opens the servers
+> file with `O_TRUNC`, so the curated list is replaced by Gluetun's own.
+>
+> So the updater is triggered only in the one case where it helps — when Gluetun has
+> refused a hostname, to make it aware of servers added since it started — and the servers
+> file is **rewritten immediately afterwards** to restore the curated data. It is never
+> triggered after an ordinary write, which would replace the list just written.
 
 Not by itself, and this is worth understanding because it is the one thing the tool cannot fully
 solve on its own.
@@ -759,23 +784,23 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `SERVERS_WRITE_MODE` | `update` | `update` keeps other providers' sections, `replace` writes only ProtonVPN, `none` disables writing |
 | `SERVERS_SCHEMA_VERSION` | *auto* | Override the detected schema version |
 | `SERVERS_INCLUDE_IPV6` | `false` | Include Proton's IPv6 entry addresses |
-| `SERVERS_ONLY_ALLOWED_COUNTRIES` | `false` | Restrict the file to `COUNTRIES` (requires it to be set) |
+| `SERVERS_ONLY_ALLOWED_COUNTRIES` | `false` | Restrict the file to `FILTER_COUNTRIES` (requires it to be set) |
 
 ### Filtering
 
 | Variable | Default | Description |
 |---|---|---|
-| `COUNTRIES` | *all* | Allow-list; accepts codes or names (`SE`, `Sweden`, `netherlands`) |
-| `EXCLUDE_COUNTRIES` | – | Applied after `COUNTRIES` |
-| `CITIES` | *all* | City allow-list |
-| `MAX_LOAD` | `90` | Drop servers above this utilisation |
-| `VPN_TYPE` | `auto` | `auto` follows Gluetun's protocol; or `wireguard` / `openvpn` |
-| `SECURE_CORE` | `exclude` | `include` / `exclude` / `only` |
-| `TOR` | `exclude` | `include` / `exclude` / `only` |
-| `P2P` | `include` | `include` / `exclude` / `only` (Proton only forwards ports on P2P servers) |
-| `STREAM` | `include` | `include` / `exclude` / `only` |
-| `FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
-| `IPV6` | `include` | `include` / `exclude` / `only` — Proton's IPv6 capability flag. `only` restricts the tunnel to IPv6-capable servers. Distinct from `SERVERS_INCLUDE_IPV6`, which only decides whether a v6 *entry address* is written for Gluetun. |
+| `FILTER_COUNTRIES` | *all* | Allow-list; accepts codes or names (`SE`, `Sweden`, `netherlands`) |
+| `FILTER_EXCLUDE_COUNTRIES` | – | Applied after `FILTER_COUNTRIES` |
+| `FILTER_CITIES` | *all* | City allow-list |
+| `FILTER_MAX_LOAD` | `90` | Drop servers above this utilisation |
+| `FILTER_VPN_TYPE` | `auto` | `auto` follows Gluetun's protocol; or `wireguard` / `openvpn` |
+| `FILTER_SECURE_CORE` | `exclude` | `include` / `exclude` / `only` |
+| `FILTER_TOR` | `exclude` | `include` / `exclude` / `only` |
+| `FILTER_P2P` | `include` | `include` / `exclude` / `only` (Proton only forwards ports on P2P servers) |
+| `FILTER_STREAM` | `include` | `include` / `exclude` / `only` |
+| `FILTER_FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
+| `FILTER_IPV6` | `include` | `include` / `exclude` / `only` — Proton's IPv6 capability flag. `only` restricts the tunnel to IPv6-capable servers. Distinct from `SERVERS_INCLUDE_IPV6`, which only decides whether a v6 *entry address* is written for Gluetun. |
 
 #### P2P servers are only required when Gluetun asks for a forwarded port
 
@@ -799,7 +824,7 @@ is unambiguous:
 | `on` | `off` | `port_forward_only` | `VPN_PORT_FORWARDING` | the P2P server at 40 % load — a non-P2P one could never get the port |
 | `off` | `off` | none | — | the quieter non-P2P server at 5 % |
 
-Nothing is narrowed when port forwarding is off. `P2P` remains a separate,
+Nothing is narrowed when port forwarding is off. `FILTER_P2P` remains a separate,
 independent preference (`include` by default) if you want to require or avoid P2P
 servers regardless of what Gluetun asks for.
 
@@ -830,7 +855,7 @@ server "node-se-plain.protonvpn.net" cannot be used: gluetun enforces port_forwa
 ```
 
 Only Gluetun-enforced exclusions are listed this way, capped at 25 rows. Servers you
-excluded yourself — `COUNTRIES`, `MAX_LOAD`, a feature filter — are counted in the
+excluded yourself — `FILTER_COUNTRIES`, `FILTER_MAX_LOAD`, a feature filter — are counted in the
 **Filtering** panel instead, because you already know about those and listing them
 would bury the useful rows under hundreds of self-inflicted ones.
 

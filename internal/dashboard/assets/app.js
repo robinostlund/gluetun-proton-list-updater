@@ -170,6 +170,45 @@ function parseCoordinates(location) {
   return [lat, lon];
 }
 
+// sparkline draws a utilisation trace as inline SVG.
+//
+// Inline because the page is self-contained - no charting library, no CDN - and because
+// a trace this small needs nothing more. The y-axis is pinned to 0-100 rather than to the
+// data: a server that stayed between 40% and 44% should look flat, not volatile, and the
+// whole point is judging load against the thresholds that act on it.
+function sparkline(trace) {
+  if (trace.length < 2) {
+    return '<span class="muted">not enough history yet</span>';
+  }
+
+  const width = 240;
+  const height = 34;
+  const first = new Date(trace[0].at).getTime();
+  const last = new Date(trace[trace.length - 1].at).getTime();
+  const span = Math.max(1, last - first);
+
+  const points = trace.map((point) => {
+    const x = ((new Date(point.at).getTime() - first) / span) * width;
+    const y = height - (Math.min(100, Math.max(0, point.load)) / 100) * height;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+
+  const latest = trace[trace.length - 1].load;
+  const stroke = latest >= 80 ? 'var(--bad)' : latest >= 60 ? 'var(--warn)' : 'var(--good)';
+  const hours = ((last - first) / 3600000).toFixed(1);
+  const loads = trace.map((point) => point.load);
+  const label = `${trace.length} readings over ${hours}h — `
+    + `low ${Math.min(...loads)}%, high ${Math.max(...loads)}%, now ${latest}%`;
+
+  return `<svg class="spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"`
+    + ` role="img" aria-label="${escapeHTML(label)}"><title>${escapeHTML(label)}</title>`
+    // A 50% guide, so the height of the line means something without axis labels.
+    + `<line x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"`
+    + ` stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>`
+    + `<polyline fill="none" stroke="${stroke}" stroke-width="1.5"`
+    + ` stroke-linejoin="round" points="${points.join(' ')}"/></svg>`;
+}
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -375,6 +414,23 @@ function renderCurrent() {
   text('current-rank', current && current.rank
     ? `#${current.rank} of ${snapshot.candidates_total}`
     : current && current.excluded ? 'not in allowed set' : '–');
+
+  // How long the tunnel has been where it is - the quickest answer to "is it flapping?".
+  // Blank unless this tool put it there: if Gluetun moved on its own, or the tunnel was
+  // already up at startup, the arrival time is genuinely unknown.
+  const since = snapshot.selection.on_current_since;
+  if (since && !since.startsWith('0001-01-01')) {
+    const seconds = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
+    text('current-since', humanize(seconds));
+    el('current-since').title = `Switched here at ${since}.`;
+  } else {
+    text('current-since', 'unknown');
+    el('current-since').title =
+      'Only known when this tool made the switch. Gluetun may have moved on its own, or '
+      + 'the tunnel was already up when this container started.';
+  }
+
+  el('current-trace').innerHTML = sparkline(snapshot.selection.load_trace || []);
   // Whether Gluetun even asks for a port distinguishes "not yet" from "never".
   const ports = gluetun.forwarded_ports || [];
   const requested = gluetun.port_forwarding_enabled;
@@ -382,19 +438,6 @@ function renderCurrent() {
     ? ports.join(', ') + (snapshot.gluetun.exit_current ? '' : ' (last seen)')
     : requested === false ? 'not requested' : 'none');
 
-  // A short value, with the reasoning available on hover rather than as a paragraph.
-  const sources = {
-    'pinned': ["Gluetun's own selection", "Read from Gluetun's server selection, which is exact."],
-    'remembered': ['remembered pin', 'The hostname this tool last pinned; Gluetun could not be asked.'],
-    'public-ip': ['public IP match',
-      "Matched Gluetun's public IP to a Proton exit address — a weak signal, since Proton " +
-      'publishes the server address rather than the observed one.'],
-    'unknown': ['unknown',
-      'The tunnel may be down, or the server is not in Proton’s current list.'],
-  };
-  const [label, why] = sources[snapshot.selection.current_source] || ['–', ''];
-  text('current-source', label);
-  if (why) el('current-source').title = why;
 }
 
 function renderBest() {
@@ -476,7 +519,14 @@ function parseDuration(value) {
 
 function renderGluetun() {
   const gluetun = snapshot.gluetun;
-  text('gluetun-status', gluetun.status || 'unknown');
+  // Distinct from Connected: the control server can answer perfectly well while the
+  // tunnel itself is stopped or crashed.
+  const status = gluetun.status || 'unknown';
+  el('gluetun-status').innerHTML = status === 'running'
+    ? `<span class="ok">${escapeHTML(status)}</span>`
+    : status === 'crashed'
+      ? `<span class="no">${escapeHTML(status)}</span>`
+      : `<span class="muted">${escapeHTML(status)}</span>`;
   boolRow('gluetun-reachable', gluetun.reachable);
   outcome('gluetun-outcome', !gluetun.last_check.startsWith('0001-01-01'),
     !gluetun.reachable || Boolean(gluetun.last_error), gluetun.last_error);
@@ -595,13 +645,12 @@ function renderGluetunDetail() {
 function renderProton() {
   const proton = snapshot.proton;
   text('proton-count', proton.logicals_count ? String(proton.logicals_count) : '–');
-  // What the filters removed, which is the question the raw counts prompt.
+  // What the filters removed, which is the question the raw counts prompt. Derived from
+  // the same pair the Filtering band breaks down, so the two can never disagree.
   const stats = snapshot.stats || {};
-  const kept = snapshot.candidates_total || 0;
   const physical = stats.physical_total || 0;
-  text('proton-filtered', physical
-    ? `${physical - kept} of ${physical} physical servers`
-    : '–');
+  const kept = stats.physical_kept || 0;
+  text('proton-filtered', physical ? `${physical - kept} of ${physical} physical` : '–');
   el('proton-filtered').title =
     'Physical servers Proton listed, minus those that survived every filter. The Filtering '
     + 'band below breaks down which rule removed what.';
@@ -836,17 +885,20 @@ function renderHistory() {
 function renderSettings() {
   const settings = snapshot.settings;
   const entries = [
-    ['Countries', (settings.countries || []).join(', ') || 'all'],
-    ['Excluded', (settings.exclude_countries || []).join(', ') || 'none'],
-    ['Cities', (settings.cities || []).join(', ') || 'all'],
-    ['Max load', `${settings.max_load}%`],
-    ['Protocol', settings.vpn_type],
-    ['Secure core', settings.secure_core],
-    ['Tor', settings.tor],
-    ['P2P', settings.p2p],
-    ['IPv6', settings.ipv6_filter],
-    ['Streaming', settings.stream],
-    ['Free tier', settings.free_tier],
+    // Prefixed after the variables that set them, so a row maps to a FILTER_* name
+    // without translation - and so this panel's "Protocol" stops colliding with the
+    // Gluetun card's, which reports the protocol actually in use rather than the filter.
+    ['Filter: countries', (settings.countries || []).join(', ') || 'all'],
+    ['Filter: excluded countries', (settings.exclude_countries || []).join(', ') || 'none'],
+    ['Filter: cities', (settings.cities || []).join(', ') || 'all'],
+    ['Filter: max load', `${settings.max_load}%`],
+    ['Filter: VPN type', settings.vpn_type],
+    ['Filter: secure core', settings.secure_core],
+    ['Filter: Tor', settings.tor],
+    ['Filter: P2P', settings.p2p],
+    ['Filter: IPv6', settings.ipv6_filter],
+    ['Filter: stream', settings.stream],
+    ['Filter: free tier', settings.free_tier],
     ['Load weight', settings.load_weight],
     ['Latency weight', settings.latency_weight],
     ['Proton weight', settings.proton_weight],
@@ -868,10 +920,11 @@ function renderSettings() {
 
 function renderStats() {
   const stats = snapshot.stats || {};
+  // Only the breakdown. The totals are rows of their own above - "Logical servers",
+  // "Candidates", "Filtered out" - and repeating them here as "kept of total" said the
+  // same thing a second way.
   const entries = [
-    ['Logical servers', `${stats.logicals_kept || 0} of ${stats.logicals_total || 0}`],
-    ['Physical servers', `${stats.physical_kept || 0} of ${stats.physical_total || 0}`],
-    ['Skipped: disabled', stats.disabled_skipped || 0],
+    ['Skipped: disabled by Proton', stats.disabled_skipped || 0],
     ['Skipped: duplicate IP', stats.duplicate_skipped || 0],
     ['Skipped: above account tier', stats.above_tier_skipped || 0],
     ['Secure core available', stats.secure_core_total || 0],

@@ -732,6 +732,8 @@ func (e *Engine) publish() {
 	// nextRuns reads the published snapshot, so it must be computed before
 	// taking the write lock: sync.RWMutex is not reentrant.
 	nextRuns := e.nextRuns()
+	onCurrentSince := e.onCurrentSince(currentHostname)
+	loadTrace := e.loadTrace(currentHostname)
 
 	// Same reason, and the same rule: transferView reads Gluetun's forwarded ports
 	// out of the snapshot. Recomputing it here is what keeps the port-forwarding
@@ -773,6 +775,8 @@ func (e *Engine) publish() {
 		snapshot.Selection.MinImprovement = e.cfg.Switch.MinImprovement
 		snapshot.Selection.LastSwitchAt = persisted.LastSwitchAt
 		snapshot.Selection.CooldownRemaining = formatDuration(e.cooldownRemaining())
+		snapshot.Selection.OnCurrentSince = onCurrentSince
+		snapshot.Selection.LoadTrace = loadTrace
 		snapshot.NextRuns = nextRuns
 	})
 }
