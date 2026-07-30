@@ -393,7 +393,7 @@ func (e *Engine) detectSchemaVersion() {
 		e.schemaVersion = config.DefaultSchemaVersion
 		e.logger.Info("Gluetun has not written server data yet, using the default schema version",
 			"version", e.schemaVersion,
-			"hint", "if Gluetun logs that servers were discarded, set SERVERS_SCHEMA_VERSION to the version it reports")
+			"hint", "if Gluetun logs that servers were discarded, set GLUETUN_SERVERS_SCHEMA_VERSION to the version it reports")
 	}
 }
 

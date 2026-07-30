@@ -144,6 +144,21 @@ func (c *Client) Reconnect(ctx context.Context) (outcome string, err error) {
 	return outcome, nil
 }
 
+// SetDNSStatus starts or stops Gluetun's DNS-over-TLS resolver.
+//
+// PUT /v1/dns/status takes the same shape as the VPN one, and like it applies the change
+// synchronously - so the mutation timeout applies rather than the read timeout.
+func (c *Client) SetDNSStatus(ctx context.Context, status string) (outcome string, err error) {
+	var response struct {
+		Outcome string `json:"outcome"`
+	}
+	body := map[string]string{"status": status}
+	if err := c.mutate(ctx, http.MethodPut, "/v1/dns/status", body, &response); err != nil {
+		return "", err
+	}
+	return response.Outcome, nil
+}
+
 // Updater status values.
 const (
 	UpdaterRunning   = "running"

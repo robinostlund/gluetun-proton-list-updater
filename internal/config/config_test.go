@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -126,18 +128,18 @@ func TestLoadRejectsUnknownCountry(t *testing.T) {
 func TestLoadValidatesRanges(t *testing.T) {
 	tests := map[string]map[string]string{
 		"max load too high":       {"FILTER_MAX_LOAD": "150"},
-		"zero weights":            {"SCORE_LOAD_WEIGHT": "0", "SCORE_LATENCY_WEIGHT": "0", "SCORE_PROTON_WEIGHT": "0"},
+		"zero weights":            {"SCORING_LOAD_WEIGHT": "0", "SCORING_LATENCY_WEIGHT": "0", "SCORING_PROTON_WEIGHT": "0"},
 		"bad port":                {"LATENCY_PORT": "70000"},
 		"smoothing out of range":  {"LATENCY_SMOOTHING": "2"},
 		"refresh far too often":   {"PROTON_REFRESH_INTERVAL": "10s"},
 		"loads far too often":     {"PROTON_LOAD_REFRESH_INTERVAL": "5s"},
-		"bad reconnect mode":      {"RECONNECT_MODE": "teleport"},
-		"bad boolean":             {"AUTO_SWITCH": "perhaps"},
-		"bad duration":            {"SWITCH_COOLDOWN": "soon"},
+		"bad reconnect mode":      {"SWITCHING_MODE": "teleport"},
+		"bad boolean":             {"SWITCHING_AUTO": "perhaps"},
+		"bad duration":            {"SWITCHING_COOLDOWN": "soon"},
 		"dashboard half-auth":     {"DASHBOARD_USERNAME": "admin"},
 		"both gluetun auth kinds": {"GLUETUN_API_KEY": "k", "GLUETUN_USERNAME": "u", "GLUETUN_PASSWORD": "p"},
 		"bad gluetun url":         {"GLUETUN_URL": "gluetun:8000"},
-		"switch candidates zero":  {"SWITCH_CANDIDATES": "0"},
+		"switch candidates zero":  {"SWITCHING_CANDIDATES": "0"},
 	}
 
 	for name, env := range tests {
@@ -155,7 +157,7 @@ func TestLoadValidatesRanges(t *testing.T) {
 
 func TestLoadOnlyAllowedCountriesNeedsCountries(t *testing.T) {
 	setMinimal(t)
-	t.Setenv("SERVERS_ONLY_ALLOWED_COUNTRIES", "true")
+	t.Setenv("GLUETUN_SERVERS_ONLY_ALLOWED_COUNTRIES", "true")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("expected an error when the option is set without COUNTRIES")
@@ -165,31 +167,31 @@ func TestLoadOnlyAllowedCountriesNeedsCountries(t *testing.T) {
 func TestLoadAcceptsFullConfiguration(t *testing.T) {
 	setMinimal(t)
 	for key, value := range map[string]string{
-		"FILTER_COUNTRIES":             "Sweden,Norway",
-		"FILTER_EXCLUDE_COUNTRIES":     "Norway",
-		"FILTER_CITIES":                "Stockholm",
-		"FILTER_MAX_LOAD":              "70",
-		"FILTER_VPN_TYPE":              "wireguard",
-		"FILTER_SECURE_CORE":           "only",
-		"FILTER_TOR":                   "include",
-		"FILTER_P2P":                   "only",
-		"FILTER_FREE_TIER":             "exclude",
-		"SCORE_LOAD_WEIGHT":            "2",
-		"SCORE_LATENCY_WEIGHT":         "1.5",
-		"SCORE_PROTON_WEIGHT":          "0.25",
-		"SCORE_LATENCY_CEILING":        "120ms",
-		"LATENCY_TOP_N":                "40",
-		"AUTO_SWITCH":                  "false",
-		"RECONNECT_MODE":               "status",
-		"SWITCH_LOAD_TRIGGER":          "75",
-		"SERVERS_WRITE_MODE":           "replace",
-		"SERVERS_SCHEMA_VERSION":       "5",
-		"SERVERS_INCLUDE_IPV6":         "yes",
-		"DASHBOARD_USERNAME":           "admin",
-		"DASHBOARD_PASSWORD":           "hunter2",
-		"LOG_LEVEL":                    "debug",
-		"LOG_FORMAT":                   "json",
-		"PROTON_LOAD_REFRESH_INTERVAL": "5m",
+		"FILTER_COUNTRIES":               "Sweden,Norway",
+		"FILTER_EXCLUDE_COUNTRIES":       "Norway",
+		"FILTER_CITIES":                  "Stockholm",
+		"FILTER_MAX_LOAD":                "70",
+		"FILTER_VPN_TYPE":                "wireguard",
+		"FILTER_SECURE_CORE":             "only",
+		"FILTER_TOR":                     "include",
+		"FILTER_P2P":                     "only",
+		"FILTER_FREE_TIER":               "exclude",
+		"SCORING_LOAD_WEIGHT":            "2",
+		"SCORING_LATENCY_WEIGHT":         "1.5",
+		"SCORING_PROTON_WEIGHT":          "0.25",
+		"SCORING_LATENCY_CEILING":        "120ms",
+		"LATENCY_TOP_N":                  "40",
+		"SWITCHING_AUTO":                 "false",
+		"SWITCHING_MODE":                 "status",
+		"SWITCHING_LOAD_TRIGGER":         "75",
+		"GLUETUN_SERVERS_WRITE_MODE":     "replace",
+		"GLUETUN_SERVERS_SCHEMA_VERSION": "5",
+		"GLUETUN_SERVERS_INCLUDE_IPV6":   "yes",
+		"DASHBOARD_USERNAME":             "admin",
+		"DASHBOARD_PASSWORD":             "hunter2",
+		"LOG_LEVEL":                      "debug",
+		"LOG_FORMAT":                     "json",
+		"PROTON_LOAD_REFRESH_INTERVAL":   "5m",
 	} {
 		t.Setenv(key, value)
 	}
@@ -301,7 +303,7 @@ func TestQBittorrentConfigurationIsValidated(t *testing.T) {
 			name: "both thresholds disabled",
 			env: map[string]string{
 				"QBITTORRENT_URL": "http://qb:8080", "QBITTORRENT_API_KEY": "qbt_x",
-				"SWITCH_BUSY_DOWNLOAD": "0", "SWITCH_BUSY_UPLOAD": "0",
+				"SWITCHING_BUSY_DOWNLOAD": "0", "SWITCHING_BUSY_UPLOAD": "0",
 			},
 			wantErr: "no transfer would ever defer a switch",
 		},
@@ -376,7 +378,7 @@ func TestNonFiniteNumbersAreRejected(t *testing.T) {
 
 // The same class of bug in the float reader, which the scoring weights use.
 func TestNonFiniteScoringWeightsAreRejected(t *testing.T) {
-	for _, key := range []string{"SCORE_LOAD_WEIGHT", "SCORE_LATENCY_WEIGHT", "SCORE_PROTON_WEIGHT"} {
+	for _, key := range []string{"SCORING_LOAD_WEIGHT", "SCORING_LATENCY_WEIGHT", "SCORING_PROTON_WEIGHT"} {
 		for _, value := range []string{"nan", "inf"} {
 			t.Run(key+"="+value, func(t *testing.T) {
 				t.Setenv("PROTON_USERNAME", "user")
@@ -402,10 +404,10 @@ func TestANonFiniteBusyThresholdIsRejected(t *testing.T) {
 	t.Setenv("PROTON_PASSWORD", "pass")
 	t.Setenv("QBITTORRENT_URL", "http://qb:8080")
 	t.Setenv("QBITTORRENT_API_KEY", "qbt_x")
-	t.Setenv("SWITCH_BUSY_DOWNLOAD", "nan")
+	t.Setenv("SWITCHING_BUSY_DOWNLOAD", "nan")
 
 	if _, err := Load(); err == nil {
-		t.Fatal("SWITCH_BUSY_DOWNLOAD=nan was accepted; it would never be exceeded")
+		t.Fatal("SWITCHING_BUSY_DOWNLOAD=nan was accepted; it would never be exceeded")
 	}
 }
 
@@ -417,7 +419,7 @@ func TestTheBusyWindowMustHoldMoreThanOneSample(t *testing.T) {
 	t.Setenv("QBITTORRENT_URL", "http://qb:8080")
 	t.Setenv("QBITTORRENT_API_KEY", "qbt_x")
 	t.Setenv("QBITTORRENT_INTERVAL", "15s")
-	t.Setenv("SWITCH_BUSY_WINDOW", "5s")
+	t.Setenv("SWITCHING_BUSY_WINDOW", "5s")
 
 	_, err := Load()
 	if err == nil {
@@ -434,7 +436,7 @@ func TestAZeroBusyWindowIsAllowed(t *testing.T) {
 	t.Setenv("PROTON_PASSWORD", "pass")
 	t.Setenv("QBITTORRENT_URL", "http://qb:8080")
 	t.Setenv("QBITTORRENT_API_KEY", "qbt_x")
-	t.Setenv("SWITCH_BUSY_WINDOW", "0")
+	t.Setenv("SWITCHING_BUSY_WINDOW", "0")
 
 	cfg, err := Load()
 	if err != nil {
@@ -506,3 +508,110 @@ func TestValidationErrorsNameTheCurrentVariable(t *testing.T) {
 
 // The rename is a hard break, and a removed name is refused rather than ignored.
 //
+
+// Every variable belongs to a named group, so its prefix says what it configures.
+//
+// This was not always so: the selection filters were bare names (COUNTRIES, TOR, P2P) and
+// the server-data settings were SERVERS_*, which read as though they described servers in
+// general rather than the data written for Gluetun. Both are grouped now, and this keeps
+// the next addition from drifting back.
+func TestEveryVariableBelongsToAGroup(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	groups := []string{
+		"PROTON_",      // the Proton API and account
+		"GLUETUN_",     // the Gluetun container, including the data written for it
+		"FILTER_",      // which servers may be selected
+		"SCORING_",     // how survivors are ranked
+		"LATENCY_",     // the latency prober
+		"SWITCHING_",   // when the tunnel may be moved
+		"QBITTORRENT_", // transfer awareness
+		"DASHBOARD_",   // the web UI
+		"LOG_",         // logging
+	}
+	// Standalone names that belong to no group because there is only ever one of them.
+	standalone := map[string]bool{
+		"STATE_DIR": true, "TZ": true,
+	}
+
+	var ungrouped []string
+	seen := map[string]bool{}
+	pattern := `r\.(?:str|choice|integer|boolean|duration|float|csv|required|byteRate)\("([A-Z_0-9]+)"`
+	for _, match := range regexp.MustCompile(pattern).FindAllSubmatch(source, -1) {
+		name := string(match[1])
+		if seen[name] || standalone[name] {
+			continue
+		}
+		seen[name] = true
+		grouped := false
+		for _, prefix := range groups {
+			if strings.HasPrefix(name, prefix) {
+				grouped = true
+				break
+			}
+		}
+		if !grouped {
+			ungrouped = append(ungrouped, name)
+		}
+	}
+	sort.Strings(ungrouped)
+	if len(ungrouped) > 0 {
+		t.Errorf("these variables belong to no group: %v\n"+
+			"prefix each with one of %v, or add it to the standalone list with a reason",
+			ungrouped, groups)
+	}
+	if len(seen) < 60 {
+		t.Fatalf("only found %d variables; the pattern is wrong", len(seen))
+	}
+
+	// The server-data settings are Gluetun's, and named so.
+	for _, name := range []string{
+		"GLUETUN_SERVERS_FILE", "GLUETUN_SERVERS_DIR", "GLUETUN_SERVERS_WRITE_MODE",
+		"GLUETUN_SERVERS_PREFERRED", "GLUETUN_SERVERS_SCHEMA_VERSION",
+		"GLUETUN_SERVERS_ONLY_ALLOWED_COUNTRIES", "GLUETUN_SERVERS_INCLUDE_IPV6",
+	} {
+		if !seen[name] {
+			t.Errorf("%s is not read; the rename left something behind", name)
+		}
+	}
+	// And the old bare names are gone entirely.
+	if regexp.MustCompile(`r\.\w+\("SERVERS_`).Match(source) {
+		t.Error("a bare SERVERS_* variable is back")
+	}
+}
+
+// The new names are what actually configure the writer.
+func TestGluetunServersVariablesAreRead(t *testing.T) {
+	t.Setenv("PROTON_USERNAME", "user")
+	t.Setenv("PROTON_PASSWORD", "pass")
+	t.Setenv("GLUETUN_SERVERS_FILE", "/gluetun/custom.json")
+	t.Setenv("GLUETUN_SERVERS_DIR", "/gluetun/custom-servers")
+	t.Setenv("GLUETUN_SERVERS_WRITE_MODE", "replace")
+	t.Setenv("GLUETUN_SERVERS_PREFERRED", "false")
+	t.Setenv("GLUETUN_SERVERS_INCLUDE_IPV6", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Servers.FilePath != "/gluetun/custom.json" {
+		t.Errorf("FilePath = %q", cfg.Servers.FilePath)
+	}
+	if cfg.Servers.DirPath != "/gluetun/custom-servers" {
+		t.Errorf("DirPath = %q", cfg.Servers.DirPath)
+	}
+	if cfg.Servers.WriteMode != WriteModeReplace {
+		t.Errorf("WriteMode = %q", cfg.Servers.WriteMode)
+	}
+	if cfg.Servers.Preferred {
+		t.Error("Preferred should be false")
+	}
+	if !cfg.Servers.IncludeIPv6 {
+		t.Error("IncludeIPv6 should be true")
+	}
+}

@@ -95,6 +95,18 @@ func (s *stubController) ClearHistory(_ context.Context) error {
 	return s.record("clear-history")
 }
 
+func (s *stubController) RunUpdater(_ context.Context) error {
+	return s.record("run-updater")
+}
+
+func (s *stubController) SetVPN(_ context.Context, status string) error {
+	return s.record("set-vpn:" + status)
+}
+
+func (s *stubController) SetDNS(_ context.Context, status string) error {
+	return s.record("set-dns:" + status)
+}
+
 func (s *stubController) SubmitTOTP(code string) bool {
 	_ = s.record("totp:" + code)
 	return s.totpAccepts
@@ -1904,5 +1916,134 @@ func TestTimeOnCurrentServerAdmitsWhenUnknown(t *testing.T) {
 	}
 	if !bytes.Contains(script, []byte("'unknown'")) {
 		t.Error("an unknown arrival time should say unknown")
+	}
+}
+
+// Lifecycle words are coloured the same way wherever they appear. The DNS row was plain
+// text beside a coloured VPN row, which made two facts of the same kind look like
+// different kinds of fact.
+func TestLifecycleStatesAreColouredConsistently(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(script, []byte("function stateSpan(state)")) {
+		t.Fatal("there is no shared helper for lifecycle states")
+	}
+	// Both rows go through it, rather than one being plain text.
+	for _, id := range []string{"gluetun-status", "gluetun-dns"} {
+		if !bytes.Contains(script, []byte("el('"+id+"').innerHTML = stateSpan(")) {
+			t.Errorf("%s is not rendered through stateSpan", id)
+		}
+	}
+	// And the state is in words as well as colour.
+	helper := regexp.MustCompile(`(?s)function stateSpan\(state\) \{.*?\n\}`).Find(script)
+	if helper == nil {
+		t.Fatal("could not find stateSpan")
+	}
+	for _, fragment := range []string{"'running'", "'crashed'", "escapeHTML(value)"} {
+		if !bytes.Contains(helper, []byte(fragment)) {
+			t.Errorf("stateSpan does not handle %s", fragment)
+		}
+	}
+}
+
+// The Gluetun card can drive Gluetun's own loops. The status comes from the body so the
+// two directions share one route, and it is validated here as well as in the engine: an
+// unknown value should be a bad request, not something Gluetun has to reject.
+func TestGluetunLifecycleEndpoints(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name     string
+		path     string
+		body     string
+		wantCode int
+		wantCall string
+	}{
+		{"start the vpn", "/api/gluetun/vpn", `{"status":"running"}`, http.StatusOK, "set-vpn:running"},
+		{"stop the vpn", "/api/gluetun/vpn", `{"status":"stopped"}`, http.StatusOK, "set-vpn:stopped"},
+		{"start dns", "/api/gluetun/dns", `{"status":"running"}`, http.StatusOK, "set-dns:running"},
+		{"stop dns", "/api/gluetun/dns", `{"status":"stopped"}`, http.StatusOK, "set-dns:stopped"},
+		{"run the updater", "/api/gluetun/updater", `{}`, http.StatusAccepted, "run-updater"},
+		// A status Gluetun would refuse must not reach it.
+		{"a status that is neither", "/api/gluetun/vpn", `{"status":"paused"}`, http.StatusBadRequest, ""},
+		{"no status at all", "/api/gluetun/dns", `{}`, http.StatusBadRequest, ""},
+		// An unknown field is a client bug, not an intention.
+		{"an unknown field", "/api/gluetun/vpn", `{"state":"running"}`, http.StatusBadRequest, ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			stub := newStub()
+			server := newTestServer(t, stub, Options{})
+
+			response, err := server.Client().Post(server.URL+testCase.path,
+				"application/json", strings.NewReader(testCase.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+
+			if response.StatusCode != testCase.wantCode {
+				t.Errorf("status = %d, want %d", response.StatusCode, testCase.wantCode)
+			}
+			if testCase.wantCall == "" {
+				if calls := stub.recorded(); len(calls) != 0 {
+					t.Errorf("the engine was called with %v for a rejected request", calls)
+				}
+				return
+			}
+			if !containsString(stub.recorded(), testCase.wantCall) {
+				t.Errorf("calls = %v, want %q", stub.recorded(), testCase.wantCall)
+			}
+		})
+	}
+}
+
+// The buttons live in the Gluetun card, next to the state they change, and the
+// destructive one asks first.
+func TestTheGluetunCardHasItsOwnControls(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	card := regexp.MustCompile(`(?s)<h2>Gluetun</h2>.*?</article>`).Find(page)
+	if card == nil {
+		t.Fatal("could not find the Gluetun card")
+	}
+	for _, want := range []string{
+		`data-lifecycle="/api/gluetun/vpn" data-status="running"`,
+		`data-lifecycle="/api/gluetun/vpn" data-status="stopped"`,
+		`data-lifecycle="/api/gluetun/dns" data-status="running"`,
+		`data-lifecycle="/api/gluetun/dns" data-status="stopped"`,
+		`data-action="/api/gluetun/updater"`,
+	} {
+		if !bytes.Contains(card, []byte(want)) {
+			t.Errorf("the card is missing a control: %s", want)
+		}
+	}
+
+	// Stopping the VPN drops every connection through it, so it confirms first.
+	stopVPN := regexp.MustCompile(`(?s)data-lifecycle="/api/gluetun/vpn" data-status="stopped".*?>`).Find(card)
+	if stopVPN == nil || !bytes.Contains(stopVPN, []byte("data-confirm=")) {
+		t.Error("stopping the VPN does not ask for confirmation")
+	}
+	if !bytes.Contains(script, []byte("if (confirmation && !confirm(confirmation)) return;")) {
+		t.Error("the confirmation is not honoured")
+	}
+	// And the updater's tooltip has to say what it actually does, since the natural
+	// assumption is the opposite.
+	if !bytes.Contains(card, []byte("does not read the list written here")) {
+		t.Error("the Run updater button does not explain that it fetches Gluetun's own list")
 	}
 }

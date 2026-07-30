@@ -18,6 +18,9 @@ const (
 	commandWriteServers = "write-servers"
 	commandSetAuto      = "set-auto-switch"
 	commandClearHistory = "clear-history"
+	commandRunUpdater   = "run-updater"
+	commandSetVPN       = "set-vpn"
+	commandSetDNS       = "set-dns"
 )
 
 // command is a unit of work handed to the run loop. Results travel back over
@@ -26,7 +29,10 @@ type command struct {
 	kind     string
 	hostname string
 	enabled  bool
-	done     chan error
+	// status carries a Gluetun lifecycle value ("running" or "stopped") for the
+	// commands that start and stop one of its loops.
+	status string
+	done   chan error
 }
 
 // ErrBusy reports that the command queue is full, which means the engine is
@@ -87,6 +93,19 @@ func (e *Engine) handleCommand(ctx context.Context, cmd command) {
 	case commandWriteServers:
 		e.writeServersFile()
 		e.publish()
+	case commandRunUpdater:
+		// Reuses the reject-path helper, which also rewrites the servers file
+		// afterwards - Gluetun's updater flushes its own fetch over it.
+		if !e.refreshGluetunServerList(ctx) {
+			err = errors.New("gluetun's updater did not complete; check its own log, and that " +
+				"UPDATER_PROTONVPN_EMAIL and UPDATER_PROTONVPN_PASSWORD are set on that container")
+		}
+		e.checkGluetun(ctx)
+		e.publish()
+	case commandSetVPN:
+		err = e.setTunnelStatus(ctx, cmd.status)
+	case commandSetDNS:
+		err = e.setDNSStatus(ctx, cmd.status)
 	case commandClearHistory:
 		err = e.state.update(func(state *persistedState) { state.History = nil })
 		e.logger.Info("switch history cleared")
@@ -182,4 +201,22 @@ func (e *Engine) Healthy() (healthy bool, reason string) {
 	default:
 		return true, "ok"
 	}
+}
+
+// RunUpdater asks Gluetun to run its own server-list updater, and waits for it.
+//
+// Exposed because the reject path only reaches it when a switch has already failed, and
+// an operator who has just restarted Gluetun or added servers may want it now.
+func (e *Engine) RunUpdater(ctx context.Context) error {
+	return e.submit(ctx, command{kind: commandRunUpdater}, true)
+}
+
+// SetVPN starts or stops Gluetun's VPN loop.
+func (e *Engine) SetVPN(ctx context.Context, status string) error {
+	return e.submit(ctx, command{kind: commandSetVPN, status: status}, true)
+}
+
+// SetDNS starts or stops Gluetun's DNS-over-TLS resolver.
+func (e *Engine) SetDNS(ctx context.Context, status string) error {
+	return e.submit(ctx, command{kind: commandSetDNS, status: status}, true)
 }

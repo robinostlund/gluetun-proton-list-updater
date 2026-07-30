@@ -507,7 +507,7 @@ func (e *Engine) checkServerDataIsRead() {
 		"STORAGE_SERVERS_ENABLED=yes on the Gluetun container (its default), and requires the same " +
 		"/gluetun volume to be mounted into both containers - one of those two is not the case. " +
 		"Server switching still works meanwhile, but only across the list Gluetun has built in. " +
-		"If running without server storage is deliberate, set SERVERS_WRITE_MODE=none here to stop " +
+		"If running without server storage is deliberate, set GLUETUN_SERVERS_WRITE_MODE=none here to stop " +
 		"writing data nothing reads."
 
 	e.mutateSnapshot(func(snapshot *Snapshot) {

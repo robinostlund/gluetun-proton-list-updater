@@ -44,6 +44,9 @@ type Controller interface {
 	WriteServersFile(ctx context.Context) error
 	SetAutoSwitch(ctx context.Context, enabled bool) error
 	ClearHistory(ctx context.Context) error
+	RunUpdater(ctx context.Context) error
+	SetVPN(ctx context.Context, status string) error
+	SetDNS(ctx context.Context, status string) error
 	SubmitTOTP(code string) bool
 	Healthy() (healthy bool, reason string)
 }
@@ -133,6 +136,9 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("POST /api/auto-switch", s.handleAutoSwitch)
 	protected.HandleFunc("POST /api/history/clear", s.command("clear history", s.controller.ClearHistory))
 	protected.HandleFunc("POST /api/logs/clear", s.handleClearLogs)
+	protected.HandleFunc("POST /api/gluetun/updater", s.command("run updater", s.controller.RunUpdater))
+	protected.HandleFunc("POST /api/gluetun/vpn", s.lifecycle("vpn", s.controller.SetVPN))
+	protected.HandleFunc("POST /api/gluetun/dns", s.lifecycle("dns", s.controller.SetDNS))
 	protected.HandleFunc("POST /api/totp", s.handleTOTP)
 
 	mux.Handle("/", s.withAuth(protected))
@@ -397,4 +403,34 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(value)
+}
+
+// lifecycle builds a handler that starts or stops one of Gluetun's loops.
+//
+// The status is taken from the body rather than the path so the two actions share one
+// route, and it is validated here as well as in the engine: an unknown value should be a
+// bad request rather than something Gluetun has to reject.
+func (s *Server) lifecycle(name string, apply func(ctx context.Context, status string) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Status string `json:"status"`
+		}
+		if err := decodeJSON(r, &request); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if request.Status != "running" && request.Status != "stopped" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false,
+				"error": `status must be "running" or "stopped"`})
+			return
+		}
+
+		if err := apply(r.Context(), request.Status); err != nil {
+			s.logger.Warn("dashboard lifecycle command failed",
+				"target", name, "status", request.Status, "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "target": name, "status": request.Status})
+	}
 }

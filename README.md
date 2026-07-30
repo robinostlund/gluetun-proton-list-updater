@@ -48,7 +48,7 @@ list. Two details decide whether your data is actually used, and both are easy t
 
 | Requirement | What this tool does |
 |---|---|
-| The `protonvpn.version` must equal the version compiled into the running Gluetun, or Gluetun logs *"discarded because they have version X"* and silently ignores your file. | Reads the version back out of the `servers.json` Gluetun itself wrote, instead of hardcoding a number that rots. Override with `SERVERS_SCHEMA_VERSION`. |
+| The `protonvpn.version` must equal the version compiled into the running Gluetun, or Gluetun logs *"discarded because they have version X"* and silently ignores your file. | Reads the version back out of the `servers.json` Gluetun itself wrote, instead of hardcoding a number that rots. Override with `GLUETUN_SERVERS_SCHEMA_VERSION`. |
 | The `protonvpn.timestamp` must be newer than Gluetun's built-in one, because Gluetun merges by recency. | Always stamps the current time. |
 
 **Switching servers.** `PUT /v1/vpn/settings` with a one-hostname server selection makes Gluetun
@@ -142,7 +142,7 @@ Confirmed against `:latest`, which then logs:
 [storage] Using protonvpn servers from file (marked as preferred)
 ```
 
-That `preferred` flag (`SERVERS_PREFERRED`, on by default) is what makes it deterministic: Gluetun
+That `preferred` flag (`GLUETUN_SERVERS_PREFERRED`, on by default) is what makes it deterministic: Gluetun
 uses our list regardless of timestamps. Older versions ignore the unknown field harmlessly and fall
 back to the timestamp comparison.
 
@@ -218,7 +218,7 @@ if filePath != nil {
 
 Leave both unset (the defaults are what this tool expects), or use the current names:
 `STORAGE_SERVERS_ENABLED` and `STORAGE_SERVERS_DIRECTORY_PATH`. If you do move the directory, set
-`SERVERS_DIR` here to match. Trap 2 is caught by the check described next.
+`GLUETUN_SERVERS_DIR` here to match. Trap 2 is caught by the check described next.
 
 ### `STORAGE_SERVERS_ENABLED=yes` is required
 
@@ -245,7 +245,7 @@ containers, which is indistinguishable from the outside.
 If you genuinely want to run without server storage, that is supported: server *switching* does not
 need it (loads come from Proton's API, and the reconnect goes through the control server — verified
 against a Gluetun running with storage off). Gluetun then selects from the list embedded in its own
-build, so anything Proton added since that build is unusable. Set `SERVERS_WRITE_MODE=none` to stop
+build, so anything Proton added since that build is unusable. Set `GLUETUN_SERVERS_WRITE_MODE=none` to stop
 writing data nothing reads, and the warning and health failure go away.
 
 ### Two-factor authentication
@@ -323,7 +323,12 @@ Below it: the **Decision** in the engine's own words (`cooldown active for anoth
 thresholds behind it, what the selection is **restricted to** (P2P only, and which Gluetun setting
 caused it), and how the current server was **identified**.
 
-**Gluetun** — the tunnel, its exit address and the server data written for it, in one place. Tunnel
+**Gluetun** — the tunnel, its exit address, the server data written for it, and what Gluetun's own
+control server reports, in one place. It also carries **controls for Gluetun's own loops** — start
+and stop the VPN, start and stop its DNS-over-TLS resolver, and run its updater — placed next to the
+state they change. Stopping either leaves it stopped: the engine treats a stopped tunnel as a
+deliberate decision and never starts it behind you. Stopping the VPN asks first, since every
+connection through it drops. Tunnel
 status, version, protocol, provider, DNS; the public IP with its location, organisation and reverse
 DNS; then the layout, paths, schema version and write outcome of the data written for Gluetun.
 
@@ -400,12 +405,12 @@ bytes per second. `KB`/`MB`/`GB` are powers of ten and `KiB`/`MiB`/`GiB` powers 
 Traffic is bursty. A torrent that is plainly active drops to nothing between pieces, and a poll
 landing in one of those dips would report the tunnel idle and let a switch through mid-transfer —
 the exact interruption this exists to prevent. So the comparison uses the **mean over
-`SWITCH_BUSY_WINDOW`** (default `5m`), and the dashboard shows the instantaneous rates *and* the
+`SWITCHING_BUSY_WINDOW`** (default `5m`), and the dashboard shows the instantaneous rates *and* the
 averages, with the bars on the averages because those are what decide.
 
 A mean rather than a peak, deliberately: one spike should not hold the tunnel for a whole window,
 and an average over a few minutes is what distinguishes "in use" from "was used once recently". Set
-`SWITCH_BUSY_WINDOW=0` for the old single-reading behaviour.
+`SWITCHING_BUSY_WINDOW=0` for the old single-reading behaviour.
 
 Samples age out relative to the **last successful reading**, not to the clock. Measured from now, a
 qBittorrent that stopped answering would drain the window until the average fell below the threshold
@@ -422,11 +427,11 @@ never deferring anything.
 |---|---|
 | Automatic switching | deferred while either average is at or above its threshold |
 | **Reconnect to best** and per-row **Use** | always proceed — an explicit instruction is never overridden |
-| `SWITCH_LOAD_TRIGGER` (overloaded server) | also deferred: a slow transfer beats a broken one |
+| `SWITCHING_LOAD_TRIGGER` (overloaded server) | also deferred: a slow transfer beats a broken one |
 | Current server unknown | also deferred: that is no reason to break a transfer that is demonstrably flowing |
 | Tunnel **crashed** | **not** deferred — nothing is flowing through a tunnel that is down, so there is only a recovery to delay |
 
-`SWITCH_BUSY_MAX_DEFER` bounds the wait. It defaults to unset, meaning an active transfer always
+`SWITCHING_BUSY_MAX_DEFER` bounds the wait. It defaults to unset, meaning an active transfer always
 wins, which is the point of the feature. Set it (`2h`) if you would rather cap how stale the server
 choice can become on a permanently busy tunnel.
 
@@ -545,6 +550,9 @@ refused something, which is not the same as knowing nothing.
 | `POST` | `/api/auto-switch` | `{"enabled":true}` |
 | `POST` | `/api/history/clear` | Discard the persisted switch history |
 | `POST` | `/api/logs/clear` | Empty the in-memory activity log |
+| `POST` | `/api/gluetun/updater` | Run Gluetun's own server-list updater |
+| `POST` | `/api/gluetun/vpn` | `{"status":"running"}` or `{"status":"stopped"}` |
+| `POST` | `/api/gluetun/dns` | `{"status":"running"}` or `{"status":"stopped"}` |
 | `POST` | `/api/totp` | `{"code":"123456"}` |
 | `GET` | `/healthz` | Health check |
 
@@ -627,7 +635,7 @@ Latency probing is a plain TCP connect to the entry IP on port 443 (served by ev
 node for OpenVPN/TCP). No `NET_RAW`, no ICMP. Each server is sampled a few times and the
 **minimum** is kept — the least noisy statistic — then smoothed with an EWMA across sweeps so a
 single unlucky probe cannot trigger a reconnect. Unprobed servers get a neutral penalty (0.5) so
-they are neither favoured nor excluded. Set `SCORE_LATENCY_WEIGHT=0` for pure lowest-load
+they are neither favoured nor excluded. Set `SCORING_LATENCY_WEIGHT=0` for pure lowest-load
 selection.
 
 ## How often does it reconnect?
@@ -641,19 +649,19 @@ threshold means nothing happens unless a server is meaningfully better.
 
 | Guard | Default | What it does |
 |---|---|---|
-| `SWITCH_MIN_INTERVAL` | `5m` | **Hard floor. Nothing bypasses it**, not even an overloaded server. This is the guarantee on how often the tunnel can drop. |
-| `SWITCH_COOLDOWN` | `15m` | Normal spacing between automatic switches. Only the load trigger may skip it. |
-| `SWITCH_MIN_IMPROVEMENT` | `0.10` | The score gap the challenger must win by. With the default weights, 0.10 is roughly "10 % less loaded" or "15 ms closer". The main defence against flapping. |
-| `SWITCH_EVALUATION_INTERVAL` | `5m` | How often the decision is *considered*. Considering is free; only the guards above allow acting. An evaluation also runs immediately whenever Gluetun becomes usable, so a slow-starting Gluetun does not leave the tunnel unmanaged until the next tick. |
-| `SWITCH_LOAD_TRIGGER` | `85` | Skips the cooldown and the improvement threshold when the current server exceeds this load — but only if the best candidate is actually below it, so a night where everything is busy cannot turn into a reconnect loop. |
+| `SWITCHING_MIN_INTERVAL` | `5m` | **Hard floor. Nothing bypasses it**, not even an overloaded server. This is the guarantee on how often the tunnel can drop. |
+| `SWITCHING_COOLDOWN` | `15m` | Normal spacing between automatic switches. Only the load trigger may skip it. |
+| `SWITCHING_MIN_IMPROVEMENT` | `0.10` | The score gap the challenger must win by. With the default weights, 0.10 is roughly "10 % less loaded" or "15 ms closer". The main defence against flapping. |
+| `SWITCHING_EVALUATION_INTERVAL` | `5m` | How often the decision is *considered*. Considering is free; only the guards above allow acting. An evaluation also runs immediately whenever Gluetun becomes usable, so a slow-starting Gluetun does not leave the tunnel unmanaged until the next tick. |
+| `SWITCHING_LOAD_TRIGGER` | `85` | Skips the cooldown and the improvement threshold when the current server exceeds this load — but only if the best candidate is actually below it, so a night where everything is busy cannot turn into a reconnect loop. |
 
 Every switch is also **verified**, and verification failure does not retry: the attempt is
 recorded and the next evaluation is 5 minutes away. A mutation that times out is treated as
 "outcome unknown" and verified rather than re-sent, so a slow Gluetun cannot cause a double
 reconnect.
 
-To make it calmer still: raise `SWITCH_COOLDOWN` and `SWITCH_MIN_INTERVAL`, raise
-`SWITCH_MIN_IMPROVEMENT` (e.g. `0.25`), or set `SWITCH_LOAD_TRIGGER=0` to disable load-based
+To make it calmer still: raise `SWITCHING_COOLDOWN` and `SWITCHING_MIN_INTERVAL`, raise
+`SWITCHING_MIN_IMPROVEMENT` (e.g. `0.25`), or set `SWITCHING_LOAD_TRIGGER=0` to disable load-based
 switching. For a fully manual setup use `AUTO_SWITCH=false` and reconnect from the dashboard;
 `RECONNECT_MODE=none` never touches the tunnel at all and only maintains `servers.json`.
 
@@ -662,7 +670,7 @@ switching. For a fully manual setup use `AUTO_SWITCH=false` and reconnect from t
 Gluetun normally takes longer to come up than this container, so the first health
 checks find it unreachable and there is nothing to evaluate. As soon as it becomes
 usable — reachable, and either running or crashed — an evaluation runs immediately
-rather than waiting out `SWITCH_EVALUATION_INTERVAL`:
+rather than waiting out `SWITCHING_EVALUATION_INTERVAL`:
 
 ```
 INFO gluetun became usable, evaluating now rather than waiting for the next round
@@ -683,7 +691,7 @@ All of these must hold:
   block on it);
 - Gluetun is actually configured for ProtonVPN;
 - the minimum interval and the cooldown have elapsed;
-- the best server beats the current one by at least `SWITCH_MIN_IMPROVEMENT`.
+- the best server beats the current one by at least `SWITCHING_MIN_IMPROVEMENT`.
 
 A server the filters exclude (wrong country, over `FILTER_MAX_LOAD`) counts as "must move", and the
 dashboard shows the current server with a *not in allowed set* marker rather than hiding it.
@@ -712,7 +720,7 @@ added an hour ago is refused with `400` no matter how current `servers.json` is.
 
 The tool handles that in three escalating steps:
 
-1. **Try the next candidates** (`SWITCH_CANDIDATES`, default 3). Usually one of them is a server
+1. **Try the next candidates** (`SWITCHING_CANDIDATES`, default 3). Usually one of them is a server
    Gluetun already knows, and nothing is disrupted.
 2. **Ask Gluetun to refresh its own list** (`GLUETUN_REFRESH_SERVERS_ON_REJECT`, default `true`).
    This calls `PUT /v1/updater/status`, which makes Gluetun fetch from Proton and replace its
@@ -769,22 +777,22 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `QBITTORRENT_API_KEY` | – | API key from Preferences → Web UI → API keys. Required when the URL is set. |
 | `QBITTORRENT_INTERVAL` | `15s` | How often the rates are read. |
 | `QBITTORRENT_TIMEOUT` | `5s` | Per-request timeout. Must be shorter than the interval. |
-| `SWITCH_BUSY_DOWNLOAD` | `1MiB` | Defer automatic switching at or above this download rate. `0` disables this trigger. |
-| `SWITCH_BUSY_UPLOAD` | `1MiB` | Defer automatic switching at or above this upload rate. `0` disables this trigger. |
-| `SWITCH_BUSY_WINDOW` | `5m` | Average the rates over this period before comparing them. `0` uses the latest reading alone. |
-| `SWITCH_BUSY_MAX_DEFER` | unset | Cap on how long a transfer may defer switching. Unset means indefinitely. |
+| `SWITCHING_BUSY_DOWNLOAD` | `1MiB` | Defer automatic switching at or above this download rate. `0` disables this trigger. |
+| `SWITCHING_BUSY_UPLOAD` | `1MiB` | Defer automatic switching at or above this upload rate. `0` disables this trigger. |
+| `SWITCHING_BUSY_WINDOW` | `5m` | Average the rates over this period before comparing them. `0` uses the latest reading alone. |
+| `SWITCHING_BUSY_MAX_DEFER` | unset | Cap on how long a transfer may defer switching. Unset means indefinitely. |
 
 ### Server list output
 
 | Variable | Default | Description |
 |---|---|---|
-| `SERVERS_FILE` | `/gluetun/servers.json` | Gluetun's **legacy** fat file (used by v3.41.2) |
-| `SERVERS_DIR` | `/gluetun/servers` | Gluetun's **directory** layout (current versions). Which one is used is detected automatically |
-| `SERVERS_PREFERRED` | `true` | Set Gluetun's `preferred` flag, making it use our list regardless of timestamps |
-| `SERVERS_WRITE_MODE` | `update` | `update` keeps other providers' sections, `replace` writes only ProtonVPN, `none` disables writing |
-| `SERVERS_SCHEMA_VERSION` | *auto* | Override the detected schema version |
-| `SERVERS_INCLUDE_IPV6` | `false` | Include Proton's IPv6 entry addresses |
-| `SERVERS_ONLY_ALLOWED_COUNTRIES` | `false` | Restrict the file to `FILTER_COUNTRIES` (requires it to be set) |
+| `GLUETUN_SERVERS_FILE` | `/gluetun/servers.json` | Gluetun's **legacy** fat file (used by v3.41.2) |
+| `GLUETUN_SERVERS_DIR` | `/gluetun/servers` | Gluetun's **directory** layout (current versions). Which one is used is detected automatically |
+| `GLUETUN_SERVERS_PREFERRED` | `true` | Set Gluetun's `preferred` flag, making it use our list regardless of timestamps |
+| `GLUETUN_SERVERS_WRITE_MODE` | `update` | `update` keeps other providers' sections, `replace` writes only ProtonVPN, `none` disables writing |
+| `GLUETUN_SERVERS_SCHEMA_VERSION` | *auto* | Override the detected schema version |
+| `GLUETUN_SERVERS_INCLUDE_IPV6` | `false` | Include Proton's IPv6 entry addresses |
+| `GLUETUN_SERVERS_ONLY_ALLOWED_COUNTRIES` | `false` | Restrict the file to `FILTER_COUNTRIES` (requires it to be set) |
 
 ### Filtering
 
@@ -800,7 +808,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `FILTER_P2P` | `include` | `include` / `exclude` / `only` (Proton only forwards ports on P2P servers) |
 | `FILTER_STREAM` | `include` | `include` / `exclude` / `only` |
 | `FILTER_FREE_TIER` | `exclude` | `include` / `exclude` / `only` |
-| `FILTER_IPV6` | `include` | `include` / `exclude` / `only` — Proton's IPv6 capability flag. `only` restricts the tunnel to IPv6-capable servers. Distinct from `SERVERS_INCLUDE_IPV6`, which only decides whether a v6 *entry address* is written for Gluetun. |
+| `FILTER_IPV6` | `include` | `include` / `exclude` / `only` — Proton's IPv6 capability flag. `only` restricts the tunnel to IPv6-capable servers. Distinct from `GLUETUN_SERVERS_INCLUDE_IPV6`, which only decides whether a v6 *entry address* is written for Gluetun. |
 
 #### P2P servers are only required when Gluetun asks for a forwarded port
 
@@ -863,11 +871,11 @@ would bury the useful rows under hundreds of self-inflicted ones.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SCORE_LOAD_WEIGHT` | `1.0` | Weight of `load/100` |
-| `SCORE_LATENCY_WEIGHT` | `0.7` | Weight of normalised latency (`0` disables) |
-| `SCORE_PROTON_WEIGHT` | `0.0` | Weight of Proton's own score |
-| `SCORE_LATENCY_CEILING` | `150ms` | RTT that scores a full latency penalty |
-| `SCORE_UNKNOWN_LATENCY_PENALTY` | `0.5` | Assumed value for unprobed servers |
+| `SCORING_LOAD_WEIGHT` | `1.0` | Weight of `load/100` |
+| `SCORING_LATENCY_WEIGHT` | `0.7` | Weight of normalised latency (`0` disables) |
+| `SCORING_PROTON_WEIGHT` | `0.0` | Weight of Proton's own score |
+| `SCORING_LATENCY_CEILING` | `150ms` | RTT that scores a full latency penalty |
+| `SCORING_UNKNOWN_LATENCY_PENALTY` | `0.5` | Assumed value for unprobed servers |
 | `LATENCY_ENABLED` | `true` | Enable probing |
 | `LATENCY_PORT` | `443` | TCP port dialled |
 | `LATENCY_SAMPLES` | `3` | Samples per server (minimum is kept) |
@@ -881,15 +889,15 @@ would bury the useful rows under hundreds of self-inflicted ones.
 
 | Variable | Default | Description |
 |---|---|---|
-| `AUTO_SWITCH` | `true` | Automatic switching (dashboard toggle persists) |
-| `RECONNECT_MODE` | `settings` | `settings` pins an exact hostname; `status` just stop/starts and lets Gluetun choose; `none` never touches the tunnel |
-| `SWITCH_MIN_IMPROVEMENT` | `0.10` | Score gap required to switch |
-| `SWITCH_COOLDOWN` | `15m` | Normal spacing between automatic switches |
-| `SWITCH_MIN_INTERVAL` | `5m` | Hard floor between automatic switches; nothing bypasses it |
-| `SWITCH_LOAD_TRIGGER` | `85` | Skip the cooldown and the improvement threshold above this load, provided the best candidate is below it (`0` disables) |
-| `SWITCH_EVALUATION_INTERVAL` | `5m` | How often the decision is re-run |
-| `SWITCH_VERIFY_TIMEOUT` | `90s` | How long to wait for the tunnel to come back |
-| `SWITCH_CANDIDATES` | `3` | How many servers to try before giving up |
+| `SWITCHING_AUTO` | `true` | Automatic switching (dashboard toggle persists) |
+| `SWITCHING_MODE` | `settings` | `settings` pins an exact hostname; `status` just stop/starts and lets Gluetun choose; `none` never touches the tunnel |
+| `SWITCHING_MIN_IMPROVEMENT` | `0.10` | Score gap required to switch |
+| `SWITCHING_COOLDOWN` | `15m` | Normal spacing between automatic switches |
+| `SWITCHING_MIN_INTERVAL` | `5m` | Hard floor between automatic switches; nothing bypasses it |
+| `SWITCHING_LOAD_TRIGGER` | `85` | Skip the cooldown and the improvement threshold above this load, provided the best candidate is below it (`0` disables) |
+| `SWITCHING_EVALUATION_INTERVAL` | `5m` | How often the decision is re-run |
+| `SWITCHING_VERIFY_TIMEOUT` | `90s` | How long to wait for the tunnel to come back |
+| `SWITCHING_CANDIDATES` | `3` | How many servers to try before giving up |
 
 ### Dashboard and general
 

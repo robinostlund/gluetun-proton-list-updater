@@ -513,7 +513,7 @@ func TestEngineWritesServersFile(t *testing.T) {
 	}
 }
 
-// With SERVERS_ONLY_ALLOWED_COUNTRIES the file is narrowed to the allow-list.
+// With GLUETUN_SERVERS_ONLY_ALLOWED_COUNTRIES the file is narrowed to the allow-list.
 func TestEngineWritesOnlyAllowedCountriesWhenAsked(t *testing.T) {
 	harness := newHarness(t, false, func(cfg *config.Config) {
 		cfg.Servers.OnlyAllowedCountries = true

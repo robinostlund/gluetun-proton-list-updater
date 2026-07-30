@@ -71,12 +71,12 @@ func run() (err error) {
 		checks = append(checks,
 			preflight.Check{
 				Path:    preflight.ServersDir(cfg.Servers.FilePath),
-				Purpose: "SERVERS_FILE directory: Gluetun's legacy servers.json location",
+				Purpose: "GLUETUN_SERVERS_FILE directory: Gluetun's legacy servers.json location",
 				Hint:    hint,
 			},
 			preflight.Check{
 				Path:    cfg.Servers.DirPath,
-				Purpose: "SERVERS_DIR: Gluetun's per-provider servers directory",
+				Purpose: "GLUETUN_SERVERS_DIR: Gluetun's per-provider servers directory",
 				Hint:    hint,
 			},
 		)

@@ -209,6 +209,17 @@ function sparkline(trace) {
     + ` stroke-linejoin="round" points="${points.join(' ')}"/></svg>`;
 }
 
+// stateSpan colours a lifecycle word: running is good, crashed is bad, anything else is
+// neither. Shared so every such row reads the same - the DNS row used to be plain text
+// beside a coloured VPN row, which made the two look like different kinds of fact.
+function stateSpan(state) {
+  const value = state || 'unknown';
+  const level = value === 'running' ? 'ok'
+    : value === 'crashed' || value === 'failed' ? 'no'
+      : 'muted';
+  return `<span class="${level}">${escapeHTML(value)}</span>`;
+}
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -521,19 +532,16 @@ function renderGluetun() {
   const gluetun = snapshot.gluetun;
   // Distinct from Connected: the control server can answer perfectly well while the
   // tunnel itself is stopped or crashed.
-  const status = gluetun.status || 'unknown';
-  el('gluetun-status').innerHTML = status === 'running'
-    ? `<span class="ok">${escapeHTML(status)}</span>`
-    : status === 'crashed'
-      ? `<span class="no">${escapeHTML(status)}</span>`
-      : `<span class="muted">${escapeHTML(status)}</span>`;
+  el('gluetun-status').innerHTML = stateSpan(gluetun.status);
   boolRow('gluetun-reachable', gluetun.reachable);
   outcome('gluetun-outcome', !gluetun.last_check.startsWith('0001-01-01'),
     !gluetun.reachable || Boolean(gluetun.last_error), gluetun.last_error);
   text('gluetun-version', gluetun.version || '–');
   text('gluetun-vpn', gluetun.vpn_type || '–');
   text('gluetun-provider', gluetun.provider || '–');
-  text('gluetun-dns', gluetun.dns_status || '–');
+  // Coloured like the VPN row, for the same reason: "running" is a good state and
+  // anything else is worth noticing, and the two rows sit next to each other.
+  el('gluetun-dns').innerHTML = stateSpan(gluetun.dns_status);
 
   // The only IPv6 fact Gluetun exposes. Its public-IP endpoint returns a single
   // address, so there is no separate public IPv6 exit to report; whether the tunnel
@@ -744,11 +752,11 @@ function renderTransfer() {
     ? '<span class="ok">true</span>'
     : '<span class="no">false</span>';
 
+  // Just the verdict. The listen port has a row of its own two lines down, and
+  // repeating it here was the same value twice.
   const verdict = transfer.port_forwarding || 'unknown';
   const verdictClass = { working: 'ok', unreachable: 'no', mismatch: 'no' }[verdict] || 'muted';
-  const port = transfer.listen_port
-    ? ` <span class="muted">(qBittorrent listens on ${transfer.listen_port})</span>` : '';
-  el('transfer-portfwd').innerHTML = `<span class="${verdictClass}">${escapeHTML(verdict)}</span>${port}`;
+  el('transfer-portfwd').innerHTML = `<span class="${verdictClass}">${escapeHTML(verdict)}</span>`;
   el('transfer-portfwd').title = transfer.port_forwarding_detail || '';
 
 
@@ -1045,6 +1053,17 @@ function toggleCollapse(button) {
 /* ---------- wiring ---------- */
 
 document.addEventListener('click', (event) => {
+  // Starting or stopping one of Gluetun's loops. The destructive direction asks first:
+  // stopping the VPN drops every connection through it and stays stopped.
+  const lifecycle = event.target.closest('button[data-lifecycle]');
+  if (lifecycle) {
+    const confirmation = lifecycle.dataset.confirm;
+    if (confirmation && !confirm(confirmation)) return;
+    const status = lifecycle.dataset.status;
+    runAction(lifecycle, lifecycle.dataset.lifecycle, { status },
+      `${lifecycle.textContent.trim()} requested.`);
+    return;
+  }
   const collapse = event.target.closest('button[data-collapse]');
   if (collapse) {
     toggleCollapse(collapse);

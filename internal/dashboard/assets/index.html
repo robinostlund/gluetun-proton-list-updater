@@ -150,6 +150,22 @@
           <h3 class="card-section">Gluetun's own view <span class="muted">what its control server reports</span></h3>
           <dl id="gluetun-detail" class="kv"></dl>
         </div>
+        <!-- Controls for Gluetun's own loops, next to the state they change. Stopping
+             either leaves it stopped: the engine treats a stopped tunnel as a deliberate
+             decision and never starts it behind the operator's back. -->
+        <div class="band">
+          <h3 class="card-section">Controls</h3>
+          <div class="toolbar inline">
+            <button data-lifecycle="/api/gluetun/vpn" data-status="running">Start VPN</button>
+            <button data-lifecycle="/api/gluetun/vpn" data-status="stopped"
+                    data-confirm="Stop the VPN? Every connection through the tunnel drops, and it stays stopped until you start it again.">Stop VPN</button>
+            <button data-lifecycle="/api/gluetun/dns" data-status="running">Start DNS</button>
+            <button data-lifecycle="/api/gluetun/dns" data-status="stopped"
+                    data-confirm="Stop Gluetun's DNS-over-TLS resolver?">Stop DNS</button>
+            <button data-action="/api/gluetun/updater"
+                    title="Makes Gluetun fetch its own server list from Proton. It does not read the list written here, and it overwrites that file - which is rewritten immediately afterwards.">Run updater</button>
+          </div>
+        </div>
         <p id="gluetun-error" class="card-note error"></p>
         <p id="servers-error" class="card-note error"></p>
       </article>

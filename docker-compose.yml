@@ -55,7 +55,7 @@ services:
       # it off, Gluetun keeps no server data on disk and reads none, so the
       # curated list this sidecar writes would be ignored. Server switching would
       # still work, but only across the list Gluetun has built in. If you do turn
-      # it off, set SERVERS_WRITE_MODE=none below.
+      # it off, set GLUETUN_SERVERS_WRITE_MODE=none below.
       STORAGE_SERVERS_ENABLED: "yes"
 
       # Optional but recommended. Gluetun only reads servers.json at startup, so
@@ -94,11 +94,11 @@ services:
       GLUETUN_API_KEY: ${GLUETUN_API_KEY}
 
       # Both of Gluetun's storage layouts are handled; which one is in use is
-      # detected at runtime. Current Gluetun reads SERVERS_DIR and ignores the
+      # detected at runtime. Current Gluetun reads GLUETUN_SERVERS_DIR and ignores the
       # legacy file entirely.
-      SERVERS_FILE: /gluetun/servers.json
-      SERVERS_DIR: /gluetun/servers
-      SERVERS_WRITE_MODE: update
+      GLUETUN_SERVERS_FILE: /gluetun/servers.json
+      GLUETUN_SERVERS_DIR: /gluetun/servers
+      GLUETUN_SERVERS_WRITE_MODE: update
 
       # Which countries the tunnel may use.
       FILTER_COUNTRIES: ${COUNTRIES:-Sweden,Netherlands,Germany}
@@ -107,9 +107,9 @@ services:
       FILTER_MAX_LOAD: "85"
 
       # Scoring: utilisation first, latency as a strong secondary signal.
-      SCORE_LOAD_WEIGHT: "1.0"
-      SCORE_LATENCY_WEIGHT: "0.7"
-      SCORE_LATENCY_CEILING: 150ms
+      SCORING_LOAD_WEIGHT: "1.0"
+      SCORING_LATENCY_WEIGHT: "0.7"
+      SCORING_LATENCY_CEILING: 150ms
 
       LATENCY_ENABLED: "true"
       LATENCY_INTERVAL: 30m
@@ -118,14 +118,14 @@ services:
       # Reconnect pacing. Every switch drops the tunnel and with it every
       # connection through it, so these bound how often that can happen:
       # at most one automatic switch per SWITCH_MIN_INTERVAL, normally spaced by
-      # SWITCH_COOLDOWN, and only when the gain is worth it.
-      AUTO_SWITCH: "true"
-      RECONNECT_MODE: settings
-      SWITCH_MIN_IMPROVEMENT: "0.10"
-      SWITCH_COOLDOWN: 15m
-      SWITCH_MIN_INTERVAL: 5m
-      SWITCH_LOAD_TRIGGER: "85"
-      SWITCH_EVALUATION_INTERVAL: 5m
+      # SWITCHING_COOLDOWN, and only when the gain is worth it.
+      SWITCHING_AUTO: "true"
+      SWITCHING_MODE: settings
+      SWITCHING_MIN_IMPROVEMENT: "0.10"
+      SWITCHING_COOLDOWN: 15m
+      SWITCHING_MIN_INTERVAL: 5m
+      SWITCHING_LOAD_TRIGGER: "85"
+      SWITCHING_EVALUATION_INTERVAL: 5m
 
       PROTON_REFRESH_INTERVAL: 12h
       PROTON_LOAD_REFRESH_INTERVAL: 15m
@@ -141,10 +141,10 @@ services:
       # port here - it validates the Host header and rejects a remapped one with 401.
       # QBITTORRENT_URL: "http://qbittorrent:8080"
       # QBITTORRENT_API_KEY: ${QBITTORRENT_API_KEY}
-      # SWITCH_BUSY_DOWNLOAD: "2MB"
-      # SWITCH_BUSY_UPLOAD: "512KB"
-      # SWITCH_BUSY_WINDOW: 5m
-      # SWITCH_BUSY_MAX_DEFER: 2h
+      # SWITCHING_BUSY_DOWNLOAD: "2MB"
+      # SWITCHING_BUSY_UPLOAD: "512KB"
+      # SWITCHING_BUSY_WINDOW: 5m
+      # SWITCHING_BUSY_MAX_DEFER: 2h
 
       # DASHBOARD_USERNAME: admin
       # DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}

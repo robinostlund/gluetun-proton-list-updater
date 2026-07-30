@@ -181,7 +181,7 @@ type Filter struct {
 	Free       string
 	// IPv6 filters on Proton's own IPv6 capability flag for the server.
 	//
-	// Distinct from SERVERS_INCLUDE_IPV6, which decides whether a server's v6 *entry
+	// Distinct from GLUETUN_SERVERS_INCLUDE_IPV6, which decides whether a server's v6 *entry
 	// address* is offered to Gluetun. This one decides which servers are candidates at
 	// all, so "only" restricts the tunnel to IPv6-capable servers.
 	IPv6 string
@@ -359,13 +359,13 @@ func Load() (cfg Config, err error) {
 	}
 
 	cfg.Servers = Servers{
-		FilePath:             r.str("SERVERS_FILE", "/gluetun/servers.json"),
-		DirPath:              r.str("SERVERS_DIR", "/gluetun/servers"),
-		Preferred:            r.boolean("SERVERS_PREFERRED", true),
-		WriteMode:            r.choice("SERVERS_WRITE_MODE", WriteModeUpdate, WriteModeUpdate, WriteModeReplace, WriteModeNone),
-		SchemaVersion:        uint16(r.integer("SERVERS_SCHEMA_VERSION", 0)), //nolint:gosec // range checked below
-		OnlyAllowedCountries: r.boolean("SERVERS_ONLY_ALLOWED_COUNTRIES", false),
-		IncludeIPv6:          r.boolean("SERVERS_INCLUDE_IPV6", false),
+		FilePath:             r.str("GLUETUN_SERVERS_FILE", "/gluetun/servers.json"),
+		DirPath:              r.str("GLUETUN_SERVERS_DIR", "/gluetun/servers"),
+		Preferred:            r.boolean("GLUETUN_SERVERS_PREFERRED", true),
+		WriteMode:            r.choice("GLUETUN_SERVERS_WRITE_MODE", WriteModeUpdate, WriteModeUpdate, WriteModeReplace, WriteModeNone),
+		SchemaVersion:        uint16(r.integer("GLUETUN_SERVERS_SCHEMA_VERSION", 0)), //nolint:gosec // range checked below
+		OnlyAllowedCountries: r.boolean("GLUETUN_SERVERS_ONLY_ALLOWED_COUNTRIES", false),
+		IncludeIPv6:          r.boolean("GLUETUN_SERVERS_INCLUDE_IPV6", false),
 	}
 
 	cfg.Filter = Filter{
@@ -383,11 +383,11 @@ func Load() (cfg Config, err error) {
 	}
 
 	cfg.Score = Score{
-		LoadWeight:            r.float("SCORE_LOAD_WEIGHT", 1.0),
-		LatencyWeight:         r.float("SCORE_LATENCY_WEIGHT", 0.7),
-		ProtonScoreWeight:     r.float("SCORE_PROTON_WEIGHT", 0.0),
-		LatencyCeiling:        r.duration("SCORE_LATENCY_CEILING", 150*time.Millisecond),
-		UnknownLatencyPenalty: r.float("SCORE_UNKNOWN_LATENCY_PENALTY", 0.5),
+		LoadWeight:            r.float("SCORING_LOAD_WEIGHT", 1.0),
+		LatencyWeight:         r.float("SCORING_LATENCY_WEIGHT", 0.7),
+		ProtonScoreWeight:     r.float("SCORING_PROTON_WEIGHT", 0.0),
+		LatencyCeiling:        r.duration("SCORING_LATENCY_CEILING", 150*time.Millisecond),
+		UnknownLatencyPenalty: r.float("SCORING_UNKNOWN_LATENCY_PENALTY", 0.5),
 	}
 
 	cfg.Latency = Latency{
@@ -402,15 +402,15 @@ func Load() (cfg Config, err error) {
 	}
 
 	cfg.Switch = Switch{
-		Auto:           r.boolean("AUTO_SWITCH", true),
-		Mode:           r.choice("RECONNECT_MODE", ReconnectSettings, ReconnectSettings, ReconnectStatus, ReconnectNone),
-		MinImprovement: r.float("SWITCH_MIN_IMPROVEMENT", 0.10),
-		Cooldown:       r.duration("SWITCH_COOLDOWN", 15*time.Minute),
-		MinInterval:    r.duration("SWITCH_MIN_INTERVAL", 5*time.Minute),
-		LoadTrigger:    r.integer("SWITCH_LOAD_TRIGGER", 85),
-		Interval:       r.duration("SWITCH_EVALUATION_INTERVAL", 5*time.Minute),
-		VerifyTimeout:  r.duration("SWITCH_VERIFY_TIMEOUT", 90*time.Second),
-		Candidates:     r.integer("SWITCH_CANDIDATES", 3),
+		Auto:           r.boolean("SWITCHING_AUTO", true),
+		Mode:           r.choice("SWITCHING_MODE", ReconnectSettings, ReconnectSettings, ReconnectStatus, ReconnectNone),
+		MinImprovement: r.float("SWITCHING_MIN_IMPROVEMENT", 0.10),
+		Cooldown:       r.duration("SWITCHING_COOLDOWN", 15*time.Minute),
+		MinInterval:    r.duration("SWITCHING_MIN_INTERVAL", 5*time.Minute),
+		LoadTrigger:    r.integer("SWITCHING_LOAD_TRIGGER", 85),
+		Interval:       r.duration("SWITCHING_EVALUATION_INTERVAL", 5*time.Minute),
+		VerifyTimeout:  r.duration("SWITCHING_VERIFY_TIMEOUT", 90*time.Second),
+		Candidates:     r.integer("SWITCHING_CANDIDATES", 3),
 	}
 
 	cfg.QBittorrent = QBittorrent{
@@ -418,10 +418,10 @@ func Load() (cfg Config, err error) {
 		APIKey:         r.str("QBITTORRENT_API_KEY", ""),
 		Interval:       r.duration("QBITTORRENT_INTERVAL", 15*time.Second),
 		RequestTimeout: r.duration("QBITTORRENT_TIMEOUT", 5*time.Second),
-		BusyDownload:   r.byteRate("SWITCH_BUSY_DOWNLOAD", 1<<20),
-		BusyUpload:     r.byteRate("SWITCH_BUSY_UPLOAD", 1<<20),
-		BusyWindow:     r.duration("SWITCH_BUSY_WINDOW", 5*time.Minute),
-		MaxDefer:       r.duration("SWITCH_BUSY_MAX_DEFER", 0),
+		BusyDownload:   r.byteRate("SWITCHING_BUSY_DOWNLOAD", 1<<20),
+		BusyUpload:     r.byteRate("SWITCHING_BUSY_UPLOAD", 1<<20),
+		BusyWindow:     r.duration("SWITCHING_BUSY_WINDOW", 5*time.Minute),
+		MaxDefer:       r.duration("SWITCHING_BUSY_MAX_DEFER", 0),
 	}
 
 	cfg.Dashboard = Dashboard{
@@ -448,7 +448,7 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 		r.errorf("FILTER_MAX_LOAD: %d must be between 1 and 100", cfg.Filter.MaxLoad)
 	}
 	if cfg.Servers.OnlyAllowedCountries && len(cfg.Filter.Countries) == 0 {
-		r.errorf("SERVERS_ONLY_ALLOWED_COUNTRIES requires FILTER_COUNTRIES to be set")
+		r.errorf("GLUETUN_SERVERS_ONLY_ALLOWED_COUNTRIES requires FILTER_COUNTRIES to be set")
 	}
 	if cfg.QBittorrent.Enabled() {
 		if !strings.HasPrefix(cfg.QBittorrent.URL, "http://") &&
@@ -463,12 +463,12 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 		// configuration reads as enabled while doing nothing at all.
 		if cfg.QBittorrent.BusyDownload == 0 && cfg.QBittorrent.BusyUpload == 0 {
 			r.errorf("QBITTORRENT_URL is set but both SWITCH_BUSY_DOWNLOAD and " +
-				"SWITCH_BUSY_UPLOAD are 0, so no transfer would ever defer a switch")
+				"SWITCHING_BUSY_UPLOAD are 0, so no transfer would ever defer a switch")
 		}
 		// A window shorter than the poll interval would hold one sample, which is the
 		// thing it exists to stop being decisive.
 		if window := cfg.QBittorrent.BusyWindow; window > 0 && window < cfg.QBittorrent.Interval {
-			r.errorf("SWITCH_BUSY_WINDOW (%s) must be at least QBITTORRENT_INTERVAL (%s), "+
+			r.errorf("SWITCHING_BUSY_WINDOW (%s) must be at least QBITTORRENT_INTERVAL (%s), "+
 				"or it averages a single reading", window, cfg.QBittorrent.Interval)
 		}
 		if cfg.QBittorrent.RequestTimeout >= cfg.QBittorrent.Interval {
@@ -499,16 +499,16 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 		r.errorf("at least one of SCORE_LOAD_WEIGHT, SCORE_LATENCY_WEIGHT, SCORE_PROTON_WEIGHT must be greater than 0")
 	}
 	if cfg.Score.LatencyCeiling <= 0 {
-		r.errorf("SCORE_LATENCY_CEILING: must be greater than 0")
+		r.errorf("SCORING_LATENCY_CEILING: must be greater than 0")
 	}
 	if cfg.Switch.Candidates < 1 {
-		r.errorf("SWITCH_CANDIDATES: must be at least 1")
+		r.errorf("SWITCHING_CANDIDATES: must be at least 1")
 	}
 	if cfg.Switch.LoadTrigger < 0 || cfg.Switch.LoadTrigger > 100 {
-		r.errorf("SWITCH_LOAD_TRIGGER: must be between 0 and 100")
+		r.errorf("SWITCHING_LOAD_TRIGGER: must be between 0 and 100")
 	}
 	if cfg.Servers.SchemaVersion > 0 && cfg.Servers.SchemaVersion > 1000 {
-		r.errorf("SERVERS_SCHEMA_VERSION: %d looks implausible", cfg.Servers.SchemaVersion)
+		r.errorf("GLUETUN_SERVERS_SCHEMA_VERSION: %d looks implausible", cfg.Servers.SchemaVersion)
 	}
 	if (cfg.Dashboard.Username == "") != (cfg.Dashboard.Password == "") {
 		r.errorf("DASHBOARD_USERNAME and DASHBOARD_PASSWORD must be set together")
