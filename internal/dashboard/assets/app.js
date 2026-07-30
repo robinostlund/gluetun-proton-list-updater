@@ -67,6 +67,7 @@ function featureTags(candidate, options = {}) {
   tags.push(candidate.free
     ? '<span class="tag tag-free">free</span>'
     : '<span class="tag tag-paid">paid</span>');
+  if (candidate.ipv6) tags.push('<span class="tag">ipv6</span>');
   if (candidate.wireguard) tags.push('<span class="tag">wg</span>');
   if (candidate.excluded) tags.push('<span class="tag tag-excluded">outside filters</span>');
   // A tag as well as the row colour, so the row does not depend on colour alone to
@@ -477,6 +478,17 @@ function renderGluetun() {
   text('gluetun-provider', gluetun.provider || '–');
   text('gluetun-dns', gluetun.dns_status || '–');
 
+  // The only IPv6 fact Gluetun exposes. Its public-IP endpoint returns a single
+  // address, so there is no separate public IPv6 exit to report; whether the tunnel
+  // carries IPv6 at all is the answerable question, and it comes from the tunnel
+  // interface's own addresses.
+  const ipv6 = gluetun.tunnel_ipv6 || [];
+  text('gluetun-ipv6', ipv6.length ? ipv6.join(', ') : 'none (IPv4 only)');
+  el('gluetun-ipv6').title = ipv6.length
+    ? "The tunnel interface's IPv6 addresses, from Gluetun's WireGuard settings."
+    : 'The tunnel has no IPv6 address. Gluetun reports a single public IP, so there is '
+      + 'no separate public IPv6 exit address to show either.';
+
   text('gluetun-check', timeAgo(gluetun.last_check));
   text('gluetun-error', gluetun.reachable ? (gluetun.last_error || '') : '');
 
@@ -680,11 +692,6 @@ function renderTransfer() {
 
   text('transfer-version', transfer.version || '–');
   text('transfer-listen', transfer.listen_port ? String(transfer.listen_port) : 'unknown');
-  boolRow('transfer-random', Boolean(transfer.random_port));
-  el('transfer-random').title = transfer.random_port
-    ? 'qBittorrent re-chooses its listening port on every start, so it will stop matching '
-      + 'the forwarded port.'
-    : '';
 
   // One line for whether switching is being held back, and why.
   let switching;

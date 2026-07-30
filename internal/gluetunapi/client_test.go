@@ -700,3 +700,31 @@ func TestNonHostnameRejectionsCarryNoHostnames(t *testing.T) {
 		}
 	}
 }
+
+// The tunnel's own addresses are the only IPv6 fact Gluetun exposes: its
+// /v1/publicip/ip returns a single public_ip field, so there is no separate public
+// IPv6 exit address to report.
+func TestTunnelAddressesAreSplitByFamily(t *testing.T) {
+	t.Parallel()
+
+	settings := Settings{Wireguard: &Wireguard{Addresses: []string{
+		"10.2.0.2/32", "fd12:3456:789a:1::2/128",
+	}}}
+	ipv4, ipv6 := settings.TunnelAddresses()
+	if len(ipv4) != 1 || ipv4[0] != "10.2.0.2/32" {
+		t.Errorf("ipv4 = %v", ipv4)
+	}
+	if len(ipv6) != 1 || ipv6[0] != "fd12:3456:789a:1::2/128" {
+		t.Errorf("ipv6 = %v", ipv6)
+	}
+
+	// An IPv4-only tunnel must report no IPv6 rather than guessing.
+	settings = Settings{Wireguard: &Wireguard{Addresses: []string{"10.2.0.2/32"}}}
+	if _, ipv6 := settings.TunnelAddresses(); len(ipv6) != 0 {
+		t.Errorf("ipv6 = %v, want none", ipv6)
+	}
+	// And absent WireGuard settings must not panic.
+	if _, ipv6 := (Settings{}).TunnelAddresses(); len(ipv6) != 0 {
+		t.Errorf("ipv6 = %v, want none", ipv6)
+	}
+}

@@ -35,55 +35,54 @@
            "should the tunnel move?", and that is a comparison - so the two are laid
            out as one, sharing row labels, to be read across rather than back and
            forth between two cards. -->
+      <!-- Three columns: the current server, the candidate that would replace it, and
+           the decision between them. Current and best carry identical row labels so the
+           two read across, and the decision sits beside rather than below them - it is
+           the conclusion drawn from the other two, not a footnote. -->
       <article class="card card-current">
         <h2>Server selection</h2>
-        <div class="card-split">
-        <div class="compare">
-          <div class="compare-head"></div>
-          <div class="compare-head">Current</div>
-          <div class="compare-head">Best candidate</div>
-
-          <div class="compare-label">Server</div>
-          <div class="compare-value">
+        <div class="selection">
+          <div class="selection-column">
+            <h3 class="card-section">Current</h3>
             <div id="current-name" class="compare-name">unknown</div>
             <div id="current-where" class="compare-sub"></div>
             <div id="current-host" class="hostname"></div>
             <div id="current-tags" class="tags card-tags"></div>
+            <dl class="kv one">
+              <div><dt>Load</dt><dd id="current-load">–</dd></div>
+              <div><dt>Latency</dt><dd id="current-rtt">–</dd></div>
+              <div><dt>Score</dt><dd id="current-score">–</dd></div>
+              <div><dt>Rank</dt><dd id="current-rank">–</dd></div>
+              <div><dt>Forwarded port</dt><dd id="current-port">–</dd></div>
+              <div><dt>Identified by</dt><dd id="current-source">–</dd></div>
+            </dl>
           </div>
-          <div class="compare-value">
+
+          <div class="selection-column">
+            <h3 class="card-section">Best candidate</h3>
             <div id="best-name" class="compare-name">–</div>
             <div id="best-where" class="compare-sub"></div>
             <div id="best-host" class="hostname"></div>
             <div id="best-tags" class="tags card-tags"></div>
+            <dl class="kv one">
+              <div><dt>Load</dt><dd id="best-load">–</dd></div>
+              <div><dt>Latency</dt><dd id="best-rtt">–</dd></div>
+              <div><dt>Score</dt><dd id="best-score">–</dd></div>
+              <div><dt>Rank</dt><dd id="improvement-cell">–</dd></div>
+            </dl>
           </div>
 
-          <div class="compare-label">Load</div>
-          <div class="compare-value" id="current-load">–</div>
-          <div class="compare-value" id="best-load">–</div>
-
-          <div class="compare-label">Latency</div>
-          <div class="compare-value" id="current-rtt">–</div>
-          <div class="compare-value" id="best-rtt">–</div>
-
-          <div class="compare-label">Score</div>
-          <div class="compare-value" id="current-score">–</div>
-          <div class="compare-value" id="best-score">–</div>
-
-          <div class="compare-label">Rank</div>
-          <div class="compare-value" id="current-rank">–</div>
-          <div class="compare-value" id="improvement-cell">–</div>
-        </div>
-
-        <dl class="kv">
-          <div><dt>Decision</dt><dd id="best-decision" class="prose">–</dd></div>
-          <div><dt>Improvement</dt><dd id="improvement">–</dd></div>
-          <div><dt>Min improvement</dt><dd id="best-min-improvement">–</dd></div>
-          <div><dt>Auto switch</dt><dd id="best-auto">–</dd></div>
-          <div><dt>Cooldown</dt><dd id="best-cooldown">–</dd></div>
-          <div><dt>Restricted to</dt><dd id="best-restriction">–</dd></div>
-          <div><dt>Identified by</dt><dd id="current-source">–</dd></div>
-          <div><dt>Forwarded port</dt><dd id="current-port">–</dd></div>
-        </dl>
+          <div class="selection-column">
+            <h3 class="card-section">Decision</h3>
+            <dl class="kv one">
+              <div><dt>Outcome</dt><dd id="best-decision" class="prose">–</dd></div>
+              <div><dt>Improvement</dt><dd id="improvement">–</dd></div>
+              <div><dt>Min improvement</dt><dd id="best-min-improvement">–</dd></div>
+              <div><dt>Auto switch</dt><dd id="best-auto">–</dd></div>
+              <div><dt>Cooldown</dt><dd id="best-cooldown">–</dd></div>
+              <div><dt>Restricted to</dt><dd id="best-restriction">–</dd></div>
+            </dl>
+          </div>
         </div>
       </article>
 
@@ -93,10 +92,9 @@
       <article class="card">
         <h2>Gluetun</h2>
         <p id="gluetun-status" class="card-headline">–</p>
-        <div class="card-columns">
-        <div>
+        <div class="band">
         <h3 class="card-section">Tunnel</h3>
-        <dl class="kv one">
+        <dl class="kv">
           <div><dt>Connected</dt><dd id="gluetun-reachable">–</dd></div>
           <div><dt>Last check</dt><dd id="gluetun-check">–</dd></div>
           <div><dt>Last check result</dt><dd id="gluetun-outcome">–</dd></div>
@@ -104,11 +102,12 @@
           <div><dt>Protocol</dt><dd id="gluetun-vpn">–</dd></div>
           <div><dt>Provider</dt><dd id="gluetun-provider">–</dd></div>
           <div><dt>DNS</dt><dd id="gluetun-dns">–</dd></div>
+          <div class="wide"><dt>Tunnel IPv6</dt><dd id="gluetun-ipv6">–</dd></div>
         </dl>
         </div>
-        <div>
+        <div class="band">
         <h3 class="card-section">Exit address</h3>
-        <dl class="kv one">
+        <dl class="kv">
           <div><dt>Public IP</dt><dd id="exit-ip">–</dd></div>
           <div><dt>Location</dt><dd id="exit-where">–</dd></div>
           <div class="wide"><dt>Organisation</dt><dd id="exit-org" class="prose">–</dd></div>
@@ -118,9 +117,9 @@
           <div class="wide"><dt>Note</dt><dd id="exit-note" class="prose">–</dd></div>
         </dl>
         </div>
-        <div>
+        <div class="band">
         <h3 class="card-section">Server data written for Gluetun</h3>
-        <dl class="kv one">
+        <dl class="kv">
           <div><dt>Entries</dt><dd id="servers-count">–</dd></div>
           <div><dt>Layout</dt><dd id="servers-layout">–</dd></div>
           <div class="wide"><dt>Paths</dt><dd id="servers-path">–</dd></div>
@@ -132,7 +131,6 @@
           <div class="wide"><dt>Preserved</dt><dd id="servers-preserved">–</dd></div>
         </dl>
         </div>
-        </div>
         <p id="gluetun-error" class="card-note error"></p>
         <p id="servers-error" class="card-note error"></p>
       </article>
@@ -142,10 +140,9 @@
       <article class="card">
         <h2>ProtonVPN</h2>
         <p id="proton-count" class="card-headline">–</p>
-        <div class="card-columns">
-        <div>
+        <div class="band">
         <h3 class="card-section">Server list</h3>
-        <dl class="kv one">
+        <dl class="kv">
           <div><dt>Connected</dt><dd id="proton-login">–</dd></div>
           <div><dt>Plan</dt><dd id="proton-plan">–</dd></div>
           <div><dt>Candidates</dt><dd id="candidate-count">–</dd></div>
@@ -155,9 +152,9 @@
           <div><dt>Next fetch</dt><dd id="proton-next">–</dd></div>
         </dl>
         </div>
-        <div>
+        <div class="band">
         <h3 class="card-section">Latency to Proton entry nodes</h3>
-        <dl class="kv one">
+        <dl class="kv">
           <div><dt>Median</dt><dd id="latency-median">–</dd></div>
           <div><dt>Measured</dt><dd id="latency-measured">–</dd></div>
           <div><dt>Failed</dt><dd id="latency-failed">–</dd></div>
@@ -167,7 +164,6 @@
           <div><dt>Last sweep</dt><dd id="latency-last">–</dd></div>
           <div><dt>Next sweep</dt><dd id="latency-next">–</dd></div>
         </dl>
-        </div>
         </div>
         <p id="proton-error" class="card-note error"></p>
       </article>
@@ -190,7 +186,6 @@
           <div><dt>qBittorrent cap ↓</dt><dd id="transfer-down-cap">–</dd></div>
           <div><dt>qBittorrent cap ↑</dt><dd id="transfer-up-cap">–</dd></div>
           <div><dt>Listen port</dt><dd id="transfer-listen">–</dd></div>
-          <div><dt>Random port</dt><dd id="transfer-random">–</dd></div>
           <div><dt>Session total</dt><dd id="transfer-total">–</dd></div>
           <div class="wide"><dt>Switching</dt><dd id="transfer-switching" class="prose">–</dd></div>
         </dl>

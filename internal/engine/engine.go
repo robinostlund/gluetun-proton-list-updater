@@ -911,6 +911,7 @@ func toCandidateView(rank int, scored scoring.Scored, isCurrent bool) CandidateV
 		Tor:         candidate.Tor,
 		P2P:         candidate.P2P,
 		Stream:      candidate.Stream,
+		IPv6:        candidate.IPv6,
 		Free:        candidate.Free,
 		Wireguard:   candidate.WgPubKey != "",
 		IsCurrent:   isCurrent,

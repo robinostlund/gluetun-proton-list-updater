@@ -324,6 +324,30 @@ func (s Settings) Requirements() (requirements Requirements) {
 // settings response does not lose the protocol in use.
 type Wireguard struct {
 	Implementation string `json:"implementation,omitempty"`
+	// Addresses are the tunnel interface's own addresses. They are read to answer
+	// whether the tunnel has IPv6 at all.
+	//
+	// This is the only IPv6 fact Gluetun exposes. Its /v1/publicip/ip returns a single
+	// public_ip field, so there is no separate public IPv6 exit address to report - it
+	// is whichever family the resolver happened to see.
+	Addresses []string `json:"addresses,omitempty"`
+}
+
+// TunnelAddresses returns the tunnel interface's addresses, split by family.
+func (s Settings) TunnelAddresses() (ipv4, ipv6 []string) {
+	if s.Wireguard == nil {
+		return nil, nil
+	}
+	for _, address := range s.Wireguard.Addresses {
+		// The values are prefixes ("10.2.0.2/32", "fd00::1/128"); a colon is the only
+		// thing needed to tell the families apart.
+		if strings.Contains(address, ":") {
+			ipv6 = append(ipv6, address)
+		} else {
+			ipv4 = append(ipv4, address)
+		}
+	}
+	return ipv4, ipv6
 }
 
 // GetSettings reads Gluetun's current VPN settings.

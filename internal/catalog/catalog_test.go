@@ -506,3 +506,47 @@ func TestP2PIsOnlyRequiredWhenGluetunAsks(t *testing.T) {
 		t.Errorf("P2P=exclude should drop P2P servers, got %+v", candidates)
 	}
 }
+
+// Proton's IPv6 capability flag is a property of the server, and is carried through so
+// the dashboard can show which servers support it.
+//
+// It is deliberately independent of IncludeIPv6: that option decides whether a v6
+// *entry address* is offered to Gluetun, which is a different question from whether the
+// server supports IPv6 at all.
+func TestIPv6CapabilityIsCarriedIndependentlyOfTheEntryAddress(t *testing.T) {
+	t.Parallel()
+
+	logicals := []proton.LogicalServer{{
+		ID: "v6", Name: "SE#V6", ExitCountry: "SE", Status: 1, Load: 10,
+		Features: proton.FeatureIPv6,
+		Servers: []proton.PhysicalServer{{
+			EntryIP: netip.MustParseAddr("10.0.0.1"), Domain: "node-v6.protonvpn.net",
+			EntryIPv6: "2001:db8::1", Status: 1, X25519PublicKey: "k",
+		}},
+	}, {
+		ID: "v4", Name: "SE#V4", ExitCountry: "SE", Status: 1, Load: 10,
+		Servers: []proton.PhysicalServer{{
+			EntryIP: netip.MustParseAddr("10.0.0.2"), Domain: "node-v4.protonvpn.net",
+			Status: 1, X25519PublicKey: "k",
+		}},
+	}}
+
+	for _, includeIPv6 := range []bool{false, true} {
+		candidates, _ := Build(logicals, Options{VPNType: VPNWireguard, IncludeIPv6: includeIPv6})
+		byName := map[string]Candidate{}
+		for _, candidate := range candidates {
+			byName[candidate.ServerName] = candidate
+		}
+		if !byName["SE#V6"].IPv6 {
+			t.Errorf("IncludeIPv6=%v: SE#V6 should be flagged IPv6 capable", includeIPv6)
+		}
+		if byName["SE#V4"].IPv6 {
+			t.Errorf("IncludeIPv6=%v: SE#V4 is not IPv6 capable", includeIPv6)
+		}
+		// The entry address, by contrast, follows the option.
+		if got := byName["SE#V6"].EntryIPv6.IsValid(); got != includeIPv6 {
+			t.Errorf("IncludeIPv6=%v: EntryIPv6 present = %v, want %v",
+				includeIPv6, got, includeIPv6)
+		}
+	}
+}

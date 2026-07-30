@@ -428,6 +428,8 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 			snapshot.Gluetun.ProviderMismatch = settings.ProviderName() != "" &&
 				settings.ProviderName() != serversfile.Provider
 			snapshot.Gluetun.Selection = settings.SelectionSummary()
+			_, ipv6 := settings.TunnelAddresses()
+			snapshot.Gluetun.TunnelIPv6 = ipv6
 			if enabled, known := settings.PortForwardingEnabled(); known {
 				snapshot.Gluetun.PortForwardingEnabled = &enabled
 			}

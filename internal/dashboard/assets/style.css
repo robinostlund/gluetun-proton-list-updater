@@ -184,61 +184,44 @@ main {
 
 /* A merged card carries three sections' worth of rows, so it gets two columns of the
    grid where there is room and falls back to one when there is not. */
-/* Server selection: the comparison beside its details rather than above them. */
-.card-split {
-  display: grid;
-  grid-template-columns: minmax(320px, 1.2fr) minmax(280px, 1fr);
-  gap: 8px 28px;
-  align-items: start;
-}
-
-/* Gluetun: three sections across rather than stacked, which is most of its height. */
-.card-columns {
+/* Three columns: the current server, the candidate that would replace it, and the
+   decision between them. */
+.selection {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 4px 28px;
   align-items: start;
 }
+.selection-column { min-width: 0; }
+
+/* Inside a narrow selection column there is no room to flow, so one value per row. */
 .kv.one { grid-template-columns: 1fr; }
 
 @media (max-width: 900px) {
-  .card-split, .card-columns { grid-template-columns: 1fr; }
+  .selection { grid-template-columns: 1fr; }
 }
 
 /* Sub-headings inside a merged card, so "Tunnel" and "Exit address" stay legibly
    apart without going back to being separate cards. */
+/* A band's title. The rule goes *under* the heading, binding it to the values beneath;
+   above the heading it read as a separator between unrelated rows, which is what made
+   the sections hard to attribute. Separation between bands is the margin instead. */
 .card-section {
-  margin: 16px 0 6px;
+  margin: 0 0 10px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: var(--text-muted);
   font-weight: 600;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-.card-section:first-of-type { padding-top: 0; border-top: 0; margin-top: 10px; }
-
-/* Current versus best, sharing row labels so the two are read across rather than
-   compared between two separate cards. */
-.compare {
-  display: grid;
-  grid-template-columns: minmax(90px, auto) 1fr 1fr;
-  gap: 6px 14px;
-  align-items: start;
-  margin-bottom: 4px;
-}
-.compare-head {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-  font-weight: 600;
-  padding-bottom: 4px;
+  padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
 }
-.compare-label { font-size: 12px; color: var(--text-muted); min-width: 0; }
-.compare-value { font-size: 13px; font-family: var(--mono); min-width: 0; }
+
+/* A band groups a heading with the values it owns. */
+.band { margin-top: 20px; }
+.band:first-of-type { margin-top: 12px; }
+
+/* A server's name and location, above its rows. */
 .compare-name {
   font-size: 16px;
   font-weight: 650;
@@ -248,8 +231,8 @@ main {
   text-overflow: ellipsis;
 }
 .compare-sub { font-size: 12px; color: var(--text-muted); font-family: inherit; }
-.compare .hostname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.compare .tags { margin-top: 4px; }
+.selection .hostname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.selection .tags { margin: 4px 0 8px; }
 .card-exit { border-color: color-mix(in srgb, var(--good) 35%, var(--border)); }
 code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; }
 .card-headline {

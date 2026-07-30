@@ -57,6 +57,11 @@ type Candidate struct {
 	Tor         bool
 	P2P         bool
 	Stream      bool
+	// IPv6 is Proton's own capability flag for the logical server, independent of
+	// whether IncludeIPv6 caused an EntryIPv6 to be recorded above. The two answer
+	// different questions: "does this server support IPv6" and "are we offering
+	// Gluetun its v6 entry address".
+	IPv6 bool
 }
 
 // Stats records how the Proton list was reduced, for the dashboard and logs.
@@ -299,6 +304,7 @@ func Build(logicals []proton.LogicalServer, opts Options) (candidates []Candidat
 				Tor:         logical.Tor(),
 				P2P:         logical.P2P(),
 				Stream:      logical.Streaming(),
+				IPv6:        logical.IPv6(),
 			}
 			if opts.IncludeIPv6 && physical.EntryIPv6 != "" {
 				if address, err := netip.ParseAddr(physical.EntryIPv6); err == nil && address.Is6() {

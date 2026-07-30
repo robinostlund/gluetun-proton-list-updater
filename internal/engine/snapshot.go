@@ -106,6 +106,13 @@ type GluetunStatus struct {
 	ExitObservedAt time.Time `json:"exit_observed_at"`
 	// PortForwardingEnabled distinguishes "no port yet" from "not requested".
 	PortForwardingEnabled *bool `json:"port_forwarding_enabled,omitempty"`
+	// TunnelIPv6 lists the tunnel interface's IPv6 addresses, empty when the tunnel is
+	// IPv4 only.
+	//
+	// This is the only IPv6 fact Gluetun exposes. Its public-IP endpoint returns a
+	// single address, so there is no separate public IPv6 exit to report; whether the
+	// tunnel carries IPv6 at all is the answerable question.
+	TunnelIPv6 []string `json:"tunnel_ipv6,omitempty"`
 	// DNSStatus is Gluetun's DNS-over-TLS resolver state, from
 	// GET /v1/dns/status.
 	DNSStatus string `json:"dns_status,omitempty"`
@@ -317,6 +324,7 @@ type CandidateView struct {
 	P2P         bool    `json:"p2p"`
 	Stream      bool    `json:"stream"`
 	Free        bool    `json:"free"`
+	IPv6        bool    `json:"ipv6"`
 	Wireguard   bool    `json:"wireguard"`
 	IsCurrent   bool    `json:"is_current"`
 	// Excluded marks a server that is not in the allowed candidate set. It is
