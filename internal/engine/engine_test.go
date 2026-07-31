@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -2688,6 +2690,11 @@ func TestAQBittorrentThatNeverAnsweredFallsOpen(t *testing.T) {
 	if transfer.Busy {
 		t.Error("Busy should be false with no reading at all")
 	}
+	// Switching does wait briefly for a first answer - see
+	// TestSwitchingWaitsForQBittorrentsFirstAnswer, which is the case a restart hits - but
+	// the wait is bounded, and what matters here is that it ends. A wrong URL or key must
+	// not freeze selection for ever.
+	engine.startedAt = time.Now().Add(-firstReadingGrace - time.Minute)
 	if blocked, _ := engine.transferBlocksSwitch(); blocked {
 		t.Error("a qBittorrent that never answered must not freeze switching indefinitely")
 	}
@@ -4016,5 +4023,317 @@ func TestVolumesAndRatesAreFormattedDifferently(t *testing.T) {
 	}
 	if got := formatBytes(512); got != "512 B" {
 		t.Errorf("formatBytes = %q, want 512 B", got)
+	}
+}
+
+// The scenario worth being explicit about: qBittorrent's session counter runs continuously
+// across a server switch and only resets when qBittorrent itself restarts. So a total is
+// never read directly - every figure is a difference between consecutive polls, and a
+// difference is only credited when both ends of it were on the same server.
+//
+// This walks a whole session across two switches and checks the arithmetic exactly.
+func TestASessionSpanningSwitchesCreditsEachServerOnlyItsOwnBytes(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+
+	// One continuous qBittorrent session. The counter only ever rises.
+	session := uint64(100 << 30) // 100 GiB already moved before this tool started
+
+	poll := func(hostname string, movedGiB uint64) {
+		session += movedGiB << 30
+		engine.recordTransfer(transferAt(1<<20, 0, session, 0))
+	}
+
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+	poll("se-01", 0) // first poll: baseline only, none of the 100 GiB is ours to claim
+	poll("se-01", 3)
+	poll("se-01", 2) // 5 GiB on the first server
+
+	// Switch. The interval that straddles it moved 9 GiB, partly on each server, so it is
+	// credited to neither - the alternative is crediting one of them with the other's
+	// traffic, which is worse than a floor.
+	pinCurrent(t, engine, "se-02.protonvpn.net", time.Hour)
+	poll("se-02", 9)
+	poll("se-02", 4)
+	poll("se-02", 1) // 5 GiB on the second server
+
+	// Back to the first. Its total continues from where it was rather than restarting.
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+	poll("se-01", 7) // the straddling interval again: credited to neither
+	poll("se-01", 2)
+
+	stats := engine.state.snapshot().Stats
+	for _, want := range []struct {
+		hostname string
+		giB      uint64
+		visits   int
+	}{
+		{"se-01.protonvpn.net", 7, 2}, // 5 from the first stay, 2 from the second
+		{"se-02.protonvpn.net", 5, 1},
+	} {
+		record := stats[want.hostname]
+		if record.DownloadedBytes != want.giB<<30 {
+			t.Errorf("%s = %s, want %s", want.hostname,
+				formatBytes(record.DownloadedBytes), formatBytes(want.giB<<30))
+		}
+		if record.Visits != want.visits {
+			t.Errorf("%s visits = %d, want %d", want.hostname, record.Visits, want.visits)
+		}
+	}
+
+	// The invariant that matters most: the attributed bytes can fall short of what the
+	// session moved, but must never exceed it. Anything more would mean an interval was
+	// counted twice.
+	var attributed uint64
+	for _, record := range stats {
+		attributed += record.DownloadedBytes
+	}
+	sessionMoved := session - 100<<30
+	if attributed > sessionMoved {
+		t.Errorf("attributed %s of a session that moved %s; an interval was double counted",
+			formatBytes(attributed), formatBytes(sessionMoved))
+	}
+	// And the shortfall is exactly the two straddling intervals, not something unexplained.
+	if shortfall := sessionMoved - attributed; shortfall != 16<<30 {
+		t.Errorf("shortfall = %s, want exactly the two switch intervals (16 GiB)",
+			formatBytes(shortfall))
+	}
+}
+
+// A qBittorrent restart mid-stay is the other way the session counter lies. It must cost
+// only the interval it happened in, not the server's accumulated total.
+func TestAQBittorrentRestartDoesNotDisturbTheAccumulatedTotal(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+
+	engine.recordTransfer(transferAt(1<<20, 0, 50<<30, 0))
+	engine.recordTransfer(transferAt(1<<20, 0, 56<<30, 0)) // +6 GiB
+
+	// qBittorrent restarts: the session begins again from a low number.
+	engine.recordTransfer(transferAt(1<<20, 0, 1<<30, 0))
+	engine.recordTransfer(transferAt(1<<20, 0, 4<<30, 0)) // +3 GiB in the new session
+
+	record := engine.state.snapshot().Stats["se-01.protonvpn.net"]
+	if record.DownloadedBytes != 9<<30 {
+		t.Errorf("total = %s, want 9 GiB: the restart should cost only its own interval",
+			formatBytes(record.DownloadedBytes))
+	}
+}
+
+// The figures have to survive a restart, which is the whole reason they are persisted.
+//
+// This shipped broken: the fast path updates them in memory to avoid rewriting the state
+// file every fifteen seconds, and the only thing that wrote them out was the loads refresh
+// - fifteen minutes apart, with nothing at all on shutdown. A restart inside that window
+// discarded every byte counted since the last write.
+func TestTransferredTotalsSurviveARestart(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	const hostname = "node-se-01.protonvpn.net"
+
+	first := newStateStore(directory)
+	if err := first.load(); err != nil {
+		t.Fatal(err)
+	}
+	// Exactly what the fast path does: memory only, no write.
+	first.mutate(func(state *persistedState) {
+		state.Stats = map[string]ServerStats{hostname: {
+			DownloadedBytes: 412 << 30, UploadedBytes: 38 << 30,
+			MaxDownloadRate: 11 << 20, TransferReadings: 900, Visits: 3,
+			LoadLast: 22, LoadLowest: 9, LoadHighest: 71,
+		}}
+	})
+
+	// Nothing on disk yet, which is the state a kill -9 would catch.
+	interim := newStateStore(directory)
+	if err := interim.load(); err != nil {
+		t.Fatal(err)
+	}
+	if len(interim.snapshot().Stats) != 0 {
+		t.Fatal("mutate wrote the file; it is supposed to defer the write")
+	}
+
+	// The flush is what settles it, and it must report having done so.
+	written, err := first.flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !written {
+		t.Error("flush reported no write for pending changes")
+	}
+
+	second := newStateStore(directory)
+	if err := second.load(); err != nil {
+		t.Fatal(err)
+	}
+	record := second.snapshot().Stats[hostname]
+	if record.DownloadedBytes != 412<<30 || record.UploadedBytes != 38<<30 {
+		t.Errorf("totals did not survive: %+v", record)
+	}
+	if record.MaxDownloadRate != 11<<20 || record.Visits != 3 || record.LoadHighest != 71 {
+		t.Errorf("part of the record was lost: %+v", record)
+	}
+
+	// A second flush with nothing pending must not rewrite the file: the whole point of
+	// the dirty flag is that the timer is cheap when nothing has changed.
+	if written, err := second.flush(); err != nil || written {
+		t.Errorf("flush wrote with nothing pending (written=%v, err=%v)", written, err)
+	}
+}
+
+// Shutdown has to settle pending state, and the engine's own loop is where that happens -
+// a store-level test cannot prove the loop calls it.
+func TestTheEngineFlushesStateOnShutdown(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+
+	// Settle everything the startup path queued, so the pending change below is the only
+	// thing left unwritten.
+	if err := engine.state.update(func(*persistedState) {}); err != nil {
+		t.Fatal(err)
+	}
+	engine.recordTransfer(transferAt(5<<20, 0, 10<<30, 0))
+	engine.recordTransfer(transferAt(5<<20, 0, 14<<30, 0)) // 4 GiB, in memory only
+
+	onDisk := newStateStore(filepath.Dir(engine.state.path))
+	if err := onDisk.load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := onDisk.snapshot().Stats["se-01.protonvpn.net"].DownloadedBytes; got != 0 {
+		t.Fatalf("the poll wrote the file; expected it to defer (%d bytes on disk)", got)
+	}
+
+	engine.flushState("test")
+
+	reloaded := newStateStore(filepath.Dir(engine.state.path))
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.snapshot().Stats["se-01.protonvpn.net"].DownloadedBytes; got != 4<<30 {
+		t.Errorf("flushed total = %s, want 4 GiB", formatBytes(got))
+	}
+
+	// And the loop must actually do this on the way out, not just have the method.
+	source, err := os.ReadFile("engine.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shutdown := regexp.MustCompile(`(?s)case <-ctx\.Done\(\):.*?return nil`).Find(source)
+	if shutdown == nil {
+		t.Fatal("could not find the shutdown branch")
+	}
+	if !bytes.Contains(shutdown, []byte("e.flushState(")) {
+		t.Error("the shutdown branch does not flush pending state")
+	}
+	if !bytes.Contains(source, []byte("flushTicker")) {
+		t.Error("nothing flushes state on a timer, so an unclean kill loses everything since " +
+			"the last loads refresh")
+	}
+}
+
+// A switch must not go ahead during a transfer just because qBittorrent has not answered
+// *yet*. Both containers restart together, qBittorrent is often not up when the first poll
+// lands, and treating that as "nothing is transferring" interrupted a download on every
+// restart - at the moment it is most likely to matter.
+func TestSwitchingWaitsForQBittorrentsFirstAnswer(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	// Failing from the start, as a qBittorrent that has not finished booting would.
+	fake.fail(true)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.LastError != "" })
+	engine := harness.engine
+
+	blocked, reason := engine.transferBlocksSwitch()
+	if !blocked {
+		t.Error("an automatic switch was allowed before qBittorrent had ever answered")
+	}
+	for _, want := range []string{"not answered yet", "waiting up to"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("reason = %q, should explain the wait (%q)", reason, want)
+		}
+	}
+
+	// The safety valve: a wrong URL or key must not freeze selection for ever, so the wait
+	// is bounded and then gives up.
+	engine.startedAt = time.Now().Add(-firstReadingGrace - time.Minute)
+	if blocked, _ := engine.transferBlocksSwitch(); blocked {
+		t.Error("switching is still blocked after the grace period; a misconfiguration " +
+			"would freeze selection")
+	}
+	if !engine.transferGraceExpired {
+		t.Error("giving up was not recorded, so the warning would repeat on every evaluation")
+	}
+
+	// And once a reading does arrive, the rates decide - here, well over the threshold.
+	engine.startedAt = time.Now()
+	fake.fail(false)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+	if blocked, reason := engine.transferBlocksSwitch(); !blocked {
+		t.Errorf("a transfer at 8 MB/s should defer switching (reason: %q)", reason)
+	}
+}
+
+// Waiting for qBittorrent's first answer must never delay the *initial* connection.
+//
+// The transfer gate sits before the "current server unknown" case on purpose - a transfer
+// on a server outside the allowed set is still worth protecting - so a naive wait would
+// have left a fresh start with no tunnel sitting idle for the whole grace period, which is
+// worse than the interruption it was added to prevent.
+func TestTheFirstReadingWaitDoesNotDelayTheInitialConnection(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 8<<20, 0)
+	})
+	fake.fail(true)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.LastError != "" })
+	engine := harness.engine
+
+	for _, testCase := range []struct {
+		name        string
+		hostname    string
+		status      string
+		wantBlocked bool
+	}{
+		// Nothing is running through a tunnel that is down, so there is nothing to protect.
+		{"the tunnel is down", "se-01.protonvpn.net", "crashed", false},
+		{"the tunnel is stopped", "se-01.protonvpn.net", "stopped", false},
+		// Nor through one whose server cannot be identified.
+		{"the server is unknown", "", "running", false},
+		// But a running tunnel on a known server may well be carrying something.
+		{"running on a known server", "se-01.protonvpn.net", "running", true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			engine.mutateSnapshot(func(snapshot *Snapshot) {
+				snapshot.Gluetun.Status = testCase.status
+				if testCase.hostname == "" {
+					// Every route to a hostname has to be closed, not just the pin:
+					// currentHostname also matches Gluetun's exit address against
+					// Proton's, which the harness's fake answers.
+					snapshot.Gluetun.Selection = nil
+					snapshot.Gluetun.Exit.IP = ""
+				} else {
+					snapshot.Gluetun.Selection = map[string][]string{
+						"hostnames": {testCase.hostname},
+					}
+				}
+			})
+			// The hostname must not be recoverable from the remembered pin either.
+			if err := engine.state.update(func(state *persistedState) {
+				state.PinnedHostname = testCase.hostname
+			}); err != nil {
+				t.Fatal(err)
+			}
+			engine.startedAt = time.Now()
+
+			blocked, reason := engine.transferBlocksSwitch()
+			if blocked != testCase.wantBlocked {
+				t.Errorf("blocked = %v, want %v (reason: %q)", blocked, testCase.wantBlocked, reason)
+			}
+		})
 	}
 }

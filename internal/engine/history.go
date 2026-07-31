@@ -28,6 +28,27 @@ import (
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/qbittorrent"
 )
 
+// stateFlushInterval is how often pending in-memory changes are written.
+//
+// The compromise between two failure modes. Writing on every qBittorrent poll - four times
+// a minute, the whole file each time - is needless wear on hardware that may be an SD card.
+// Writing only on the loads refresh, fifteen minutes apart, meant a restart could discard a
+// quarter of an hour of counted bytes. A minute bounds the loss to something nobody will
+// notice while cutting the writes by three quarters.
+const stateFlushInterval = time.Minute
+
+// flushState writes anything the fast path left in memory.
+func (e *Engine) flushState(trigger string) {
+	written, err := e.state.flush()
+	if err != nil {
+		e.logger.Warn("could not save state", "trigger", trigger, "error", err)
+		return
+	}
+	if written {
+		e.logger.Debug("saved pending state", "trigger", trigger)
+	}
+}
+
 // recordSamples folds the current load and latency of every candidate into its statistics.
 //
 // Driven by the loads refresh rather than a clock of its own, so the figures have exactly

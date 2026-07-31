@@ -123,17 +123,12 @@ function bytes(total) {
   return `${(scaled / 1000).toFixed(1)} PB`;
 }
 
-// A rate shown against the threshold that would defer a switch, with a bar so the
-// margin is visible at a glance rather than needing two numbers compared by eye.
-// transferredCell renders how much data has ever moved through a server.
+// transferredCell renders how much data has ever moved through one server.
 //
-// This is the column rather than the peak rate, because it is the figure that means
-// something cumulatively: a peak is one lucky moment, while "42 GB have gone through this
-// server" is a fact about how much you have actually used it. The rates are still in the
-// detail panel, where there is room for both.
-//
-// Never zero for a server that has carried nothing - "not used" and "used, moved nothing"
-// are different claims, and a bare 0 B would make the first look like the second.
+// Not comparable with the qBittorrent card's session totals, which cover every server and
+// reset when qBittorrent restarts. This figure is attributed to this server alone, kept for
+// the life of the server, and is a floor: an interval spanning a switch is credited to
+// neither server rather than guessed at.
 function transferredCell(measured) {
   if (!measured || !measured.transfer_known) {
     return '<span class="muted">not measured</span>';
@@ -150,10 +145,15 @@ function transferredCell(measured) {
     + 'this tool observed - not traffic from before it was watching. Kept until Proton '
     + 'retires the server.';
 
-  return `<div title="${escapeHTML(title)}">${escapeHTML(down)}</div>`
+  // Both lines carry their direction. Leaving it off the first one was fine while it held
+  // the larger number and could be read as the obvious one, but a server that only ever
+  // seeded shows "0 B" on that line - which reads as a total, not as a direction.
+  return `<div title="${escapeHTML(title)}">${escapeHTML(down)} down</div>`
     + `<div class="muted" title="${escapeHTML(title)}">${escapeHTML(up)} up</div>`;
 }
 
+// A rate shown against the threshold that would defer a switch, with a bar so the
+// margin is visible at a glance rather than needing two numbers compared by eye.
 function rateAgainst(speed, threshold) {
   const shown = escapeHTML(rate(speed));
   if (!threshold) return shown;
@@ -731,8 +731,20 @@ function renderTransfer() {
     "qBittorrent's own rate limit, set in qBittorrent. Independent of the thresholds "
     + "above, which are this tool's and decide when switching is deferred.";
 
+  // qBittorrent's own session counters: every server since qBittorrent last started.
+  //
+  // Deliberately labelled apart from the per-server totals in the Server selection card
+  // and the candidate list, because the two are not the same quantity and inviting the
+  // comparison would be misleading. This one resets when qBittorrent restarts and knows
+  // nothing about which server carried what; those are attributed per server, kept for the
+  // life of the server, and exclude any interval that could not be attributed.
   text('transfer-down-total', bytes(transfer.download_total));
   text('transfer-up-total', bytes(transfer.upload_total));
+  el('transfer-down-total').title = el('transfer-up-total').title =
+    "qBittorrent's own counter, across every server, since qBittorrent last started. It "
+    + 'will not match the per-server totals elsewhere: those are attributed to individual '
+    + 'servers and survive a qBittorrent restart, and they exclude intervals that span a '
+    + 'server switch.';
   text('transfer-checked', transfer.has_reading ? timeAgo(transfer.last_check) : 'never');
   outcome('transfer-outcome', transfer.has_reading || Boolean(transfer.last_error),
     !transfer.reachable, transfer.last_error);
@@ -1198,15 +1210,36 @@ function renderCandidateStats(stats) {
     : 'never used');
   text('modal-stat-first', measured.first_seen ? timeAgo(measured.first_seen) : 'unknown');
 
-  // Without qBittorrent nothing measures throughput at all. Saying "0 B" would claim this
-  // server carried nothing, which is a claim about the server rather than about us.
-  if (!measured.transfer_known) {
-    for (const id of ['modal-stat-downloaded', 'modal-stat-uploaded',
-      'modal-stat-max-down', 'modal-stat-max-up', 'modal-stat-reads',
-      'modal-stat-last-transfer']) {
+  // Three different reasons a transfer figure can be missing, and they must not be
+  // conflated - the first is about this deployment, the other two about this server:
+  //
+  //   1. nothing is measuring at all, because qBittorrent is not configured;
+  //   2. qBittorrent is configured but this server has never been measured;
+  //   3. it has been measured and the answer is zero.
+  //
+  // Whether the integration exists is a property of the deployment, so it comes from the
+  // snapshot rather than being inferred from a per-server field. Inferring it was a bug:
+  // a candidate with no record yet reported "needs qBittorrent" on a deployment where
+  // qBittorrent was working perfectly well.
+  const transferRows = ['modal-stat-downloaded', 'modal-stat-uploaded',
+    'modal-stat-max-down', 'modal-stat-max-up', 'modal-stat-reads',
+    'modal-stat-last-transfer'];
+
+  if (!(snapshot.transfer || {}).configured) {
+    for (const id of transferRows) {
       text(id, 'needs qBittorrent');
       el(id).title = 'Set QBITTORRENT_URL and QBITTORRENT_API_KEY to measure transfers. '
         + 'Gluetun exposes no throughput information of its own.';
+    }
+    return;
+  }
+  // transfer_known is still consulted, for the narrower case it exists for: figures a
+  // previous run left behind must not be presented as current.
+  if (!measured.transfer_known) {
+    for (const id of transferRows) {
+      text(id, 'not measured');
+      el(id).title = 'This server has not carried traffic while this tool was watching, '
+        + 'so there is nothing measured for it yet.';
     }
     return;
   }

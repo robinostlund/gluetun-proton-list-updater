@@ -107,6 +107,9 @@ type Engine struct {
 	// throughputHost is the server the last throughput reading was attributed to. A
 	// change of hostname is what ends one stay's measurement and begins the next.
 	throughputHost string
+	// transferGraceExpired records that the wait for qBittorrent's first answer has been
+	// given up on, so the warning is said once rather than on every evaluation.
+	transferGraceExpired bool
 	// throughputPeakDownload and throughputPeakUpload are the highest rates seen since
 	// the last graph point was written, held in memory and cleared when it is.
 	throughputPeakDownload uint64
@@ -310,10 +313,19 @@ func (e *Engine) Run(ctx context.Context) (err error) {
 	// nothing: newTicker treats a zero interval as "never fire".
 	transferTicker := newTicker(e.transferInterval())
 	defer transferTicker.Stop()
+	// The per-server statistics are updated on every qBittorrent poll but written on a
+	// timer, so a fifteen-second poll does not rewrite the whole state file. This is what
+	// bounds how much that can lose.
+	flushTicker := newTicker(stateFlushInterval)
+	defer flushTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			// Settle anything still in memory before going away. Without this a restart
+			// inside the flush window discarded every byte counted since the last write,
+			// which looked exactly like the figures not surviving a restart.
+			e.flushState("shutdown")
 			e.logger.Info("engine stopped")
 			return nil
 
@@ -336,6 +348,9 @@ func (e *Engine) Run(ctx context.Context) (err error) {
 
 		case <-transferTicker.C():
 			e.refreshTransfer(ctx, "scheduled")
+
+		case <-flushTicker.C():
+			e.flushState("scheduled")
 
 		case cmd := <-e.commands:
 			e.handleCommand(ctx, cmd)

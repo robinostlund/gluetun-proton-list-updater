@@ -1365,7 +1365,7 @@ func TestTheImprovementVerdictAppearsOnlyOnce(t *testing.T) {
 	for _, match := range regexp.MustCompile(`<dt>([^<]*)</dt>`).FindAllSubmatch(best, -1) {
 		rows = append(rows, string(match[1]))
 	}
-	want := []string{"Load", "Latency", "Score", "Rank", "Measured throughput"}
+	want := []string{"Load", "Latency", "Score", "Rank", "Transferred via this server"}
 	if strings.Join(rows, "|") != strings.Join(want, "|") {
 		t.Errorf("best column rows = %v, want %v", rows, want)
 	}
@@ -1456,9 +1456,14 @@ func TestDirectionLabelsUseOneVocabulary(t *testing.T) {
 		}
 	}
 	// Each directional measure exists for both directions.
+	//
+	// "all servers" rather than "this session": these are qBittorrent's own counters,
+	// covering every server and resetting when it restarts, and they are not comparable
+	// with the per-server totals in the Server selection card or the candidate list. Two
+	// rows that both read "Measured throughput" invited exactly that comparison.
 	for _, measure := range []string{"%s now", "%s average", "%s threshold", "%s cap",
-		"%sed this session"} {
-		down := strings.ReplaceAll(fmt.Sprintf(measure, "Download"), "Downloaded this", "Downloaded this")
+		"%sed, all servers"} {
+		down := fmt.Sprintf(measure, "Download")
 		up := fmt.Sprintf(measure, "Upload")
 		if !slices.Contains(rows, down) {
 			t.Errorf("missing row %q", down)
@@ -2160,5 +2165,119 @@ func TestTheCandidateColumnShowsTransferredVolume(t *testing.T) {
 		if !bytes.Contains(transferred, []byte(phrase)) {
 			t.Errorf("transferredCell does not distinguish %q", phrase)
 		}
+	}
+}
+
+// Two figures that are not the same quantity must not carry the same label.
+//
+// This shipped wrong: the Server selection card and the qBittorrent card both showed a
+// transferred figure, one attributed per server and one qBittorrent's own session counter
+// across every server, and the naming invited them to be read as the same number and
+// compared. They can legitimately differ in both directions.
+func TestPerServerAndSessionTotalsAreNotPresentedAsTheSameFigure(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The per-server rows say whose figure it is.
+	if count := bytes.Count(page, []byte("<dt>Transferred via this server</dt>")); count != 2 {
+		t.Errorf("found %d per-server transferred rows, want one in each comparison column",
+			count)
+	}
+	// The qBittorrent card says its figure spans every server.
+	for _, label := range []string{"Downloaded, all servers", "Uploaded, all servers"} {
+		if !bytes.Contains(page, []byte("<dt>"+label+"</dt>")) {
+			t.Errorf("the qBittorrent card has no %q row", label)
+		}
+	}
+	// And the old ambiguous label is gone from both.
+	if bytes.Contains(page, []byte("Measured throughput")) {
+		t.Error(`"Measured throughput" is back; it named two different quantities`)
+	}
+
+	// The reason they differ is attached where the confusion happens, not only in the
+	// README.
+	if !bytes.Contains(script, []byte("since qBittorrent last started")) {
+		t.Error("the session totals do not explain that they reset with qBittorrent")
+	}
+	if !bytes.Contains(script, []byte("intervals that span a")) {
+		t.Error("the session totals do not explain why the per-server figures are lower")
+	}
+}
+
+// A figure without its direction is ambiguous, and most so when it is zero: a server that
+// only ever seeded showed a bare "0 B" on the download line, which reads as a total rather
+// than as one direction of two.
+func TestBothDirectionsOfATransferredCellAreLabelled(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell := regexp.MustCompile(`(?s)function transferredCell.*?\n\}`).Find(script)
+	if cell == nil {
+		t.Fatal("could not find transferredCell")
+	}
+
+	for _, direction := range []string{"} down<", "} up<"} {
+		if !bytes.Contains(cell, []byte(direction)) {
+			t.Errorf("a rendered line is missing its direction word (%q)", direction)
+		}
+	}
+}
+
+// Three reasons a transfer figure can be missing, which must not be conflated: nothing is
+// measuring, this server has never been measured, or it was measured as zero. Only the
+// first is about the deployment.
+//
+// This shipped wrong: the panel inferred "needs qBittorrent" from a per-server field, so a
+// candidate with no record yet blamed the integration on a deployment where qBittorrent was
+// working fine.
+func TestAMissingTransferFigureBlamesTheRightThing(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := regexp.MustCompile(`(?s)function renderCandidateStats.*?\n\}`).Find(script)
+	if stats == nil {
+		t.Fatal("could not find renderCandidateStats")
+	}
+
+	// Whether anything is measuring is a property of the deployment, so it must come from
+	// the snapshot rather than from the per-server record.
+	if !bytes.Contains(stats, []byte("(snapshot.transfer || {}).configured")) {
+		t.Error("the panel does not read whether qBittorrent is configured from the snapshot")
+	}
+	// The three messages all exist, and the deployment-level one is guarded by the
+	// deployment-level check.
+	for _, message := range []string{"needs qBittorrent", "not measured", "nothing yet"} {
+		if !bytes.Contains(stats, []byte(message)) {
+			t.Errorf("the panel never says %q", message)
+		}
+	}
+	// "needs qBittorrent" must appear only inside the not-configured branch, which is the
+	// one that ends before transfer_known is consulted.
+	notConfigured := regexp.MustCompile(
+		`(?s)if \(!\(snapshot\.transfer \|\| \{\}\)\.configured\) \{.*?\n  \}`).Find(stats)
+	if notConfigured == nil {
+		t.Fatal("could not find the not-configured branch")
+	}
+	if !bytes.Contains(notConfigured, []byte("needs qBittorrent")) {
+		t.Error("the not-configured branch does not carry the message about configuring it")
+	}
+	// The rendered literal, not the phrase: prose about the bug mentions it too.
+	if count := bytes.Count(stats, []byte("'needs qBittorrent'")); count != 1 {
+		t.Errorf(`"needs qBittorrent" is rendered in %d places; it belongs only where `+
+			`nothing is measuring at all`, count)
 	}
 }

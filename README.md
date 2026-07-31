@@ -492,6 +492,22 @@ watching, or during the interval a qBittorrent restart straddles, are not counte
 totals as a floor. And it is qBittorrent's traffic, not the tunnel's: anything else using the VPN is
 invisible here.
 
+##### Why these do not match the qBittorrent card
+
+The qBittorrent card's *Downloaded, all servers* is qBittorrent's own session counter. It is a
+different quantity from the per-server totals, and the two can differ in **either** direction:
+
+| | Per-server totals | qBittorrent's session counter |
+|---|---|---|
+| Scope | One server | Every server the session touched |
+| Resets | Never (only Proton retiring the server removes it) | Whenever qBittorrent restarts |
+| Covers | Only intervals this tool could attribute | Everything, including intervals spanning a switch |
+
+So within one qBittorrent session the per-server totals will be **lower** — they exclude the
+intervals that straddle a switch. Across a qBittorrent restart they will be **higher**, because they
+kept counting where qBittorrent started again from zero. The rows are labelled apart for exactly this
+reason, and a test keeps them that way; comparing them is not meaningful.
+
 #### What this costs on disk
 
 One record per server, and it does not grow with time. Measured, not estimated:
@@ -507,11 +523,13 @@ seen goes first, and it is logged, because a transferred total disappearing is e
 silent loss these figures must not suffer.
 
 The **write volume** matters more than the size. The statistics are updated on every qBittorrent
-poll, every 15 seconds by default, and the state file is rewritten in full — so a poll now mutates
-memory only, and the loads refresh flushes it. That is 4 writes an hour instead of 240, which on
-hardware that may well be an SD card is the difference between about 30 MB a day and a gigabyte. The
-cost is bounded and worth naming: an unclean shutdown loses whatever arrived since the last flush,
-which for a peak rate and a byte count is the right trade.
+poll, every 15 seconds by default, and the state file is rewritten in full — so a poll mutates memory
+only, and the write happens **once a minute, and again on shutdown**. That is a sixteenth of the
+writes, which on hardware that may well be an SD card is the difference between about 30 MB a day and
+a gigabyte, while bounding what an unclean kill can lose to a minute of counting.
+
+The shutdown flush is not optional: without it, a restart inside the timer window discarded
+everything counted since the last write, which read as the figures not surviving a restart at all.
 
 
 ### What it does and does not hold back
@@ -534,9 +552,21 @@ The last known rates are kept and **keep deferring switches**, marked as a stale
 dashboard. This is deliberate: treating "I could not find out" as "nothing is happening" would
 interrupt exactly the transfer the feature exists to protect.
 
-One asymmetry worth knowing: if qBittorrent has **never** answered — a wrong URL, a wrong key, not
-running — the feature falls **open** and switching proceeds. Holding the tunnel on one server for
-ever because of a misconfiguration would be worse, and the failure is reported loudly instead.
+"Never answered" is split by how long that has been true, because the two cases want opposite
+answers:
+
+| State | Behaviour |
+|---|---|
+| No answer **yet**, within 5 minutes of startup | switching **waits**. Both containers restart together and qBittorrent is often not up when the first poll lands |
+| No answer for longer than that | falls **open**, with a warning naming the settings to check |
+
+The first case is not hypothetical: without it, a restart during an active download switched servers
+every time — the exact interruption this feature exists to prevent, at the moment it is most likely
+to happen. The second keeps a wrong URL or key from freezing selection for ever.
+
+The wait applies only when there is something to protect. With the tunnel **down**, or up on a server
+this tool cannot identify, nothing is flowing through it, so an initial connection is never delayed
+waiting to find out.
 
 ### Is the forwarded port actually reaching qBittorrent?
 

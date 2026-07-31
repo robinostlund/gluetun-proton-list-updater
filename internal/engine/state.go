@@ -201,6 +201,9 @@ type stateStore struct {
 
 	mu    sync.RWMutex
 	state persistedState
+	// dirty marks changes that are in memory but not yet on disk, made through mutate.
+	// flush is what settles them.
+	dirty bool
 }
 
 func newStateStore(directory string) *stateStore {
@@ -246,6 +249,33 @@ func (s *stateStore) mutate(change func(state *persistedState)) {
 	defer s.mu.Unlock()
 	change(&s.state)
 	s.trim()
+	s.dirty = true
+}
+
+// flush writes the state if anything is waiting in memory, and reports whether it did.
+//
+// The counterpart to mutate, and the reason the deferred write is bounded rather than
+// open-ended. Called on a short timer and again on shutdown: without the second, a restart
+// inside the timer window lost every byte counted since the last write, which read as the
+// figures not surviving a restart at all.
+func (s *stateStore) flush() (written bool, err error) {
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return false, nil
+	}
+	state := s.state
+	s.dirty = false
+	s.mu.Unlock()
+
+	if err := atomicfile.WriteJSON(s.path, state, 0o600); err != nil {
+		// Left dirty so the next flush tries again rather than dropping the change.
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
+		return false, fmt.Errorf("saving state: %w", err)
+	}
+	return true, nil
 }
 
 // trim enforces every cap. Called from both mutation paths, so a change that only lives in
@@ -267,9 +297,14 @@ func (s *stateStore) update(mutate func(state *persistedState)) (err error) {
 	mutate(&s.state)
 	s.trim()
 	state := s.state
+	// This writes everything, including whatever mutate left pending.
+	s.dirty = false
 	s.mu.Unlock()
 
 	if err := atomicfile.WriteJSON(s.path, state, 0o600); err != nil {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
 		return fmt.Errorf("saving state: %w", err)
 	}
 	return nil

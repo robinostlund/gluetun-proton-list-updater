@@ -174,17 +174,51 @@ func (e *Engine) transferBlocksSwitch() (blocked bool, reason string) {
 	if e.qbittorrent == nil {
 		return false, ""
 	}
-	// The two failure modes are treated differently, on purpose.
+	// Three states, not two, and the middle one is the whole point of this block.
 	//
-	// Never having had a reading - a wrong URL, a wrong key, qBittorrent not running -
-	// falls open. Holding the tunnel on a degrading server for ever because of a
-	// misconfiguration would be a worse outcome than a switch, and the failure is
-	// reported loudly elsewhere rather than silently freezing selection.
+	// Having had a reading and then losing contact falls safe: the last known rates keep
+	// deferring, because a transfer that was running a moment ago is very likely still
+	// running. That is handled below.
 	//
-	// Having had a reading and then losing contact falls safe: the last known rates
-	// keep deferring, because a transfer that was running a moment ago is very likely
-	// still running.
+	// Never having had a reading is split by *how long* that has been true:
+	//
+	//   - briefly, which is the normal state just after a restart. Both containers come up
+	//     together and qBittorrent is often not answering yet, so the first poll fails.
+	//     Treating that as "nothing is transferring" let a switch through during an active
+	//     download on every restart - the exact interruption this feature exists to
+	//     prevent, at the moment it is most likely to happen. So it waits.
+	//   - persistently, which means a wrong URL, a wrong key, or qBittorrent genuinely not
+	//     running. Then it falls open: holding the tunnel on a degrading server for ever
+	//     because of a misconfiguration is a worse outcome than a switch, and the failure
+	//     is reported loudly elsewhere rather than silently freezing selection.
 	if e.transferCheckedAt.IsZero() {
+		// Waiting is only defensible when there is something to protect. With the tunnel
+		// down, or up on a server this tool cannot identify, no transfer is running through
+		// it - so connecting matters more than waiting to find out, and a fresh start with
+		// qBittorrent still booting must not sit idle for the whole grace period.
+		//
+		// Note this is narrower than the gate above it: once a reading exists, a transfer on
+		// a server outside the allowed set is still protected. Only the "we have not been
+		// told anything yet" case gives way.
+		hostname, _ := e.currentHostname()
+		if hostname == "" || e.Snapshot().Gluetun.Status != gluetunapi.StatusRunning {
+			return false, ""
+		}
+		if waited := time.Since(e.startedAt); waited < firstReadingGrace {
+			return true, fmt.Sprintf(
+				"qbittorrent has not answered yet (%s since startup, waiting up to %s "+
+					"before switching without knowing)",
+				waited.Truncate(time.Second), firstReadingGrace)
+		}
+		// Said once, when the grace period runs out, rather than on every evaluation.
+		if !e.transferGraceExpired {
+			e.transferGraceExpired = true
+			e.logger.Warn("qbittorrent has never answered; switching will no longer wait for it",
+				"waited", firstReadingGrace,
+				"consequence", "a switch can now interrupt a transfer, because there is no "+
+					"way to tell whether one is running",
+				"fix", "check QBITTORRENT_URL and QBITTORRENT_API_KEY")
+		}
 		return false, ""
 	}
 	if !e.transferIsBusy() {
@@ -461,6 +495,15 @@ func formatBytes(total uint64) string {
 	}
 	return fmt.Sprintf("%.1f PB", value/unit)
 }
+
+// firstReadingGrace is how long automatic switching waits for qBittorrent's first answer
+// before proceeding without it.
+//
+// Long enough for qBittorrent to finish starting when both containers come up together,
+// which is the case this exists for; short enough that a genuine misconfiguration does not
+// freeze selection for long. Only the first reading is waited for - once one has arrived,
+// the last known rates keep deferring on their own.
+const firstReadingGrace = 5 * time.Minute
 
 // transferInterval is how often to read the rates, zero when the feature is off so
 // the ticker never fires.
