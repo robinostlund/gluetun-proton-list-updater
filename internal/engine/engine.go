@@ -817,7 +817,7 @@ func (e *Engine) publish() {
 	// out of the snapshot. Recomputing it here is what keeps the port-forwarding
 	// verdict in step with Gluetun, whose port arrives on a different tick.
 	var transfer *TransferStatus
-	if e.qbittorrent != nil {
+	if len(e.rateSources) > 0 {
 		view := e.transferView()
 		transfer = &view
 	}

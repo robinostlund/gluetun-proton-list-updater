@@ -364,10 +364,26 @@ function renderStatusStrip() {
       detail.push('qBittorrent is not answering, so this is the last reading taken - which is '
         + 'what keeps deferring switches until it answers again.');
     }
-    // "idle" rather than "0 B/s down · 0 B/s up", which is a lot of characters to say nothing
-    // and is the usual state.
-    chip('Transfer', down || up ? `${rate(down)} down · ${rate(up)} up` : 'idle',
-      transfer.reachable ? 'info' : 'warn', detail.join(' '));
+    // Built here rather than through chip(), because this is the one chip whose value has
+    // internal structure: two directions that are easier to tell apart by colour than by
+    // reading to the end of the word.
+    //
+    // The border says whether anything is flowing at all - green when it is, plain when idle.
+    // That is a state, not a verdict, so unlike colouring against the threshold it cannot
+    // contradict the switching chip beside it: presence and magnitude are different questions,
+    // and only magnitude is averaged.
+    //
+    // "idle" rather than "0 bit/s down · 0 bit/s up", which is a lot of characters to say
+    // nothing and is the usual state.
+    const flowing = down > 0 || up > 0;
+    const level = !transfer.reachable ? 'warn' : flowing ? 'active' : 'idle';
+    const value = flowing
+      ? `<b class="rate-down">${escapeHTML(rate(down))} down</b>`
+        + `<span class="chip-sep">·</span>`
+        + `<b class="rate-up">${escapeHTML(rate(up))} up</b>`
+      : '<b>idle</b>';
+    chips.push(`<span class="chip chip-${level}" title="${escapeHTML(detail.join(' '))}">`
+      + `<span class="chip-label">Transfer</span>${value}</span>`);
   }
 
   // What the engine will actually do, which is the question behind all of the above.

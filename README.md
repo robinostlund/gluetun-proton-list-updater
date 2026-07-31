@@ -511,7 +511,7 @@ Samples age out relative to the **last successful reading**, not to the clock. M
 qBittorrent that stopped answering would drain the window until the average fell below the threshold
 and a switch was allowed — silently undoing the fail-safe below.
 
-**The two directions are independent.** Seeding at 5 MB/s and downloading at 5 MB/s are different
+**The two directions are independent.** Seeding at 40 Mbit/s and downloading at 40 Mbit/s are different
 situations, and you may want to protect one and not the other. Setting either to `0` stops it being
 a trigger; setting both to `0` is rejected at startup, since the feature would read as enabled while
 never deferring anything.
@@ -552,7 +552,7 @@ Best means *lowest* for both load and latency. The stored field names say `lowes
 rather than best and worst, because reading those requires already knowing which direction is good.
 
 **Rates cover one stay; volumes cover all time.** They are different kinds of claim. "412 GB have
-gone through this server" only grows truer with age. "This server does 14 MB/s" was true on one
+gone through this server" only grows truer with age. "This server does 110 Mbit/s" was true on one
 evening under one set of conditions, and repeating it about a server that is busier now is worse than
 saying nothing — so a rate describes the current stay, or the most recent one for a server not in use.
 
@@ -1015,8 +1015,8 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `QBITTORRENT_API_KEY` | – | API key from Preferences → Web UI → API keys. Required when the URL is set. |
 | `QBITTORRENT_INTERVAL` | `15s` | How often the rates are read. |
 | `QBITTORRENT_TIMEOUT` | `5s` | Per-request timeout. Must be shorter than the interval. |
-| `SWITCHING_BUSY_DOWNLOAD` | `1MiB` | Defer automatic switching at or above this download rate. `0` disables this trigger. |
-| `SWITCHING_BUSY_UPLOAD` | `1MiB` | Defer automatic switching at or above this upload rate. `0` disables this trigger. |
+| `SWITCHING_BUSY_DOWNLOAD` | `8` | **Mbit/s.** Defer automatic switching at or above this download rate. `0` disables this trigger. |
+| `SWITCHING_BUSY_UPLOAD` | `8` | **Mbit/s.** Defer automatic switching at or above this upload rate. `0` disables this trigger. |
 | `SWITCHING_BUSY_WINDOW` | `5m` | Average the rates over this period before comparing them. `0` uses the latest reading alone. |
 | `SWITCHING_BUSY_MAX_DEFER` | unset | Cap on how long a transfer may defer switching. Unset means indefinitely. |
 

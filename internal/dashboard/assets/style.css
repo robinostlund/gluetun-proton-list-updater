@@ -129,9 +129,21 @@ main {
 }
 .chip b { font-weight: 600; }
 .chip-label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; }
-/* A measurement rather than a state: no border tint, and the value in body text. Colouring
-   a rate would make it look like a verdict, and the verdict is the chip next to it. */
-.chip-info b { color: var(--text); font-variant-numeric: tabular-nums; }
+/* The transfer chip. Its border says whether anything is flowing, and the two directions are
+   coloured apart so they can be told at a glance rather than by reading to the end of the word.
+
+   Distinct hues rather than two shades of one: download and upload are different quantities,
+   not more and less of the same. Green for down because it is the one a torrent client is
+   usually judged on, the accent for up. Neither is a verdict - the switching chip beside them
+   carries that. */
+.chip-active { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
+.chip-active .chip-label { color: var(--good); }
+.chip-idle b { color: var(--text-muted); }
+.chip b { font-variant-numeric: tabular-nums; }
+.rate-down { color: var(--good); }
+.rate-up { color: var(--accent); }
+/* A quiet separator, so the two values read as one measurement rather than two chips. */
+.chip-sep { color: var(--text-muted); opacity: 0.6; }
 .chip-good { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
 .chip-good b { color: var(--good); }
 .chip-warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
@@ -210,6 +222,39 @@ main {
 
 @media (max-width: 900px) {
   .selection { grid-template-columns: 1fr; }
+}
+
+/* Narrow screens: the top bar has three things to fit and a phone has room for about one and
+   a half of them.
+
+   The strip gets its own row rather than a squeezed sliver of the first. With flex: 1 1 auto
+   and min-width: 0 it would shrink to whatever the title left over - forty or fifty pixels,
+   scrolling one chip at a time, which is worse than useless. Full width and scrolling
+   sideways is the same pattern, given enough room to be read.
+
+   The strip is also aligned left here rather than centred: centring a row that overflows means
+   it starts mid-scroll, hiding the first chip - which is the tunnel, the one that matters
+   most. */
+@media (max-width: 700px) {
+  .topbar {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+  .topbar .brand { flex: 1 1 auto; min-width: 0; }
+  /* The subtitle is a description, not a status: on a phone the vertical space it costs in a
+     sticky bar is worth more than the sentence. */
+  .subtitle { display: none; }
+  .logo { font-size: 20px; }
+  .topbar h1 { font-size: 15px; }
+  .strip {
+    order: 3;
+    flex: 1 0 100%;
+    justify-content: flex-start;
+    /* Room for the scroll shadow, and so the chips are not flush against the edge. */
+    padding-bottom: 4px;
+  }
+  /* A little margin so a scrolled chip is not clipped by the rounded corner of the bar. */
+  .strip > .chip:last-child { margin-right: 4px; }
 }
 
 /* Sub-headings inside a merged card, so "Tunnel" and "Exit address" stay legibly

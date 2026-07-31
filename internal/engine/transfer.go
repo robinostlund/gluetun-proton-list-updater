@@ -21,13 +21,23 @@ import (
 // known rates are kept, marked as not current, and they keep deferring switches until
 // qBittorrent answers again.
 func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
-	if e.qbittorrent == nil {
+	// The source list, not qBittorrent specifically: guarding on the one implementation that
+	// exists today would mean a second source could be configured and never read, which is
+	// the whole point of having a list.
+	if len(e.rateSources) == 0 {
 		return
 	}
 
 	reading, source, failures := readRates(ctx, e.rateSources)
-	if len(failures) > 0 && source == "" {
+	if source == "" {
+		// No source answered. Keyed on that rather than on there being failures: an empty
+		// source list produces neither an answer nor a failure, and the earlier condition let
+		// that fall through to the success path below - publishing a zero reading as if it
+		// had been measured, which reads as "idle" and lets a switch through.
 		err := errors.Join(failures...)
+		if err == nil {
+			err = errors.New("no rate source answered")
+		}
 		e.transferReachable = false
 		// Logged at warn once and at debug thereafter: a qBittorrent that is down
 		// stays down, and repeating the same line every fifteen seconds drowns the
@@ -287,6 +297,11 @@ const (
 // this tool exists to catch, so the reason is kept and reported rather than dropped
 // at debug level where nobody would ever see it.
 func (e *Engine) refreshQBittorrentPreferences(ctx context.Context) {
+	// Genuinely qBittorrent's own: the listening port and the random-port setting are its
+	// settings, not something a rate source in general would have.
+	if e.qbittorrent == nil {
+		return
+	}
 	interval := preferencesInterval
 	if e.qbPreferencesErr != "" || e.qbPreferences.ListenPort == 0 || e.qbittorrentVersion == "" {
 		interval = preferencesRetryInterval
@@ -389,7 +404,7 @@ func (e *Engine) portForwardingVerdict(gluetun GluetunStatus) (verdict, detail s
 				"matching the forwarded port the next time it starts.", listen)
 	}
 
-	switch e.qbSource.last.ConnectionStatus {
+	switch e.qbSource.latest().ConnectionStatus {
 	case "connected":
 		if len(forwarded) > 0 {
 			return "working", fmt.Sprintf(
@@ -462,9 +477,9 @@ func (e *Engine) transferView() TransferStatus {
 		Samples:               len(e.transferSamples),
 		DownloadTotal:         e.reading.DownloadedBytes,
 		UploadTotal:           e.reading.UploadedBytes,
-		DownloadLimit:         bitsFromBytes(e.qbSource.last.DownloadLimit),
-		UploadLimit:           bitsFromBytes(e.qbSource.last.UploadLimit),
-		ConnectionStatus:      e.qbSource.last.ConnectionStatus,
+		DownloadLimit:         bitsFromBytes(e.qbSource.latest().DownloadLimit),
+		UploadLimit:           bitsFromBytes(e.qbSource.latest().UploadLimit),
+		ConnectionStatus:      e.qbSource.latest().ConnectionStatus,
 		ListenPort:            e.qbPreferences.ListenPort,
 		ListenPortError:       e.qbPreferencesErr,
 		RandomPort:            e.qbPreferences.RandomPort,
@@ -499,7 +514,7 @@ const firstReadingGrace = 5 * time.Minute
 // transferInterval is how often to read the rates, zero when the feature is off so
 // the ticker never fires.
 func (e *Engine) transferInterval() time.Duration {
-	if e.qbittorrent == nil {
+	if len(e.rateSources) == 0 {
 		return 0
 	}
 	return e.cfg.QBittorrent.Interval

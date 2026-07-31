@@ -2549,7 +2549,7 @@ func TestTheStatusStripShowsTheLiveRatesNextToTheVerdict(t *testing.T) {
 
 	// One chip for both directions, each named in words rather than left to a slash and the
 	// reader's assumption about which comes first.
-	if !bytes.Contains(strip, []byte(`chip('Transfer'`)) {
+	if !bytes.Contains(strip, []byte(`>Transfer</span>`)) {
 		t.Error("the strip has no transfer chip")
 	}
 	for _, direction := range []string{"down ·", "} up`"} {
@@ -2564,11 +2564,11 @@ func TestTheStatusStripShowsTheLiveRatesNextToTheVerdict(t *testing.T) {
 	}
 	// Only when there is something measuring them.
 	guard := bytes.Index(strip, []byte("if (transfer.configured)"))
-	if guard < 0 || guard > bytes.Index(strip, []byte(`chip('Transfer'`)) {
+	if guard < 0 || guard > bytes.Index(strip, []byte(`>Transfer</span>`)) {
 		t.Error("the transfer chip is not behind the qBittorrent-configured check")
 	}
 	// Before the switching verdict: cause, then effect.
-	if bytes.Index(strip, []byte(`chip('Transfer'`)) > bytes.Index(strip, []byte("'Switching'")) {
+	if bytes.Index(strip, []byte(`>Transfer</span>`)) > bytes.Index(strip, []byte("'Switching'")) {
 		t.Error("the rates come after the switching verdict they explain")
 	}
 	// Idle says so, rather than spending thirty characters on two zeroes.
@@ -2576,12 +2576,25 @@ func TestTheStatusStripShowsTheLiveRatesNextToTheVerdict(t *testing.T) {
 		t.Error("an idle tunnel is rendered as a pair of zeroes")
 	}
 
-	// Neutral, not coloured against the threshold.
-	if !bytes.Contains(strip, []byte("? 'info' : 'warn'")) {
-		t.Error("the rate chips are not neutral while qBittorrent is answering")
+	// Coloured by whether anything is flowing - a state - and never against the threshold,
+	// which is a verdict decided on the average and would contradict an instantaneous value
+	// every time traffic dipped between pieces.
+	if !bytes.Contains(strip, []byte("flowing ? 'active' : 'idle'")) {
+		t.Error("the transfer chip is not coloured by whether traffic is flowing")
 	}
-	if !bytes.Contains(styles, []byte(".chip-info b")) {
-		t.Error("the neutral chip level has no styling, so its value inherits a verdict colour")
+	for _, rule := range []string{".chip-active", ".chip-idle b", ".rate-down", ".rate-up"} {
+		if !bytes.Contains(styles, []byte(rule)) {
+			t.Errorf("%s has no styling", rule)
+		}
+	}
+	// The two directions are told apart by hue, not by two shades of one colour.
+	if !bytes.Contains(styles, []byte(".rate-down { color: var(--good); }")) ||
+		!bytes.Contains(styles, []byte(".rate-up { color: var(--accent); }")) {
+		t.Error("the two directions are not given distinct colours")
+	}
+	// A stale reading still overrides both: it is the more important thing to know.
+	if !bytes.Contains(strip, []byte("!transfer.reachable ? 'warn'")) {
+		t.Error("a stale reading is not marked, so it would look like a live one")
 	}
 	// The average that actually decides is one hover away, since the number shown is not it.
 	if !bytes.Contains(strip, []byte("Switching is decided on the")) {
@@ -2708,5 +2721,48 @@ func TestRatesAreShownInBitsAndVolumesInBytes(t *testing.T) {
 	}
 	if bytes.Contains(script, []byte("byteRate(")) {
 		t.Error("something still renders a rate in bytes")
+	}
+}
+
+// The top bar has three things to fit and a phone has room for about one and a half, so the
+// narrow layout is a real layout rather than the wide one squeezed.
+func TestTheTopBarIsUsableOnANarrowScreen(t *testing.T) {
+	t.Parallel()
+
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	narrow := regexp.MustCompile(`(?s)@media \(max-width: 700px\) \{.*?\n\}`).Find(styles)
+	if narrow == nil {
+		t.Fatal("there is no narrow-screen layout for the top bar")
+	}
+
+	// The strip gets its own row. Sharing the first one, it shrinks to whatever the title
+	// leaves - forty or fifty pixels, scrolling one chip at a time.
+	if !bytes.Contains(narrow, []byte("flex: 1 0 100%")) {
+		t.Error("the status strip does not get its own row on a narrow screen")
+	}
+	// And starts at the beginning: centring a row that overflows starts it mid-scroll, hiding
+	// the first chip, which is the tunnel.
+	if !bytes.Contains(narrow, []byte("justify-content: flex-start")) {
+		t.Error("the strip is still centred when it overflows, hiding the first chip")
+	}
+	// The subtitle is a description, not a status; in a sticky bar its vertical cost outweighs
+	// the sentence.
+	if !bytes.Contains(narrow, []byte(".subtitle { display: none; }")) {
+		t.Error("the subtitle still takes vertical space in a sticky bar on a phone")
+	}
+
+	// The wide layout keeps centring, so this is a narrow-screen change rather than a
+	// regression for everyone.
+	wide := regexp.MustCompile(`(?ms)^\.strip \{.*?^\}`).Find(styles)
+	if wide == nil || !bytes.Contains(wide, []byte("justify-content: center")) {
+		t.Error("the wide layout lost its centred strip")
+	}
+	// Horizontal scrolling, not wrapping: a wrapping strip grows a sticky bar into the page.
+	if !bytes.Contains(wide, []byte("overflow-x: auto")) || !bytes.Contains(wide, []byte("flex-wrap: nowrap")) {
+		t.Error("the strip wraps instead of scrolling")
 	}
 }

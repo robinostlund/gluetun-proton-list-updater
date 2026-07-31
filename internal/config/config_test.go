@@ -865,3 +865,57 @@ func TestNoSecretValueIsEverReported(t *testing.T) {
 			"needed to log in. What must never be serialised to the dashboard is Variables.")
 	}
 }
+
+// The README's reference table states the defaults, so it has to agree with them.
+//
+// It drifted the moment the threshold unit changed: the table still said `1MiB` while the code
+// had moved to megabits, which is the one place someone checks when their setting does not
+// behave as expected.
+func TestTheDocumentedDefaultsMatchTheCode(t *testing.T) {
+	t.Parallel()
+
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every variable the reference table documents with a default, against what config.go
+	// actually passes as one. Only the simple literal defaults: anything computed is out of
+	// scope for a text comparison and would produce noise rather than findings.
+	rows := regexp.MustCompile(`(?m)^\| ` + "`" + `([A-Z_0-9]+)` + "`" + ` \| ` + "`" + `([^` + "`" + `]+)` + "`")
+	definitions := regexp.MustCompile(
+		`r\.(?:str|choice|integer|boolean|duration|float|megabits)\("([A-Z_0-9]+)", *([^),]+)\)`)
+
+	actual := map[string]string{}
+	for _, match := range definitions.FindAllSubmatch(source, -1) {
+		actual[string(match[1])] = strings.TrimSpace(string(match[2]))
+	}
+
+	var checked int
+	for _, row := range rows.FindAllSubmatch(readme, -1) {
+		name, documented := string(row[1]), string(row[2])
+		code, found := actual[name]
+		if !found {
+			continue
+		}
+		// Compare only where the code's default is a plain number or a quoted string, which
+		// is what a table cell can be checked against without interpreting Go.
+		normalised := strings.Trim(code, `"`)
+		if strings.ContainsAny(normalised, "*<+/(") {
+			continue
+		}
+		checked++
+		if documented != normalised && documented != normalised+"s" {
+			t.Errorf("README documents %s as %q, but the code defaults to %q",
+				name, documented, normalised)
+		}
+	}
+	if checked < 15 {
+		t.Fatalf("only compared %d defaults; the scan is not working", checked)
+	}
+	t.Logf("compared %d documented defaults against the code", checked)
+}

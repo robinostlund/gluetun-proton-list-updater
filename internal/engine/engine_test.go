@@ -5251,3 +5251,111 @@ func TestTheWireFormatDoesNotDependOnTheToolchain(t *testing.T) {
 		}
 	}
 }
+
+// Rates are read through an ordered list of sources, and the mechanics of that list have to
+// hold before a second source is worth adding.
+func TestTheRateSourceList(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the first source that answers wins", func(t *testing.T) {
+		preferred := &stubRateSource{label: "preferred", reading: rateReading{Download: 100}}
+		fallback := &stubRateSource{label: "fallback", reading: rateReading{Download: 200}}
+
+		reading, source, failures := readRates(context.Background(),
+			[]rateSource{preferred, fallback})
+
+		if source != "preferred" || reading.Download != 100 {
+			t.Errorf("read %d from %q, want 100 from preferred", reading.Download, source)
+		}
+		if len(failures) != 0 {
+			t.Errorf("failures = %v, want none", failures)
+		}
+		// And the one that was not needed is not consulted, or "priority" would only mean
+		// "reported first".
+		if fallback.calls != 0 {
+			t.Errorf("the fallback was called %d times despite the preferred source answering",
+				fallback.calls)
+		}
+	})
+
+	t.Run("a failing source falls through, and says why", func(t *testing.T) {
+		broken := &stubRateSource{label: "broken", err: errors.New("connection refused")}
+		working := &stubRateSource{label: "working", reading: rateReading{Download: 200}}
+
+		reading, source, failures := readRates(context.Background(),
+			[]rateSource{broken, working})
+
+		if source != "working" || reading.Download != 200 {
+			t.Errorf("read %d from %q, want 200 from working", reading.Download, source)
+		}
+		// The skipped source's reason has to survive, or a preferred source could fail
+		// silently for ever while the fallback quietly served the numbers.
+		if len(failures) != 1 || !strings.Contains(failures[0].Error(), "broken") ||
+			!strings.Contains(failures[0].Error(), "connection refused") {
+			t.Errorf("failures = %v, want the broken source's reason", failures)
+		}
+	})
+
+	t.Run("no source answering is a failure, not a zero reading", func(t *testing.T) {
+		// Including the empty list: this fell through to the success path and published a
+		// zero reading as though it had been measured, which reads as "idle" and lets a
+		// switch through during a transfer.
+		for name, sources := range map[string][]rateSource{
+			"empty list":  {},
+			"all failing": {&stubRateSource{label: "a", err: errors.New("no")}},
+		} {
+			_, source, _ := readRates(context.Background(), sources)
+			if source != "" {
+				t.Errorf("%s: source = %q, want none", name, source)
+			}
+		}
+	})
+}
+
+// stubRateSource is a rate source with a scripted answer.
+type stubRateSource struct {
+	label   string
+	reading rateReading
+	err     error
+	calls   int
+}
+
+func (s *stubRateSource) name() string { return s.label }
+
+func (s *stubRateSource) read(context.Context) (rateReading, error) {
+	s.calls++
+	if s.err != nil {
+		return rateReading{}, s.err
+	}
+	return s.reading, nil
+}
+
+// An engine with no rate source configured must not read, tick, publish a transfer block, or
+// panic on qBittorrent's own facts.
+//
+// The guards used to be written in terms of qBittorrent specifically while the dereferences
+// went through the source adapter - two fields set together today, which is a panic waiting
+// for someone to guard on the wrong one.
+func TestNoRateSourceIsHandledEverywhere(t *testing.T) {
+	harness := newHarness(t, false, nil) // no qBittorrent
+	engine := harness.engine
+
+	if len(engine.rateSources) != 0 {
+		t.Fatal("this harness is supposed to have no rate source")
+	}
+	if got := engine.transferInterval(); got != 0 {
+		t.Errorf("transferInterval = %v, want 0 so the ticker never fires", got)
+	}
+	// None of these may panic.
+	engine.refreshTransfer(context.Background(), "test")
+	engine.refreshQBittorrentPreferences(context.Background())
+	verdict, _ := engine.portForwardingVerdict(engine.Snapshot().Gluetun)
+	if verdict == "" {
+		t.Error("the port-forwarding verdict should still answer something")
+	}
+	engine.publish()
+
+	if engine.Snapshot().Transfer.Configured {
+		t.Error("the transfer block reports itself configured with no source")
+	}
+}
