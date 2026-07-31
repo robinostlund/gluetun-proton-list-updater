@@ -2412,3 +2412,43 @@ func TestTheRefreshEndpoints(t *testing.T) {
 		})
 	}
 }
+
+// One colour vocabulary across the whole page: green means true, red means false, and body
+// text means everything else.
+//
+// The settings panel broke it twice over - it greyed out every default, which is most of the
+// panel, and grey already means "absent" elsewhere rather than "in effect".
+func TestTheSettingsPanelUsesThePageColourVocabulary(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderer := regexp.MustCompile(`(?s)function renderSettings.*?\n\}`).Find(script)
+	if renderer == nil {
+		t.Fatal("could not find renderSettings")
+	}
+
+	// The same two classes the rest of the page uses for booleans.
+	for _, want := range []string{`'<span class="ok">true</span>'`, `'<span class="no">false</span>'`} {
+		if !bytes.Contains(renderer, []byte(want)) {
+			t.Errorf("booleans are not coloured like the rest of the page (%s)", want)
+		}
+	}
+	// And a value is never dimmed for being a default.
+	if bytes.Contains(renderer, []byte(`<span class="muted">${value}`)) {
+		t.Error("default values are greyed out again; grey means absent elsewhere on the page")
+	}
+	// Whether a variable was set is still visible, without using colour to say it.
+	if !bytes.Contains(renderer, []byte(`class="configured"`)) {
+		t.Error("nothing distinguishes a configured variable from a default")
+	}
+	if !bytes.Contains(styles, []byte(".settings-group .configured")) {
+		t.Error("the configured marker has no styling")
+	}
+}

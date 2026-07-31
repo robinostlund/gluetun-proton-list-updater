@@ -444,6 +444,13 @@ td.right, th.right { text-align: right; }
 /* The variable names are identifiers, so they are set in the mono face like the values.
    Reading UPPER_SNAKE_CASE in a proportional face is needlessly hard. */
 .settings-group dt { font-family: var(--mono); }
+/* A variable that was actually set is marked on the row rather than by dimming the ones
+   that were not: most variables are defaults, and greying them made the panel unreadable
+   while colliding with the meaning grey carries elsewhere ("absent", not "in effect"). */
+.settings-group .configured {
+  border-left: 2px solid var(--accent);
+  padding-left: 8px;
+}
 /* Label above value rather than beside it.
    Side by side, a long value such as /gluetun/servers/protonvpn.json could not
    fit next to its label, and because flex items default to min-width:auto it

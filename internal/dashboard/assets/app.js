@@ -977,14 +977,24 @@ function renderSettings() {
   if (other.length) grouped.set('Other', other);
 
   const row = (variable) => {
-    // A default is shown but muted: it is in effect, and it is not a decision anybody
-    // made, and those are different things.
+    // Booleans get the colours they have everywhere else on the page: green for true, red
+    // for false. Everything else is body text.
+    //
+    // Defaults used to be greyed out here, which was a mistake - it dimmed most of the panel
+    // (most variables are defaults) and it collided with the meaning grey already carries
+    // elsewhere, which is "absent" rather than "in effect". A default is very much in
+    // effect. Whether it was chosen is marked on the row instead, and said in the tooltip.
     const value = escapeHTML(variable.value);
-    const shown = variable.configured ? value : `<span class="muted">${value}</span>`;
+    const shown = variable.value === 'true' ? '<span class="ok">true</span>'
+      : variable.value === 'false' ? '<span class="no">false</span>'
+        : value;
+    // "set"/"not set" is deliberately left uncoloured: an unset optional credential -
+    // GLUETUN_PASSWORD, say - is not a fault, and red would claim it was.
     const title = variable.secret
       ? 'A credential. Its value is never sent to this page.'
       : variable.configured ? 'Set in the environment.' : 'Not set; this is the default.';
-    return `<div><dt title="${escapeHTML(title)}">${escapeHTML(variable.name)}</dt>`
+    const marker = variable.configured ? ' class="configured"' : '';
+    return `<div${marker}><dt title="${escapeHTML(title)}">${escapeHTML(variable.name)}</dt>`
       + `<dd title="${escapeHTML(title)}">${shown}</dd></div>`;
   };
 
