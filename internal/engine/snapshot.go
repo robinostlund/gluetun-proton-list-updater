@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/catalog"
+	"github.com/robinostlund/gluetun-proton-list-updater/internal/config"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/latency"
 )
 
@@ -421,17 +422,24 @@ type ServerStatsView struct {
 // why the tool behaves the way it does without the operator digging through
 // compose files.
 type SettingsView struct {
-	Countries        []string `json:"countries"`
-	ExcludeCountries []string `json:"exclude_countries,omitempty"`
-	Cities           []string `json:"cities,omitempty"`
-	MaxLoad          int      `json:"max_load"`
-	VPNType          string   `json:"vpn_type"`
-	SecureCore       string   `json:"secure_core"`
-	Tor              string   `json:"tor"`
-	P2P              string   `json:"p2p"`
-	Stream           string   `json:"stream"`
-	FreeTier         string   `json:"free_tier"`
-	IPv6Filter       string   `json:"ipv6_filter"`
+	// Variables is every configuration variable as it actually resolved, including the
+	// ones left at their defaults, in the order they were read.
+	//
+	// The panel used to be a hand-written list of about half of them, which drifted every
+	// time one was added or renamed. This cannot drift: it is recorded while the
+	// configuration is parsed. Secret values are never present - see config.Variable.
+	Variables        []config.Variable `json:"variables,omitempty"`
+	Countries        []string          `json:"countries"`
+	ExcludeCountries []string          `json:"exclude_countries,omitempty"`
+	Cities           []string          `json:"cities,omitempty"`
+	MaxLoad          int               `json:"max_load"`
+	VPNType          string            `json:"vpn_type"`
+	SecureCore       string            `json:"secure_core"`
+	Tor              string            `json:"tor"`
+	P2P              string            `json:"p2p"`
+	Stream           string            `json:"stream"`
+	FreeTier         string            `json:"free_tier"`
+	IPv6Filter       string            `json:"ipv6_filter"`
 
 	LoadWeight     float64 `json:"load_weight"`
 	LatencyWeight  float64 `json:"latency_weight"`

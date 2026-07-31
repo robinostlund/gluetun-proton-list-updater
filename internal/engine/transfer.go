@@ -280,7 +280,7 @@ const (
 // at debug level where nobody would ever see it.
 func (e *Engine) refreshQBittorrentPreferences(ctx context.Context) {
 	interval := preferencesInterval
-	if e.qbPreferencesErr != "" || e.qbPreferences.ListenPort == 0 {
+	if e.qbPreferencesErr != "" || e.qbPreferences.ListenPort == 0 || e.qbittorrentVersion == "" {
 		interval = preferencesRetryInterval
 	}
 	if !e.qbPreferencesAt.IsZero() && time.Since(e.qbPreferencesAt) < interval {
@@ -309,6 +309,22 @@ func (e *Engine) refreshQBittorrentPreferences(ctx context.Context) {
 		e.logger.Info("qbittorrent's port settings are readable again",
 			"listen_port", preferences.ListenPort)
 		e.qbPreferencesErr = ""
+	}
+
+	// The version is read here rather than only at startup, and on the same paced cadence
+	// as the settings for the same reason: it changes rarely, and reading it on every rate
+	// poll would be waste.
+	//
+	// Only at startup was wrong in two ways. If qBittorrent was not running then - the
+	// common case when both containers come up together - it stayed blank for ever; and
+	// after a qBittorrent upgrade the dashboard reported the old version indefinitely.
+	if e.qbittorrentVersion == "" {
+		if version, err := e.qbittorrent.Version(ctx); err == nil {
+			e.qbittorrentVersion = version
+			e.logger.Info("identified qbittorrent", "version", version)
+		} else {
+			e.logger.Debug("could not read qbittorrent's version", "error", err)
+		}
 	}
 	if preferences.ListenPort != e.qbPreferences.ListenPort && e.qbPreferences.ListenPort != 0 {
 		e.logger.Info("qbittorrent's listen port changed",

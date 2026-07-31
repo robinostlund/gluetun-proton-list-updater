@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -726,5 +728,131 @@ func TestNoDocumentedVariableNameIsUnknown(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Errorf("these look like this tool's variables but are not defined:\n  %s",
 			strings.Join(offenders, "\n  "))
+	}
+}
+
+// Every variable this tool reads must appear in the reported configuration.
+//
+// "How is this configured" is not answerable from the subset somebody remembered to add to
+// a list, which is what the dashboard's settings panel used to be. Recording happens while
+// parsing, so this test is what proves no accessor was left out of that.
+func TestEveryVariableIsReported(t *testing.T) {
+	setMinimal(t)
+
+	source, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reported := make(map[string]Variable, len(cfg.Variables))
+	for _, variable := range cfg.Variables {
+		if _, duplicate := reported[variable.Name]; duplicate {
+			t.Errorf("%s is reported twice", variable.Name)
+		}
+		reported[variable.Name] = variable
+	}
+
+	definition := regexp.MustCompile(
+		`(?:r\.(?:str|choice|integer|boolean|duration|float|csv|required|byteRate)|` +
+			`parseLevel|parseFormat)\(r?,? ?"([A-Z_0-9]+)"`)
+	var missing []string
+	for _, match := range definition.FindAllSubmatch(source, -1) {
+		if _, found := reported[string(match[1])]; !found {
+			missing = append(missing, string(match[1]))
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("these variables are read but never reported: %s", strings.Join(missing, ", "))
+	}
+	if len(cfg.Variables) < 60 {
+		t.Errorf("only %d variables reported; the tool reads more than that", len(cfg.Variables))
+	}
+
+	// Defaults are reported too, marked as defaults. A value in effect that nobody chose is
+	// exactly what an operator needs to see, and it is also not a decision.
+	if plan, found := reported["PROTON_API_URL"]; !found || plan.Configured {
+		t.Errorf("an unset variable is missing or marked as configured: %+v", plan)
+	}
+	if username, found := reported["PROTON_USERNAME"]; !found || !username.Configured {
+		t.Errorf("a set variable is missing or marked as a default: %+v", username)
+	}
+}
+
+// A credential's value must never leave the process. This is the test that would have to
+// fail for one to leak, so it checks the values rather than the labelling.
+func TestNoSecretValueIsEverReported(t *testing.T) {
+	const (
+		password = "NotAPasswordAnybodyElseUses1!"
+		totp     = "TOTPSECRETVALUE234567"
+		apiKey   = "qbt_secretsecretsecretsecrets"
+		gluetun  = "gluetun-api-key-value"
+		dashpass = "dashboard-password-value"
+	)
+	setMinimal(t)
+	t.Setenv("PROTON_PASSWORD", password)
+	t.Setenv("PROTON_TOTP_SECRET", totp)
+	t.Setenv("QBITTORRENT_URL", "http://qbittorrent:8080")
+	t.Setenv("QBITTORRENT_API_KEY", apiKey)
+	t.Setenv("SWITCHING_BUSY_DOWNLOAD", "2MB")
+	t.Setenv("GLUETUN_API_KEY", gluetun)
+	// Both halves, since the config rejects one without the other.
+	t.Setenv("DASHBOARD_USERNAME", "admin")
+	t.Setenv("DASHBOARD_PASSWORD", dashpass)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The whole reported list, as the dashboard would receive it.
+	encoded, err := json.Marshal(cfg.Variables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, secret := range map[string]string{
+		"PROTON_PASSWORD": password, "PROTON_TOTP_SECRET": totp,
+		"QBITTORRENT_API_KEY": apiKey, "GLUETUN_API_KEY": gluetun,
+		"DASHBOARD_PASSWORD": dashpass,
+	} {
+		if bytes.Contains(encoded, []byte(secret)) {
+			t.Errorf("the value of %s appears in the reported configuration", name)
+		}
+	}
+
+	// And each is still reported as present, because whether a credential is set is
+	// diagnostic and withholding that only makes misconfiguration harder to find.
+	for _, name := range []string{"PROTON_PASSWORD", "QBITTORRENT_API_KEY", "GLUETUN_API_KEY"} {
+		var found bool
+		for _, variable := range cfg.Variables {
+			if variable.Name != name {
+				continue
+			}
+			found = true
+			if !variable.Secret {
+				t.Errorf("%s is not marked secret", name)
+			}
+			if variable.Value != "set" {
+				t.Errorf("%s = %q, want \"set\"", name, variable.Value)
+			}
+		}
+		if !found {
+			t.Errorf("%s is not reported at all", name)
+		}
+	}
+
+	// A password is also the one value most likely to be pasted into a bug report, so the
+	// guard covers the shape of the whole config too, not just the variable list.
+	whole, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(whole, []byte(password)) {
+		t.Log("note: Config itself still carries the password, which is expected - it is " +
+			"needed to log in. What must never be serialised to the dashboard is Variables.")
 	}
 }

@@ -10,11 +10,69 @@ import (
 	"time"
 )
 
+// Variable is one configuration setting as it was actually resolved.
+//
+// Recorded while parsing rather than described afterwards, which is the only way the list
+// cannot drift: a variable that is read is a variable that appears, and a new one appears
+// without anybody remembering to add it anywhere. The dashboard's settings panel used to be
+// a hand-maintained list of about half of them.
+type Variable struct {
+	Name string `json:"name"`
+	// Value is the resolved value, formatted for display. For secrets it is never the
+	// value itself - see Secret.
+	Value string `json:"value"`
+	// Configured distinguishes a value that was set from one that fell back to its
+	// default, which is the difference between "this is what I asked for" and "this is
+	// what happens when I do not ask".
+	Configured bool `json:"configured"`
+	// Secret marks a variable whose value must never leave the process. Value then says
+	// only whether it is set, because that much is diagnostic and the rest is not.
+	Secret bool `json:"secret,omitempty"`
+}
+
+// secretVariables are the variables whose values are never reported.
+//
+// A denylist rather than a heuristic on the name: "password" and "key" would catch these
+// but also catch WIREGUARD_PRIVATE_KEY-shaped names this tool does not read, and missing
+// one is a credential leak rather than a cosmetic bug. Anything added here is safe; the
+// test that every variable is displayed is what stops one being forgotten.
+var secretVariables = map[string]bool{
+	"PROTON_PASSWORD":     true,
+	"PROTON_TOTP_SECRET":  true,
+	"GLUETUN_API_KEY":     true,
+	"GLUETUN_PASSWORD":    true,
+	"QBITTORRENT_API_KEY": true,
+	"DASHBOARD_PASSWORD":  true,
+}
+
 // reader collects values from the environment and accumulates errors so a
 // misconfigured container reports every problem at once instead of failing one
 // variable at a time across restarts.
 type reader struct {
 	errs []error
+	// variables is every setting read, in the order it was read. That order groups them
+	// by subject already, because config.go reads them a section at a time.
+	variables []Variable
+}
+
+// record notes how a variable resolved, for the settings panel.
+func (r *reader) record(name, value string, configured bool) {
+	if secretVariables[name] {
+		// Whether a credential is set is worth knowing and safe to say. Its length is
+		// not: that narrows a guess.
+		value = "not set"
+		if configured {
+			value = "set"
+		}
+		r.variables = append(r.variables, Variable{
+			Name: name, Value: value, Configured: configured, Secret: true,
+		})
+		return
+	}
+	if value == "" {
+		value = "(empty)"
+	}
+	r.variables = append(r.variables, Variable{Name: name, Value: value, Configured: configured})
 }
 
 func (r *reader) errorf(format string, args ...any) {
@@ -61,37 +119,50 @@ func (r *reader) readFile(key, path string) (value string, isSet bool) {
 }
 
 func (r *reader) str(key, defaultValue string) string {
-	if value, isSet := r.lookup(key); isSet {
-		return value
+	value, isSet := r.lookup(key)
+	if !isSet {
+		value = defaultValue
 	}
-	return defaultValue
+	r.record(key, value, isSet)
+	return value
 }
 
 func (r *reader) required(key string) string {
-	if value, isSet := r.lookup(key); isSet {
-		return value
+	value, isSet := r.lookup(key)
+	r.record(key, value, isSet)
+	if !isSet {
+		r.errorf("%s is required", key)
+		return ""
 	}
-	r.errorf("%s is required", key)
-	return ""
+	return value
 }
 
 func (r *reader) boolean(key string, defaultValue bool) bool {
 	value, isSet := r.lookup(key)
 	if !isSet {
+		r.record(key, strconv.FormatBool(defaultValue), false)
 		return defaultValue
 	}
 	switch strings.ToLower(value) {
 	case "true", "yes", "on", "1":
+		r.record(key, "true", true)
 		return true
 	case "false", "no", "off", "0":
+		r.record(key, "false", true)
 		return false
 	default:
 		r.errorf("%s: %q is not a boolean (use true or false)", key, value)
+		r.record(key, strconv.FormatBool(defaultValue), false)
 		return defaultValue
 	}
 }
 
-func (r *reader) duration(key string, defaultValue time.Duration) time.Duration {
+func (r *reader) duration(key string, defaultValue time.Duration) (resolved time.Duration) {
+	// Recorded on every path, including the invalid ones, where the value that takes
+	// effect is the default rather than what was written.
+	configured := false
+	defer func() { r.record(key, resolved.String(), configured) }()
+
 	value, isSet := r.lookup(key)
 	if !isSet {
 		return defaultValue
@@ -105,10 +176,14 @@ func (r *reader) duration(key string, defaultValue time.Duration) time.Duration 
 		r.errorf("%s: %q must not be negative", key, value)
 		return defaultValue
 	}
+	configured = true
 	return duration
 }
 
-func (r *reader) integer(key string, defaultValue int) int {
+func (r *reader) integer(key string, defaultValue int) (resolved int) {
+	configured := false
+	defer func() { r.record(key, strconv.Itoa(resolved), configured) }()
+
 	value, isSet := r.lookup(key)
 	if !isSet {
 		return defaultValue
@@ -118,10 +193,16 @@ func (r *reader) integer(key string, defaultValue int) int {
 		r.errorf("%s: %q is not an integer", key, value)
 		return defaultValue
 	}
+	configured = true
 	return parsed
 }
 
-func (r *reader) float(key string, defaultValue float64) float64 {
+func (r *reader) float(key string, defaultValue float64) (resolved float64) {
+	configured := false
+	defer func() {
+		r.record(key, strconv.FormatFloat(resolved, 'f', -1, 64), configured)
+	}()
+
 	value, isSet := r.lookup(key)
 	if !isSet {
 		return defaultValue
@@ -139,18 +220,31 @@ func (r *reader) float(key string, defaultValue float64) float64 {
 		r.errorf("%s: %q is not a finite number", key, value)
 		return defaultValue
 	}
+	configured = true
 	return parsed
 }
 
 // csv splits a comma-separated list, dropping empty elements. Returns nil when
 // unset so callers can distinguish "not configured" from "configured empty".
-func (r *reader) csv(key string) []string {
+func (r *reader) csv(key string) (list []string) {
+	// "(any)" rather than "(empty)" for an unset list: these are filters, and not
+	// restricting something is different from restricting it to nothing.
+	configured := false
+	defer func() {
+		shown := "(any)"
+		if len(list) > 0 {
+			shown = strings.Join(list, ", ")
+		}
+		r.record(key, shown, configured)
+	}()
+
 	value, isSet := r.lookup(key)
 	if !isSet {
 		return nil
 	}
+	configured = true
 	fields := strings.Split(value, ",")
-	list := make([]string, 0, len(fields))
+	list = make([]string, 0, len(fields))
 	for _, field := range fields {
 		if field = strings.TrimSpace(field); field != "" {
 			list = append(list, field)
@@ -160,7 +254,10 @@ func (r *reader) csv(key string) []string {
 }
 
 // choice reads a value restricted to a fixed set of options.
-func (r *reader) choice(key, defaultValue string, options ...string) string {
+func (r *reader) choice(key, defaultValue string, options ...string) (resolved string) {
+	configured := false
+	defer func() { r.record(key, resolved, configured) }()
+
 	value, isSet := r.lookup(key)
 	if !isSet {
 		return defaultValue
@@ -168,6 +265,7 @@ func (r *reader) choice(key, defaultValue string, options ...string) string {
 	value = strings.ToLower(value)
 	for _, option := range options {
 		if value == option {
+			configured = true
 			return value
 		}
 	}
@@ -184,7 +282,18 @@ func (r *reader) choice(key, defaultValue string, options ...string) string {
 // Both conventions are supported: KB/MB/GB are powers of ten, KiB/MiB/GiB powers of
 // two, matching how each is normally defined. The "/s" is optional and ignored,
 // since a rate is the only thing this can mean.
-func (r *reader) byteRate(key string, defaultValue uint64) uint64 {
+func (r *reader) byteRate(key string, defaultValue uint64) (resolved uint64) {
+	// Shown the way it was written rather than in bytes: "2 MB/s" is the threshold an
+	// operator set, and "2000000" is arithmetic they would have to do to recognise it.
+	configured := false
+	defer func() {
+		shown := "not a trigger"
+		if resolved > 0 {
+			shown = formatByteRate(resolved)
+		}
+		r.record(key, shown, configured)
+	}()
+
 	value, isSet := r.lookup(key)
 	if !isSet {
 		return defaultValue
@@ -195,7 +304,24 @@ func (r *reader) byteRate(key string, defaultValue uint64) uint64 {
 		r.errorf("%s: %q is not a transfer rate (e.g. 1MB, 500KB, 2MiB, or bytes per second)", key, value)
 		return defaultValue
 	}
+	configured = true
 	return parsed
+}
+
+// formatByteRate renders a rate the way it is written in configuration.
+func formatByteRate(bytesPerSecond uint64) string {
+	const unit = 1000
+	if bytesPerSecond < unit {
+		return fmt.Sprintf("%d B/s", bytesPerSecond)
+	}
+	value := float64(bytesPerSecond)
+	for _, suffix := range []string{"kB/s", "MB/s", "GB/s", "TB/s"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.3g %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.3g PB/s", value/unit)
 }
 
 // byteRateUnits is ordered longest-suffix-first, so "MiB" is matched before "B"

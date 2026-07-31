@@ -427,12 +427,23 @@ td.right, th.right { text-align: right; }
 
 /* Settings and stats grids */
 .settings {
+  padding: 14px 16px;
+}
+/* One group per subject, each an independent grid, so a short group does not stretch its
+   rows to line up with a long one. */
+.settings-group + .settings-group { margin-top: 18px; }
+.settings-group .kv,
+.settings {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px 18px;
   margin: 0;
-  padding: 14px 16px;
 }
+.settings-group .kv { padding: 8px 0 0; }
+.settings-group > .card-section { margin: 0; }
+/* The variable names are identifiers, so they are set in the mono face like the values.
+   Reading UPPER_SNAKE_CASE in a proportional face is needlessly hard. */
+.settings-group dt { font-family: var(--mono); }
 /* Label above value rather than beside it.
    Side by side, a long value such as /gluetun/servers/protonvpn.json could not
    fit next to its label, and because flex items default to min-width:auto it

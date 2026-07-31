@@ -81,6 +81,14 @@ func (e *Engine) refreshServerList(ctx context.Context, trigger string) {
 		e.logger.Warn("could not cache proton server list", "error", err)
 	}
 
+	// The utilisation figures come embedded in the logical servers, so a full list fetch is
+	// also a load refresh - and both the freshness indicator and the per-server statistics
+	// are driven by that. Not recording it here left them empty until the first loads tick,
+	// fifteen minutes into a run: the candidate list showed "loads not fetched yet" while
+	// ranking on figures it had just received, and no server accumulated a load or latency
+	// reading for that whole first quarter of an hour.
+	e.recordSamples()
+
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Proton.LastFetch = time.Now()
 		snapshot.Proton.LastFetchError = ""
@@ -88,6 +96,9 @@ func (e *Engine) refreshServerList(ctx context.Context, trigger string) {
 		snapshot.Proton.ListLastModified = lastModified
 		snapshot.Proton.FromCache = false
 		snapshot.Proton.NeedsTOTP = false
+		snapshot.Proton.LastLoadRefresh = time.Now()
+		snapshot.Proton.LastLoadError = ""
+		snapshot.Proton.CacheStale = false
 	})
 
 	e.logger.Info("fetched proton server list",
@@ -719,6 +730,13 @@ func (e *Engine) verifyGluetunPin() {
 	}); err != nil {
 		e.logger.Warn("could not forget the stale selection", "error", err)
 	}
+
+	// A restarted Gluetun has re-read the servers file, so hostnames it rejected before are
+	// very likely valid now - that is exactly what the restart fixes. Keeping the learned
+	// rejections would make this tool skip its best candidates for no reason, and the
+	// "restart Gluetun" advice would have been followed and then ignored.
+	e.forgetGluetunHostnames()
+	e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Selection.NeedsGluetunRestart = false })
 }
 
 // lookupCandidate finds a candidate by hostname in either set.

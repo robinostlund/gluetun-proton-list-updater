@@ -4512,3 +4512,215 @@ func TestLoadAndLatencyStatisticsAreOnDiskImmediately(t *testing.T) {
 		t.Errorf("highest = %d ms, want the slower reading recorded", record.RTTHighestMS)
 	}
 }
+
+// The floor on how often the tunnel is torn down has to be absolute, or it is not a floor.
+//
+// It used to sit below the "current server unknown" case while claiming in its own comment
+// that nothing bypassed it. That case did bypass it, which left a reconnect loop reachable:
+// anything that keeps the current server unidentifiable would tear the tunnel down on every
+// evaluation, for ever.
+func TestTheMinimumIntervalAlsoBoundsAnUnidentifiedServer(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Switch.MinInterval = time.Hour
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	// A switch happened moments ago, and the current server cannot be identified at all.
+	if err := engine.state.update(func(state *persistedState) {
+		state.LastSwitchAt = time.Now()
+		state.PinnedHostname = ""
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = nil
+		snapshot.Gluetun.Exit.IP = ""
+	})
+
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false)
+	if verdict.shouldSwitch {
+		t.Errorf("switched with the floor armed: %+v", verdict)
+	}
+	if !strings.Contains(verdict.explanation, "minimum interval") {
+		t.Errorf("explanation = %q, want it to name the floor", verdict.explanation)
+	}
+
+	// An explicit instruction is still the operator's to give.
+	if forced := engine.decide(scoring.Scored{}, false, engine.ranked[0], true); !forced.shouldSwitch {
+		t.Error("a forced switch should bypass the floor")
+	}
+}
+
+// "Already on the best server" is the useful answer when it and the floor are both true, so
+// it is checked first. Moving the floor up must not have swallowed it.
+func TestAlreadyOnTheBestServerIsStillTheAnswerUnderTheFloor(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Switch.MinInterval = time.Hour
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	if err := engine.state.update(func(state *persistedState) {
+		state.LastSwitchAt = time.Now()
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	best := engine.ranked[0]
+	verdict := engine.decide(best, true, best, false)
+	if verdict.explanation != "already on the best server" {
+		t.Errorf("explanation = %q, want the friendlier truth", verdict.explanation)
+	}
+}
+
+// A restarted Gluetun has re-read the servers file, so hostnames it rejected before are very
+// likely valid now - that is what the restart fixes. Keeping the learned rejections would
+// make this tool skip its best candidates for no reason.
+func TestARestartedGluetunClearsLearnedRejections(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	// The set is learned from a rejection, which is how it is populated in practice.
+	engine.gluetunKnownHosts = map[string]struct{}{"se-99.protonvpn.net": {}}
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Selection.NeedsGluetunRestart = true
+	})
+	if err := engine.state.update(func(state *persistedState) {
+		state.PinnedHostname = "se-01.protonvpn.net"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.gluetunKnownHosts) == 0 {
+		t.Fatal("no rejections were learned, so this proves nothing")
+	}
+
+	// Gluetun comes back with no hostname selection: it has restarted.
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = map[string][]string{"countries": {"Sweden"}}
+	})
+	engine.verifyGluetunPin()
+
+	if len(engine.gluetunKnownHosts) != 0 {
+		t.Errorf("learned rejections survived a Gluetun restart: %v", engine.gluetunKnownHosts)
+	}
+	if engine.Snapshot().Selection.NeedsGluetunRestart {
+		t.Error("the restart advice is still showing after Gluetun restarted")
+	}
+}
+
+// Nothing may read the snapshot while holding the write lock on it.
+//
+// sync.RWMutex is not reentrant, so a read inside a mutateSnapshot closure deadlocks the
+// engine loop permanently: no evaluations, no health checks, no dashboard updates, and no
+// error either - the process simply stops doing anything. Several helpers guard against it
+// by computing their values before taking the lock, and the comments say so, but a comment
+// is not enforcement. This is.
+func TestNothingReadsTheSnapshotWhileWritingIt(t *testing.T) {
+	t.Parallel()
+
+	// Reads of published state, directly or through a helper that performs one.
+	readers := []string{
+		"e.Snapshot()", "e.currentHostname(", "e.nextRuns(", "e.statsFor(",
+		"e.transferView(", "e.onCurrentSince(", "e.transferBlocksSwitch(",
+		"e.portForwardingVerdict(", "e.loadTrace(",
+	}
+
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checked int
+	for _, path := range sources {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(source)
+
+		const opener = "mutateSnapshot(func(snapshot *Snapshot)"
+		for offset := 0; ; {
+			start := strings.Index(text[offset:], opener)
+			if start < 0 {
+				break
+			}
+			start += offset
+			// Match braces to find the closure body exactly; a regex cannot, and being
+			// approximate here would either miss cases or cry wolf.
+			open := strings.Index(text[start:], "{") + start
+			depth, end := 1, open+1
+			for depth > 0 && end < len(text) {
+				switch text[end] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+				}
+				end++
+			}
+			body := text[open:end]
+			line := 1 + strings.Count(text[:start], "\n")
+			checked++
+
+			for _, reader := range readers {
+				if strings.Contains(body, reader) {
+					t.Errorf("%s:%d takes the write lock and then calls %s, "+
+						"which takes the read lock: the engine would deadlock. "+
+						"Compute it before mutateSnapshot.", path, line, reader)
+				}
+			}
+			offset = end
+		}
+	}
+	if checked < 10 {
+		t.Fatalf("only found %d snapshot writers; the scan is not working", checked)
+	}
+	t.Logf("checked %d mutateSnapshot closures", checked)
+}
+
+// A full list fetch is also a load refresh, because Proton embeds the utilisation figures in
+// the logical servers it returns.
+//
+// Not treating it as one left a quarter of an hour of a run misreporting itself: the
+// candidate list said "loads not fetched yet" while ranking on figures it had just received,
+// and no server accumulated a load or latency reading until the first loads tick.
+func TestAListFetchCountsAsALoadRefresh(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	engine := harness.engine
+
+	// Exactly the startup sequence: a list fetch, and no loads tick yet.
+	engine.refreshServerList(context.Background(), "startup")
+
+	proton := engine.Snapshot().Proton
+	if proton.LastLoadRefresh.IsZero() {
+		t.Error("the loads are reported as never fetched, though the list carried them")
+	}
+	if proton.LastLoadRefresh.Before(proton.LastFetch.Add(-time.Minute)) {
+		t.Errorf("load refresh %v is older than the fetch %v that produced it",
+			proton.LastLoadRefresh, proton.LastFetch)
+	}
+
+	// And the per-server statistics start accumulating immediately rather than in fifteen
+	// minutes' time.
+	stats := engine.state.snapshot().Stats
+	if len(stats) == 0 {
+		t.Fatal("no server statistics recorded from the list fetch")
+	}
+	var withLoad int
+	for _, record := range stats {
+		if record.Samples > 0 {
+			withLoad++
+		}
+	}
+	if withLoad == 0 {
+		t.Error("statistics exist but none carries a load reading")
+	}
+}

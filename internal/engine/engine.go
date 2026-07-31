@@ -797,6 +797,12 @@ func (e *Engine) publish() {
 		view := e.transferView()
 		transfer = &view
 	}
+	// Computed out here with the others, for the same reason. It happens to read only
+	// configuration today, so calling it under the write lock is safe today - and it is one
+	// natural edit away from reading the snapshot, which would deadlock the engine. The rule
+	// is easier to keep than the exception, and TestNothingReadsTheSnapshotWhileWritingIt
+	// keeps it.
+	settings := e.settingsView()
 
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Version = e.version
@@ -807,7 +813,7 @@ func (e *Engine) publish() {
 		snapshot.CandidatesTotal = len(ranked)
 		snapshot.CandidatesBlocked = len(e.blocked)
 		snapshot.History = reverseHistory(persisted.History)
-		snapshot.Settings = e.settingsView()
+		snapshot.Settings = settings
 		snapshot.Servers.Path = e.cfg.Servers.FilePath
 		snapshot.Servers.WriteMode = e.cfg.Servers.WriteMode
 		snapshot.Servers.SchemaVersion = e.schemaVersion
@@ -909,6 +915,7 @@ func latencyLastRun(snapshot Snapshot) time.Time {
 
 func (e *Engine) settingsView() SettingsView {
 	return SettingsView{
+		Variables:           e.cfg.Variables,
 		Countries:           e.cfg.Filter.Countries,
 		ExcludeCountries:    e.cfg.Filter.ExcludeCountries,
 		Cities:              e.cfg.Filter.Cities,

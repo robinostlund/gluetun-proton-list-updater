@@ -936,40 +936,65 @@ function renderHistory() {
   el('clear-history').disabled = (snapshot.history || []).length === 0;
 }
 
+// The variable groups, in the order they are shown. The prefix is what a variable is
+// named after, so grouping by it needs no mapping table to fall out of date.
+const SETTING_GROUPS = [
+  ['PROTON_', 'ProtonVPN'],
+  ['GLUETUN_SERVERS_', 'Server data written for Gluetun'],
+  ['GLUETUN_', 'Gluetun'],
+  ['FILTER_', 'Filtering'],
+  ['SCORING_', 'Scoring'],
+  ['LATENCY_', 'Latency'],
+  ['SWITCHING_', 'Switching'],
+  ['QBITTORRENT_', 'qBittorrent'],
+  ['DASHBOARD_', 'Dashboard'],
+  ['LOG_', 'Logging'],
+];
+
+// renderSettings lists every configuration variable as it actually resolved.
+//
+// Every one, including those left at their defaults: "how is this configured" is not
+// answerable from the ones somebody remembered to set. This used to be a hand-written list
+// of about half of them, which drifted every time a variable was added or renamed - so the
+// list now comes from the engine, recorded while the configuration was parsed.
+//
+// Secret values never arrive here at all. The engine sends "set" or "not set" for those,
+// which is the diagnostic part and none of the sensitive part.
 function renderSettings() {
-  const settings = snapshot.settings;
-  const entries = [
-    // Prefixed after the variables that set them, so a row maps to a FILTER_* name
-    // without translation - and so this panel's "Protocol" stops colliding with the
-    // Gluetun card's, which reports the protocol actually in use rather than the filter.
-    ['Filter: countries', (settings.countries || []).join(', ') || 'all'],
-    ['Filter: excluded countries', (settings.exclude_countries || []).join(', ') || 'none'],
-    ['Filter: cities', (settings.cities || []).join(', ') || 'all'],
-    ['Filter: max load', `${settings.max_load}%`],
-    ['Filter: VPN type', settings.vpn_type],
-    ['Filter: secure core', settings.secure_core],
-    ['Filter: Tor', settings.tor],
-    ['Filter: P2P', settings.p2p],
-    ['Filter: IPv6', settings.ipv6_filter],
-    ['Filter: stream', settings.stream],
-    ['Filter: free tier', settings.free_tier],
-    ['Load weight', settings.load_weight],
-    ['Latency weight', settings.latency_weight],
-    ['Proton weight', settings.proton_weight],
-    ['Latency ceiling', settings.latency_ceiling],
-    ['List refresh', settings.refresh_interval],
-    ['Load refresh', settings.load_refresh_interval],
-    ['Latency sweep', settings.latency_enabled ? `${settings.latency_interval} (top ${settings.latency_top_n})` : 'disabled'],
-    ['Evaluation', settings.evaluation_interval],
-    ['Switch cooldown', settings.switch_cooldown],
-    ['Min switch interval', settings.switch_min_interval],
-    ['Load trigger', settings.load_trigger ? `${settings.load_trigger}%` : 'disabled'],
-    ['Reconnect mode', snapshot.selection.mode],
-    ['Uptime', timeAgo(snapshot.started_at).replace(' ago', '')],
-  ];
-  el('settings').innerHTML = entries
-    .map(([key, value]) => `<div><dt>${escapeHTML(key)}</dt><dd>${escapeHTML(value)}</dd></div>`)
-    .join('');
+  const variables = (snapshot.settings || {}).variables || [];
+  if (!variables.length) {
+    el('settings').innerHTML = '<div><dt>unavailable</dt><dd class="muted">'
+      + 'this build did not report its configuration</dd></div>';
+    return;
+  }
+
+  const grouped = new Map(SETTING_GROUPS.map(([, label]) => [label, []]));
+  const other = [];
+  for (const variable of variables) {
+    const group = SETTING_GROUPS.find(([prefix]) => variable.name.startsWith(prefix));
+    (group ? grouped.get(group[1]) : other).push(variable);
+  }
+  if (other.length) grouped.set('Other', other);
+
+  const row = (variable) => {
+    // A default is shown but muted: it is in effect, and it is not a decision anybody
+    // made, and those are different things.
+    const value = escapeHTML(variable.value);
+    const shown = variable.configured ? value : `<span class="muted">${value}</span>`;
+    const title = variable.secret
+      ? 'A credential. Its value is never sent to this page.'
+      : variable.configured ? 'Set in the environment.' : 'Not set; this is the default.';
+    return `<div><dt title="${escapeHTML(title)}">${escapeHTML(variable.name)}</dt>`
+      + `<dd title="${escapeHTML(title)}">${shown}</dd></div>`;
+  };
+
+  let html = '';
+  for (const [label, entries] of grouped) {
+    if (!entries.length) continue;
+    html += `<div class="settings-group"><h3 class="card-section">${escapeHTML(label)}</h3>`
+      + `<dl class="kv">${entries.map(row).join('')}</dl></div>`;
+  }
+  el('settings').innerHTML = html;
 }
 
 function renderStats() {

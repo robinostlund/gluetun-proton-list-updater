@@ -145,22 +145,33 @@ func (e *Engine) decide(current scoring.Scored, haveCurrent bool, best scoring.S
 		return decision{explanation: explanation}
 	}
 
-	if !haveCurrent {
-		// Either the tunnel is on a server outside the allowed set, or it is
-		// down. Either way, moving it to the best candidate is right.
-		return decision{shouldSwitch: true, reason: "current server unknown or not allowed"}
-	}
-	if current.Candidate.Hostname == best.Candidate.Hostname {
+	// Checked before the floor below, because it is the more useful thing to say when both
+	// are true: "already on the best server" is the answer, and the floor is incidental.
+	if haveCurrent && current.Candidate.Hostname == best.Candidate.Hostname {
 		return decision{explanation: "already on the best server"}
 	}
 
-	// The hard floor comes first and nothing bypasses it. Every switch tears
-	// down the tunnel and with it every connection through it, so the guarantee
-	// worth having is an upper bound on how often that can happen.
+	// The hard floor. Every switch tears down the tunnel and with it every connection
+	// through it, so the guarantee worth having is an upper bound on how often that can
+	// happen - and a guarantee with exceptions is not one.
+	//
+	// It used to sit below the "current server unknown" case while claiming in its own
+	// comment that nothing bypassed it. That case bypassed it, which left a reconnect loop
+	// reachable: anything that keeps the current server unidentifiable - Gluetun's settings
+	// readable but reporting a hostname this tool does not recognise, an exit address that
+	// matches no Proton server - would tear the tunnel down on every single evaluation, for
+	// ever, with no floor at all. Only an explicit instruction bypasses it now, and that is
+	// handled by the force branch at the top.
 	if remaining := e.minIntervalRemaining(); remaining > 0 {
 		return decision{explanation: fmt.Sprintf(
 			"minimum interval between switches not elapsed, %s to go",
 			remaining.Truncate(time.Second))}
+	}
+
+	if !haveCurrent {
+		// Either the tunnel is on a server outside the allowed set, or it is
+		// down. Either way, moving it to the best candidate is right.
+		return decision{shouldSwitch: true, reason: "current server unknown or not allowed"}
 	}
 
 	// An overloaded current server may skip the (longer) cooldown and the

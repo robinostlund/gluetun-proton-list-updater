@@ -64,6 +64,10 @@ type Config struct {
 	LogLevel slog.Level
 	// LogFormat is "text" or "json".
 	LogFormat string
+
+	// Variables is every setting as it resolved, in the order it was read, for the
+	// dashboard to display. Secret values are never included - see Variable.
+	Variables []Variable
 }
 
 // Proton holds credentials and refresh cadence for the Proton API.
@@ -432,6 +436,9 @@ func Load() (cfg Config, err error) {
 	}
 
 	cfg.normalizeAndValidate(r)
+	// Recorded before the error check so a rejected configuration is still describable,
+	// and taken from the reader so the list cannot disagree with what was parsed.
+	cfg.Variables = r.variables
 
 	if len(r.errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration:\n  - %s",
@@ -555,7 +562,13 @@ func normalizeCountries(r *reader, key string, inputs []string) (names []string)
 	return names
 }
 
-func parseLevel(r *reader, key string, defaultLevel slog.Level) slog.Level {
+func parseLevel(r *reader, key string, defaultLevel slog.Level) (resolved slog.Level) {
+	// Recorded like every other variable. This one is read through its own function rather
+	// than a reader accessor, and was the one setting missing from the reported
+	// configuration until a test went looking for exactly that.
+	configured := false
+	defer func() { r.record(key, strings.ToLower(resolved.String()), configured) }()
+
 	value, isSet := r.lookup(key)
 	if !isSet {
 		return defaultLevel
@@ -565,6 +578,7 @@ func parseLevel(r *reader, key string, defaultLevel slog.Level) slog.Level {
 		r.errorf("%s: %q is not a log level (debug, info, warn, error)", key, value)
 		return defaultLevel
 	}
+	configured = true
 	return level
 }
 

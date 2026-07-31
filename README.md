@@ -352,6 +352,22 @@ and rewrite the servers file — placed next to the state they change. Stopping 
 stopped: the engine treats a stopped tunnel as a deliberate decision and never starts it behind you.
 Stopping the VPN asks first, since every connection through it drops.
 
+### The settings panel shows every variable
+
+**Updater settings** lists every configuration variable as it actually resolved, including the ones
+left at their defaults, grouped by the prefix they are named after. A default in effect is shown but
+muted: it is in effect, and it is not a decision anybody made, and those are different things.
+
+The list is **recorded while the configuration is parsed**, not described afterwards. It used to be a
+hand-written list of about twenty labels, which answered "how is this configured" with the subset
+somebody had remembered to add — and drifted every time a variable was renamed. A test now fails if
+any variable this tool reads is missing from it.
+
+**Credential values never reach the page.** The six secret variables report only `set` or `not set` —
+which is the diagnostic part, and none of the sensitive part. That is a denylist rather than a guess
+based on the name, because missing one is a credential leak rather than a cosmetic bug, and a separate
+test asserts that no secret's value appears anywhere in what the dashboard receives.
+
 ### Controls live in the card for what they act on
 
 There is no shared controls panel. Every button sits in the card for the integration it talks to, and

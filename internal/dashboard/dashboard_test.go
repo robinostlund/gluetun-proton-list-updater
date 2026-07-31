@@ -1770,6 +1770,10 @@ func TestEverySnapshotFieldReadByTheScriptExists(t *testing.T) {
 	for _, file := range []string{
 		"../engine/snapshot.go", "../engine/state.go",
 		"../catalog/catalog.go", "../latency/latency.go", "../logbuf/logbuf.go",
+		// config.Variable is serialised into the settings panel, so its tags are part of
+		// the wire format the script reads. Without this file the scan would accept
+		// variable.whatever, because a same-named tag elsewhere would satisfy it.
+		"../config/env.go",
 	} {
 		source, err := os.ReadFile(file)
 		if err != nil {
@@ -1805,7 +1809,11 @@ func TestEverySnapshotFieldReadByTheScriptExists(t *testing.T) {
 		"matchAll": true, "repeat": true, "toLocaleTimeString": true, "getTime": true,
 	}
 
-	roots := `snapshot|gluetun|proton|servers|transfer|selection|latency|stats|exit|current|best|candidate|record|settings`
+	// Every local name a piece of snapshot data is read through. Missing one silently
+	// exempts a whole family of reads: "variable" and "measured" were absent, which left the
+	// settings panel and every statistic in the candidate panel unchecked.
+	roots := `snapshot|gluetun|proton|servers|transfer|selection|latency|stats|exit|` +
+		`current|best|candidate|record|settings|variable|measured`
 	seen := map[string]bool{}
 	var missing []string
 	for _, match := range regexp.MustCompile(`\b(`+roots+`)\.([a-z][a-z0-9_]*)\b`).
@@ -1825,13 +1833,12 @@ func TestEverySnapshotFieldReadByTheScriptExists(t *testing.T) {
 	}
 }
 
-// The Updater settings rows name the variables that set them, so a value on the page maps
-// to a FILTER_* name without translation.
+// The Updater settings panel shows every variable, generated rather than hand-written.
 //
-// It also removes a real collision: this panel had a "Protocol" row holding the *filter*
-// while the Gluetun card has one holding the protocol actually in use - the same word for
-// two different values.
-func TestUpdaterSettingsNameTheirVariables(t *testing.T) {
+// It used to be a list of about twenty labels maintained by hand, which answered "how is
+// this configured" with the subset somebody had remembered to add - and drifted every time a
+// variable was renamed. Now the engine sends what it actually parsed.
+func TestUpdaterSettingsAreGeneratedFromTheParsedConfiguration(t *testing.T) {
 	t.Parallel()
 
 	script, err := assetsFS.ReadFile("assets/app.js")
@@ -1843,41 +1850,41 @@ func TestUpdaterSettingsNameTheirVariables(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, label := range []string{
-		"'Filter: countries'", "'Filter: excluded countries'", "'Filter: cities'",
-		"'Filter: max load'", "'Filter: VPN type'", "'Filter: secure core'",
-		"'Filter: Tor'", "'Filter: P2P'", "'Filter: IPv6'", "'Filter: stream'",
-		"'Filter: free tier'",
-	} {
-		if !bytes.Contains(script, []byte(label)) {
-			t.Errorf("the settings panel has no %s row", label)
+	renderer := regexp.MustCompile(`(?s)function renderSettings.*?\n\}`).Find(script)
+	if renderer == nil {
+		t.Fatal("could not find renderSettings")
+	}
+	// Driven by the engine's list, not by names written here.
+	if !bytes.Contains(renderer, []byte(".variables")) {
+		t.Error("the settings panel does not render the variables the engine reports")
+	}
+	// No hand-written label list may come back: that is what drifted.
+	if bytes.Contains(renderer, []byte("'Filter: ")) {
+		t.Error("hand-written setting labels are back; they drift when a variable is renamed")
+	}
+	// A default in effect is shown, and marked as a default rather than as a choice.
+	for _, want := range []string{"variable.configured", "this is the default"} {
+		if !bytes.Contains(renderer, []byte(want)) {
+			t.Errorf("the panel does not distinguish a configured value from a default (%q)", want)
+		}
+	}
+	// Secrets are labelled as such where they are displayed.
+	if !bytes.Contains(renderer, []byte("never sent to this page")) {
+		t.Error("the panel does not say that credential values are withheld")
+	}
+
+	// Grouped by the prefix the variables are named after, so no mapping table can fall
+	// out of date.
+	for _, group := range []string{"PROTON_", "GLUETUN_", "FILTER_", "SCORING_", "LATENCY_",
+		"SWITCHING_", "QBITTORRENT_", "DASHBOARD_", "LOG_"} {
+		if !bytes.Contains(script, []byte("['"+group+"'")) {
+			t.Errorf("no settings group for %s", group)
 		}
 	}
 
-	// Every filter the config reads must appear, or a setting is invisible.
-	settings, err := os.ReadFile("../config/config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, match := range regexp.MustCompile(`r\.(?:csv|choice|integer)\("(FILTER_[A-Z_0-9]+)"`).
-		FindAllSubmatch(settings, -1) {
-		name := string(match[1])
-		// The label is the variable with FILTER_ turned into the prefix; compare on the
-		// distinctive tail so wording can differ from the variable's spelling.
-		tail := strings.ToLower(strings.TrimPrefix(name, "FILTER_"))
-		tail = strings.ReplaceAll(tail, "_", " ")
-		if !bytes.Contains(bytes.ToLower(script), []byte("'filter: "+tail+"'")) &&
-			!bytes.Contains(bytes.ToLower(script), []byte("filter: ")) {
-			t.Errorf("%s has no corresponding settings row", name)
-		}
-	}
-
-	// And the collision is gone: "Protocol" now belongs to the Gluetun card alone.
+	// And the old collision stays gone: "Protocol" belongs to the Gluetun card alone.
 	if count := bytes.Count(page, []byte("<dt>Protocol</dt>")); count != 1 {
-		t.Errorf(`"Protocol" appears %d times as a row label, want once (Gluetun's actual protocol)`, count)
-	}
-	if bytes.Contains(script, []byte("['Protocol', settings.vpn_type]")) {
-		t.Error("the settings panel labels the VPN-type filter as Protocol again")
+		t.Errorf(`"Protocol" appears %d times as a row label, want once`, count)
 	}
 }
 
