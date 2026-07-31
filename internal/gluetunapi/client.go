@@ -160,6 +160,10 @@ func (c *Client) SetDNSStatus(ctx context.Context, status string) (outcome strin
 }
 
 // Updater status values.
+//
+// Only "running" is compared against - the poll below waits for the status to stop being it,
+// which is what "no longer running" means whichever of the others Gluetun reports. The other
+// two are named so a reader of a Gluetun log or an API response can find them here.
 const (
 	UpdaterRunning   = "running"
 	UpdaterStopped   = "stopped"

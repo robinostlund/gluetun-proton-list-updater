@@ -2847,3 +2847,148 @@ func TestTouchTargetsAreLargerOnTouchDevices(t *testing.T) {
 		t.Error("the small buttons keep their mouse-sized targets on a touch screen")
 	}
 }
+
+// SettingsView carries what the dashboard reads from it and nothing else.
+//
+// It used to carry twenty-five fields - every filter, weight and interval - read by a
+// hand-written settings panel. Replacing that panel with the generated variables list orphaned
+// twenty-three of them: still populated on every publish, read by nothing, and duplicating
+// values that Variables already carries under the name of the variable that set them.
+func TestTheSettingsViewCarriesOnlyWhatIsRead(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile("../engine/snapshot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := regexp.MustCompile(`(?s)type SettingsView struct \{(.*?)\n\}`).FindSubmatch(source)
+	if body == nil {
+		t.Fatal("could not find SettingsView")
+	}
+
+	// Comments and string literals stripped, so prose mentioning a field name does not count as
+	// reading it.
+	readable := regexp.MustCompile(`(?m)//.*$`).ReplaceAll(script, nil)
+
+	var unread []string
+	for _, field := range regexp.MustCompile(`\n\s*([A-Z]\w*)\s+[\[\]\*\w\.]+\s+`+"`"+`json:"([a-z0-9_]+)`).
+		FindAllSubmatch(body[1], -1) {
+		name, tag := string(field[1]), string(field[2])
+		// Read through the settings object specifically: a bare tag would also match
+		// candidate.tor or transfer.p2p, which are different objects entirely.
+		if regexp.MustCompile(`settings(?: \|\| \{\})?\)?\.` + tag + `\b`).Match(readable) {
+			continue
+		}
+		unread = append(unread, name+" (json:"+tag+")")
+	}
+	if len(unread) > 0 {
+		t.Errorf("SettingsView publishes fields the dashboard never reads: %s\n"+
+			"every configured value is already in Variables, so these are duplicates on the wire",
+			strings.Join(unread, ", "))
+	}
+}
+
+// The README says the Server selection card shows how the current server was identified, and
+// for a long time it did not: the field was published and rendered nowhere.
+//
+// It matters more than most rows, because only one of the three sources is exact - restarting
+// Gluetun discards the pin, and what remains is an inference or an unverified memory.
+func TestHowTheCurrentServerWasIdentifiedIsShown(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(page, []byte(`id="current-source"`)) {
+		t.Error("there is no row for how the current server was identified")
+	}
+	if !bytes.Contains(script, []byte("snapshot.selection.current_source")) {
+		t.Error("the row does not read the published source")
+	}
+	// All three, each explained: the difference between them is the whole point.
+	for _, source := range []string{"pinned", "public-ip", "remembered"} {
+		if !bytes.Contains(script, []byte(source)) {
+			t.Errorf("the %q source is not explained", source)
+		}
+	}
+	// And an unidentifiable server says so rather than falling back to a blank.
+	if !bytes.Contains(script, []byte("cannot identify")) {
+		t.Error("an unidentifiable current server has no explanation")
+	}
+}
+
+// discardLogger keeps test output to failures.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+// Stopping the container must not take five seconds and end in a warning.
+//
+// http.Server.Shutdown waits for active handlers but does not cancel their request contexts,
+// and the event stream waits on exactly that - so it sat there until the client disconnected
+// while Shutdown counted down to its deadline. Every container stop logged "dashboard shutdown
+// was not clean: context deadline exceeded" for as long as a browser tab was open.
+func TestShutdownDoesNotWaitForAnOpenEventStream(t *testing.T) {
+	stub := newStub()
+	server := New(stub, Options{Address: "127.0.0.1:0", Logger: discardLogger()})
+
+	// A request whose context stays open, which is the case that hung: the client has not gone
+	// away, so nothing else will end this handler.
+	request := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	recorder := httptest.NewRecorder()
+
+	returned := make(chan struct{})
+	go func() {
+		server.handleEvents(recorder, request)
+		close(returned)
+	}()
+
+	// Let the handler reach its loop, then shut down.
+	time.Sleep(50 * time.Millisecond)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.http.Shutdown(shutdownCtx); err != nil {
+		t.Errorf("Shutdown: %v", err)
+	}
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("the event stream is still open a second after shutdown began; " +
+			"this is what made every container stop log an unclean shutdown")
+	}
+}
+
+// And the stream still ends when the client goes away, which is the other way it must finish.
+func TestTheEventStreamEndsWhenTheClientDisconnects(t *testing.T) {
+	stub := newStub()
+	server := New(stub, Options{Address: "127.0.0.1:0", Logger: discardLogger()})
+
+	ctx, disconnect := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+
+	returned := make(chan struct{})
+	go func() {
+		server.handleEvents(httptest.NewRecorder(), request)
+		close(returned)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	disconnect()
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("the event stream outlived its client")
+	}
+}

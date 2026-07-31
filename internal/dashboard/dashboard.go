@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/catalog"
@@ -68,6 +69,10 @@ type Server struct {
 	opts       Options
 	logger     *slog.Logger
 	http       *http.Server
+	// shutdown is closed when the server begins shutting down, so long-lived handlers know to
+	// return instead of waiting for their client to disconnect.
+	shutdown  chan struct{}
+	closeOnce sync.Once
 }
 
 // New builds the dashboard server.
@@ -77,7 +82,12 @@ func New(controller Controller, opts Options) *Server {
 		logger = slog.Default()
 	}
 
-	server := &Server{controller: controller, opts: opts, logger: logger}
+	server := &Server{
+		controller: controller,
+		opts:       opts,
+		logger:     logger,
+		shutdown:   make(chan struct{}),
+	}
 	server.http = &http.Server{
 		Addr:    opts.Address,
 		Handler: server.routes(),
@@ -85,6 +95,17 @@ func New(controller Controller, opts Options) *Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	// Shutdown waits for active handlers to return but does not cancel their request
+	// contexts, and the event stream's handler waits on exactly that - so it would sit there
+	// until the client disconnected while Shutdown counted down to its deadline. Stopping the
+	// container therefore logged "dashboard shutdown was not clean: context deadline
+	// exceeded", every time, for as long as a browser tab was open.
+	//
+	// This is the hook that tells the stream to let go. sync.Once because Shutdown may be
+	// called more than once, and closing a closed channel panics.
+	server.http.RegisterOnShutdown(func() {
+		server.closeOnce.Do(func() { close(server.shutdown) })
+	})
 	return server
 }
 
@@ -301,6 +322,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.shutdown:
+			// The server is going away. Returning lets Shutdown finish immediately instead of
+			// waiting for this connection to time out; the browser sees the stream close and
+			// shows "reconnecting…", which is exactly what is happening.
 			return
 		case _, open := <-updates:
 			if !open {

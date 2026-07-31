@@ -2,7 +2,6 @@ package countries
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -61,15 +60,4 @@ func Normalize(input string) (name string, err error) {
 		return codeToName[code], nil
 	}
 	return "", fmt.Errorf("unknown country %q: expected an ISO 3166-1 alpha-2 code (e.g. SE) or a country name (e.g. Sweden)", input)
-}
-
-// AllNames returns every known country name, sorted. Used by the dashboard to
-// offer a country picker.
-func AllNames() (names []string) {
-	names = make([]string, 0, len(codeToName))
-	for _, name := range codeToName {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }

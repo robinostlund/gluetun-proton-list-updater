@@ -514,6 +514,28 @@ function renderCurrent() {
     ? `#${current.rank} of ${snapshot.candidates_total}`
     : current && current.excluded ? 'not in allowed set' : '–');
 
+  // How the current server was worked out, in descending order of confidence. It matters
+  // because only one of the three is exact: restarting Gluetun discards the pin, and what is
+  // left is either an inference from the exit address or an unverified memory of what this tool
+  // last asked for.
+  //
+  // Published all along and shown nowhere, while the README described it as being on the page.
+  const sources = {
+    pinned: ['Gluetun\'s own selection',
+      'Exact: Gluetun\'s settings name this hostname, and it validated the name itself.'],
+    'public-ip': ['matching exit address',
+      'Gluetun\'s exit address matches this server\'s published one. Reliable when it '
+      + 'matches and meaningless when it does not, because Proton publishes the server '
+      + 'address rather than the one the internet sees.'],
+    remembered: ['what this tool last asked for',
+      'Unverified: Gluetun could not be asked. Used only while its settings are unreadable - '
+      + 'a readable Gluetun reporting no hostname disproves this rather than confirming it.'],
+  };
+  const [label, why] = sources[snapshot.selection.current_source]
+    || ['unknown', 'The tunnel is on a server this tool cannot identify.'];
+  text('current-source', current ? label : 'unknown');
+  el('current-source').title = why;
+
   // How long the tunnel has been where it is - the quickest answer to "is it flapping?".
   // Blank unless this tool put it there: if Gluetun moved on its own, or the tunnel was
   // already up at startup, the arrival time is genuinely unknown.

@@ -434,38 +434,12 @@ type ServerStatsView struct {
 // SettingsView exposes the effective configuration, so the dashboard can show
 // why the tool behaves the way it does without the operator digging through
 // compose files.
-type SettingsView struct {
-	// Variables is every configuration variable as it actually resolved, including the
+type SettingsView struct { // Variables is every configuration variable as it actually resolved, including the
 	// ones left at their defaults, in the order they were read.
 	//
 	// The panel used to be a hand-written list of about half of them, which drifted every
 	// time one was added or renamed. This cannot drift: it is recorded while the
 	// configuration is parsed. Secret values are never present - see config.Variable.
-	Variables        []config.Variable `json:"variables,omitempty"`
-	Countries        []string          `json:"countries"`
-	ExcludeCountries []string          `json:"exclude_countries,omitempty"`
-	Cities           []string          `json:"cities,omitempty"`
-	MaxLoad          int               `json:"max_load"`
-	VPNType          string            `json:"vpn_type"`
-	SecureCore       string            `json:"secure_core"`
-	Tor              string            `json:"tor"`
-	P2P              string            `json:"p2p"`
-	Stream           string            `json:"stream"`
-	FreeTier         string            `json:"free_tier"`
-	IPv6Filter       string            `json:"ipv6_filter"`
-
-	LoadWeight     float64 `json:"load_weight"`
-	LatencyWeight  float64 `json:"latency_weight"`
-	ProtonWeight   float64 `json:"proton_weight"`
-	LatencyCeiling string  `json:"latency_ceiling"`
-
-	RefreshInterval     string `json:"refresh_interval"`
-	LoadRefreshInterval string `json:"load_refresh_interval"`
-	LatencyInterval     string `json:"latency_interval"`
-	EvaluationInterval  string `json:"evaluation_interval"`
-	SwitchCooldown      string `json:"switch_cooldown"`
-	SwitchMinInterval   string `json:"switch_min_interval"`
-	LoadTrigger         int    `json:"load_trigger"`
-	LatencyEnabled      bool   `json:"latency_enabled"`
-	LatencyTopN         int    `json:"latency_top_n"`
+	Variables           []config.Variable `json:"variables,omitempty"`
+	LoadRefreshInterval string            `json:"load_refresh_interval"`
 }

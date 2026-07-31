@@ -170,9 +170,10 @@ func (c *Client) authInfo(ctx context.Context) (info authInfoResponse, err error
 }
 
 // twoFactorInfo mirrors the 2FA object Proton returns from /auth.
+// Proton also returns a "TOTP" field, which is not decoded: it duplicates the twoFactorTOTP
+// bit of Enabled, and two ways to ask one question is one way to answer it differently.
 type twoFactorInfo struct {
 	Enabled uint `json:"Enabled"`
-	TOTP    uint `json:"TOTP"`
 }
 
 func (t twoFactorInfo) needed() bool { return t.Enabled != 0 }

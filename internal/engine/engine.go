@@ -938,44 +938,19 @@ func latencyLastRun(snapshot Snapshot) time.Time {
 }
 
 func (e *Engine) settingsView() SettingsView {
+	// Two fields, where there used to be twenty-five.
+	//
+	// The rest described the configuration - filters, weights, intervals - and were read by a
+	// hand-written settings panel that the generated variables list replaced. They stayed
+	// behind, populated on every publish and read by nothing: every value they carried is in
+	// Variables, spelled with the name of the variable that set it.
+	//
+	// LoadRefreshInterval is separate because it is not shown as configuration: the candidate
+	// list compares it against the age of the load figures to say whether a refresh was missed.
 	return SettingsView{
 		Variables:           e.cfg.Variables,
-		Countries:           e.cfg.Filter.Countries,
-		ExcludeCountries:    e.cfg.Filter.ExcludeCountries,
-		Cities:              e.cfg.Filter.Cities,
-		MaxLoad:             e.cfg.Filter.MaxLoad,
-		VPNType:             e.effectiveVPNTypeLabel(),
-		SecureCore:          e.cfg.Filter.SecureCore,
-		Tor:                 e.cfg.Filter.Tor,
-		P2P:                 e.cfg.Filter.P2P,
-		IPv6Filter:          e.cfg.Filter.IPv6,
-		Stream:              e.cfg.Filter.Stream,
-		FreeTier:            e.cfg.Filter.Free,
-		LoadWeight:          e.cfg.Score.LoadWeight,
-		LatencyWeight:       e.cfg.Score.LatencyWeight,
-		ProtonWeight:        e.cfg.Score.ProtonScoreWeight,
-		LatencyCeiling:      e.cfg.Score.LatencyCeiling.String(),
-		RefreshInterval:     e.cfg.Proton.RefreshInterval.String(),
 		LoadRefreshInterval: e.cfg.Proton.LoadRefreshInterval.String(),
-		LatencyInterval:     formatInterval(e.latencyInterval()),
-		EvaluationInterval:  e.cfg.Switch.Interval.String(),
-		SwitchCooldown:      e.cfg.Switch.Cooldown.String(),
-		SwitchMinInterval:   e.cfg.Switch.MinInterval.String(),
-		LoadTrigger:         e.cfg.Switch.LoadTrigger,
-		LatencyEnabled:      e.cfg.Latency.Enabled,
-		LatencyTopN:         e.cfg.Latency.TopN,
 	}
-}
-
-func (e *Engine) effectiveVPNTypeLabel() string {
-	resolved := e.effectiveVPNType()
-	if resolved == "" {
-		return "auto (unknown)"
-	}
-	if e.cfg.Filter.VPNType == "auto" {
-		return "auto (" + resolved + ")"
-	}
-	return resolved
 }
 
 func toCandidateView(rank int, scored scoring.Scored, isCurrent bool) CandidateView {
@@ -1048,13 +1023,6 @@ func formatDuration(d time.Duration) string {
 		return ""
 	}
 	return d.Truncate(time.Second).String()
-}
-
-func formatInterval(d time.Duration) string {
-	if d <= 0 {
-		return "disabled"
-	}
-	return d.String()
 }
 
 // ticker wraps time.Ticker so a zero interval means "never fire" without the

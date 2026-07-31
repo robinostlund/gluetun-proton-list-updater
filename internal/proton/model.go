@@ -26,8 +26,9 @@ const (
 type LogicalServer struct {
 	ID   string `json:"ID"`
 	Name string `json:"Name"`
-	// EntryCountry is where traffic enters Proton's network; for Secure Core
-	// servers it differs from ExitCountry.
+	// EntryCountry is where traffic enters Proton's network; for Secure Core servers it
+	// differs from ExitCountry. Decoded but not used yet: the candidate model carries only
+	// the exit country, so "SE#42 via Iceland" is not currently expressible.
 	EntryCountry string  `json:"EntryCountry"`
 	ExitCountry  string  `json:"ExitCountry"`
 	Region       *string `json:"Region"`
@@ -55,7 +56,9 @@ type PhysicalServer struct {
 	Domain          string     `json:"Domain"`
 	Status          uint8      `json:"Status"`
 	X25519PublicKey string     `json:"X25519PublicKey"`
-	Label           string     `json:"Label"`
+	// Label distinguishes physical machines within one logical server. Decoded but not used:
+	// candidates are identified by Domain, which is what Gluetun pins on.
+	Label string `json:"Label"`
 }
 
 // SecureCore reports whether the logical server routes through a Secure Core

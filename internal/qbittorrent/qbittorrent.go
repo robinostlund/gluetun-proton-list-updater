@@ -147,8 +147,9 @@ type Preferences struct {
 	// RandomPort makes qBittorrent choose a new listen port on every start, which
 	// guarantees it stops matching a forwarded port.
 	RandomPort bool `json:"random_port"`
-	// UPnP is reported because it is meaningless behind a VPN and a common source of
-	// confusion about why forwarding "does not work".
+	// UPnP is decoded but not used. It is meaningless behind a VPN, so it says nothing about
+	// whether forwarding works - the port comparison above is what answers that. Kept because
+	// its absence from this struct would suggest qBittorrent does not report it.
 	UPnP bool `json:"upnp"`
 }
 
