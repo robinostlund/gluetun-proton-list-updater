@@ -2766,3 +2766,84 @@ func TestTheTopBarIsUsableOnANarrowScreen(t *testing.T) {
 		t.Error("the strip wraps instead of scrolling")
 	}
 }
+
+// Nothing may make the page scroll sideways on a phone.
+//
+// Vertical scrolling is how a page works; horizontal scrolling on a narrow screen means
+// something overflowed, and the usual culprit is one long unbreakable token - a hostname, a
+// path, or a URL inside an error message - in a container that does not clip.
+func TestNothingForcesHorizontalScrollingOnANarrowScreen(t *testing.T) {
+	t.Parallel()
+
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every place a long, unbreakable value is rendered has to wrap, truncate or scroll. Cards
+	// have no overflow of their own, so a value that cannot break pushes the whole page wide.
+	for _, holder := range []struct{ selector, why string }{
+		{".card-note", "error messages, which contain URLs"},
+		{".explain-reasons, .explain-physical", "hostnames and filter reasons"},
+		{".explain-note", "lookup failures, which quote the query"},
+		{".settings dd", "paths and configured values"},
+		{".hostname", "hostnames"},
+		{".logs .msg", "log lines"},
+	} {
+		// The negative lookahead matters: without it ".explain-note" also matches
+		// ".explain-notes li", which is a different rule and would make this pass or fail for
+		// the wrong reason.
+		rule := regexp.MustCompile(`(?s)` + regexp.QuoteMeta(holder.selector) +
+			`(?:[^\w-][^{]*)?\{[^}]*\}`).Find(styles)
+		if rule == nil {
+			t.Errorf("no rule for %s (%s)", holder.selector, holder.why)
+			continue
+		}
+		if !bytes.Contains(rule, []byte("overflow-wrap")) &&
+			!bytes.Contains(rule, []byte("word-break")) &&
+			!bytes.Contains(rule, []byte("text-overflow")) &&
+			!bytes.Contains(rule, []byte("nowrap")) {
+			t.Errorf("%s holds %s with no way to wrap, truncate or scroll", holder.selector, holder.why)
+		}
+	}
+
+	// Text inputs must be able to shrink. A fixed minimum plus a button beside it overflowed a
+	// phone-width card.
+	input := regexp.MustCompile(`(?s)input\[type="search"\][^{]*\{[^}]*\}`).Find(styles)
+	if input == nil {
+		t.Fatal("could not find the text input rule")
+	}
+	if !bytes.Contains(input, []byte("min-width: 0")) {
+		t.Error("text inputs cannot shrink below their content width")
+	}
+	// And 16px, or mobile Safari zooms the viewport on focus and does not zoom back.
+	if !bytes.Contains(input, []byte("font-size: 16px")) {
+		t.Error("text inputs are under 16px, which makes mobile Safari zoom the page on focus")
+	}
+
+	// The wide table is the one thing that legitimately cannot fit, so it scrolls in its own
+	// container rather than widening the page.
+	if !bytes.Contains(styles, []byte(".table-scroll { overflow: auto")) {
+		t.Error("the candidate table does not scroll inside its own container")
+	}
+}
+
+// Touch targets have to be reachable with a fingertip, which is about 44px - and the small
+// buttons were 12px text with 3px of padding, about 22px tall.
+func TestTouchTargetsAreLargerOnTouchDevices(t *testing.T) {
+	t.Parallel()
+
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coarse := regexp.MustCompile(`(?s)@media \(pointer: coarse\) \{.*?\n\}`).Find(styles)
+	if coarse == nil {
+		t.Fatal("there is no touch-pointer layout")
+	}
+	// Keyed on the pointer, not the width: a tablet has room and still cannot hit 22px, and a
+	// narrow desktop window has a mouse and does not need 44px.
+	if !bytes.Contains(coarse, []byte("button.small")) {
+		t.Error("the small buttons keep their mouse-sized targets on a touch screen")
+	}
+}

@@ -255,6 +255,33 @@ main {
   }
   /* A little margin so a scrolled chip is not clipped by the rounded corner of the bar. */
   .strip > .chip:last-child { margin-right: 4px; }
+
+  /* 40px of a 360px screen was page padding. */
+  main { padding: 14px 12px 40px; }
+  .card { padding: 12px 12px; }
+  /* The activity line can be a whole sentence - "waiting for gluetun's vpn loop to settle
+     (running for 12s)". Given a full row it would push the pills off the bar, so it is capped
+     and truncated instead; the full text is in the element's own title. */
+  .activity { max-width: 45vw; }
+  #activity-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* Touch targets.
+
+   Keyed on the pointer rather than the width: a tablet has plenty of room and still cannot hit
+   a 22px button reliably, and a narrow desktop window has a mouse and does not need 44px
+   everywhere. The small buttons - Hide, Clear, Explain, Submit code - were 3px of padding
+   around 12px text, about 22px tall against the ~44px a fingertip actually needs. */
+@media (pointer: coarse) {
+  button.small {
+    padding: 9px 14px;
+    font-size: 13px;
+  }
+  button { padding: 11px 15px; }
+  /* The row's Use button sits in a dense table, so it gets height without the width that
+     would widen every column. */
+  #candidates button.small { padding: 9px 10px; }
+  .toggle { padding: 6px 0; }
 }
 
 /* Sub-headings inside a merged card, so "Tunnel" and "Exit address" stay legibly
@@ -290,7 +317,15 @@ main {
 .selection .hostname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .selection .tags { margin: 4px 0 8px; }
 code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; }
-.card-note { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); }
+.card-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  /* These hold error messages, and an error message contains a URL - "QBITTORRENT_URL=
+     http://192.168.1.10:60001 was refused..." is one unbreakable token wider than a phone.
+     A card has no overflow of its own, so without this the whole page scrolls sideways. */
+  overflow-wrap: anywhere;
+}
 .card-note.error:not(:empty) { color: var(--bad); }
 
 .kv {
@@ -359,12 +394,22 @@ button.small { padding: 3px 9px; font-size: 12px; }
 .toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
 input[type="search"], input[type="text"] {
   font: inherit;
+  /* 16px, not the body's 14px, and on every screen rather than behind a media query.
+     Mobile Safari zooms the whole viewport when a text field smaller than 16px takes focus,
+     and it does not zoom back out - so typing a hostname into the "why is this missing?" box
+     left the page magnified and scrolled sideways. The extra two pixels cost nothing. */
+  font-size: 16px;
   padding: 6px 10px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-inset);
   color: var(--text);
-  min-width: 220px;
+  /* Grow into the space available, shrink when there is none. A 220px minimum plus a button
+     beside it overflowed a phone-width card sideways, which is the one direction a page must
+     never scroll. */
+  flex: 1 1 12em;
+  min-width: 0;
+  max-width: 24em;
 }
 
 /* Panels and tables */
@@ -559,13 +604,29 @@ td.right, th.right { text-align: right; }
 /* Server lookup results */
 .explain { padding: 12px 16px; border-top: 1px solid var(--border); }
 .explain p { margin: 0 0 6px; }
-.explain-reasons, .explain-physical { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+.explain-reasons, .explain-physical {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  /* Hostnames and reasons, both long and both unbreakable at a space in the worst case. The
+     list sits inside a card, which does not clip, so this is what keeps the page from
+     scrolling sideways when a lookup returns a long explanation. */
+  overflow-wrap: anywhere;
+}
 .explain-reasons li { color: var(--bad); }
 .explain-notes li { color: var(--good); margin-top: 2px; }
 .explain-physical li { color: var(--text-muted); margin-top: 2px; }
-.explain-note { padding: 12px 16px; margin: 0; color: var(--text-muted); font-size: 13px; }
+.explain-note {
+  padding: 12px 16px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
 .explain-note.error { color: var(--bad); }
-#explain-form { display: flex; gap: 8px; }
+/* Wraps, like every other form here: without it the input and its button were pinned to one
+   line and overflowed a narrow card. */
+#explain-form { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* Candidate detail panel.
 
