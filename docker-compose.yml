@@ -144,8 +144,10 @@ services:
       # port here - it validates the Host header and rejects a remapped one with 401.
       # QBITTORRENT_URL: "http://qbittorrent:8080"
       # QBITTORRENT_API_KEY: ${QBITTORRENT_API_KEY}
-      # SWITCHING_BUSY_DOWNLOAD: "2MB"
-      # SWITCHING_BUSY_UPLOAD: "512KB"
+      # Megabits per second, plain numbers - the unit the dashboard displays and the
+      # unit a link speed is quoted in. 16 is what "2MB" used to mean.
+      # SWITCHING_BUSY_DOWNLOAD: "16"
+      # SWITCHING_BUSY_UPLOAD: "4"
       # SWITCHING_BUSY_WINDOW: 5m
       # SWITCHING_BUSY_MAX_DEFER: 2h
 

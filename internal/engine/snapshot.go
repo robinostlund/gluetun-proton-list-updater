@@ -250,7 +250,14 @@ type TransferStatus struct {
 	// would be a claim about traffic nobody has looked at.
 	HasReading bool   `json:"has_reading"`
 	LastError  string `json:"last_error,omitempty"`
-	// DownloadSpeed and UploadSpeed are the latest reading, in bytes per second.
+	// Source names where the rates came from, because it changes what they cover: a torrent
+	// client reports its own traffic, while a source inside the tunnel would report all of it.
+	Source string `json:"source,omitempty"`
+	// DownloadSpeed and UploadSpeed are the latest reading, in bits per second.
+	//
+	// Bits throughout: sources convert at the boundary, the thresholds are configured in
+	// megabits, and the dashboard displays bits - so nothing in between multiplies by
+	// anything. Volumes stay in bytes, which is the unit a volume belongs in.
 	DownloadSpeed uint64 `json:"download_speed"`
 	UploadSpeed   uint64 `json:"upload_speed"`
 	// AverageDownload and AverageUpload are the mean over BusyWindow, and are what the
@@ -400,19 +407,25 @@ type ServerStatsView struct {
 	// Never reset by a reconnect or a return visit.
 	DownloadedBytes uint64 `json:"downloaded,omitempty"`
 	UploadedBytes   uint64 `json:"uploaded,omitempty"`
-	// MaxDownloadRate and MaxUploadRate are the fastest it was ever seen to go, in bytes
-	// per second.
-	MaxDownloadRate uint64    `json:"max_download,omitempty"`
-	MaxUploadRate   uint64    `json:"max_upload,omitempty"`
-	LastTransferAt  time.Time `json:"last_transfer_at,omitzero"`
+	// MaxDownloadRate and MaxUploadRate are the fastest it was seen to go, in bits per
+	// second.
+	MaxDownloadRate uint64 `json:"max_download,omitempty"`
+	MaxUploadRate   uint64 `json:"max_upload,omitempty"`
+	// The timestamps are always serialised, zero included, and the dashboard recognises a
+	// zero time by its value. Not `omitzero`: that option arrived in Go 1.24 and this module
+	// targets 1.23, where encoding/json ignores it silently - while the container image is
+	// built with 1.24, where it works. The same code produced different JSON depending on
+	// which toolchain compiled it, which is a trap regardless of how small the difference
+	// looked.
+	LastTransferAt time.Time `json:"last_transfer_at"`
 	// Samples counts load and latency observations; TransferReadings counts qBittorrent
 	// polls attributed to this server. Two counters, because they come from different
 	// sources on different cycles and one number would misrepresent both.
 	Samples          int       `json:"samples,omitempty"`
 	TransferReadings int       `json:"transfer_readings,omitempty"`
 	Visits           int       `json:"visits,omitempty"`
-	FirstSeen        time.Time `json:"first_seen,omitzero"`
-	LastSeen         time.Time `json:"last_seen,omitzero"`
+	FirstSeen        time.Time `json:"first_seen"`
+	LastSeen         time.Time `json:"last_seen"`
 	// Current marks the server being measured right now, so a figure that is still
 	// moving is not read as a final verdict.
 	Current bool `json:"current,omitempty"`

@@ -25,8 +25,9 @@ func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
 		return
 	}
 
-	transfer, err := e.qbittorrent.Transfer(ctx)
-	if err != nil {
+	reading, source, failures := readRates(ctx, e.rateSources)
+	if len(failures) > 0 && source == "" {
+		err := errors.Join(failures...)
 		e.transferReachable = false
 		// Logged at warn once and at debug thereafter: a qBittorrent that is down
 		// stays down, and repeating the same line every fifteen seconds drowns the
@@ -58,17 +59,23 @@ func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
 	}
 
 	if !e.transferReachable && e.transferErr != "" {
-		e.logger.Info("qbittorrent is answering again")
+		e.logger.Info("rates are being read again", "source", source)
 	}
+	if e.rateSourceName != "" && e.rateSourceName != source {
+		// Worth an info line: which source the numbers come from changes what they cover.
+		e.logger.Info("rates are now coming from a different source",
+			"from", e.rateSourceName, "to", source)
+	}
+	e.rateSourceName = source
 	e.transferReachable = true
 	e.refreshQBittorrentPreferences(ctx)
 	e.transferErr = ""
-	e.transfer = transfer
+	e.reading = reading
 	e.transferCheckedAt = time.Now()
-	e.recordTransferSample(transfer)
+	e.recordTransferSample(reading)
 	// Credit the reading to whichever server carried it, so there is a record of what each
 	// one actually delivered.
-	e.recordTransfer(transfer)
+	e.recordTransfer(reading)
 
 	// Track when the tunnel became busy, so the wait can be bounded and shown.
 	busy := e.transferIsBusy()
@@ -117,19 +124,19 @@ type transferSample struct {
 // qBittorrent stops answering: measured from now, the window would drain until the
 // average fell below the threshold and a switch was allowed - silently undoing the
 // fail-safe. Anchored to the last reading, the history simply stops moving.
-func (e *Engine) recordTransferSample(transfer qbittorrent.Transfer) {
+func (e *Engine) recordTransferSample(reading rateReading) {
 	window := e.cfg.QBittorrent.BusyWindow
 	now := time.Now()
 	if window <= 0 {
 		// Averaging disabled: the latest reading is the whole history.
 		e.transferSamples = []transferSample{{
-			at: now, download: transfer.DownloadSpeed, upload: transfer.UploadSpeed,
+			at: now, download: reading.Download, upload: reading.Upload,
 		}}
 		return
 	}
 
 	e.transferSamples = append(e.transferSamples, transferSample{
-		at: now, download: transfer.DownloadSpeed, upload: transfer.UploadSpeed,
+		at: now, download: reading.Download, upload: reading.Upload,
 	})
 
 	cutoff := now.Add(-window)
@@ -153,7 +160,7 @@ func (e *Engine) recordTransferSample(transfer qbittorrent.Transfer) {
 // average is what distinguishes "in use" from "was used once a few minutes ago".
 func (e *Engine) averageRates() (download, upload uint64) {
 	if len(e.transferSamples) == 0 {
-		return e.transfer.DownloadSpeed, e.transfer.UploadSpeed
+		return e.reading.Download, e.reading.Upload
 	}
 
 	var totalDownload, totalUpload uint64
@@ -240,8 +247,8 @@ func (e *Engine) transferBlocksSwitch() (blocked bool, reason string) {
 		if held := time.Since(e.transferBusySince); held > maxDefer {
 			e.logger.Warn("switching has been deferred for longer than the limit, moving anyway",
 				"deferred_for", held.Truncate(time.Second), "limit", maxDefer,
-				"download", formatRate(e.transfer.DownloadSpeed),
-				"upload", formatRate(e.transfer.UploadSpeed))
+				"download", formatRate(e.reading.Download),
+				"upload", formatRate(e.reading.Upload))
 			return false, ""
 		}
 	}
@@ -382,7 +389,7 @@ func (e *Engine) portForwardingVerdict(gluetun GluetunStatus) (verdict, detail s
 				"matching the forwarded port the next time it starts.", listen)
 	}
 
-	switch e.transfer.ConnectionStatus {
+	switch e.qbSource.last.ConnectionStatus {
 	case "connected":
 		if len(forwarded) > 0 {
 			return "working", fmt.Sprintf(
@@ -443,20 +450,21 @@ func (e *Engine) transferView() TransferStatus {
 
 	return TransferStatus{
 		Configured:            true,
+		Source:                e.rateSourceName,
 		Reachable:             e.transferReachable,
 		HasReading:            !e.transferCheckedAt.IsZero(),
 		LastError:             e.transferErr,
-		DownloadSpeed:         e.transfer.DownloadSpeed,
-		UploadSpeed:           e.transfer.UploadSpeed,
+		DownloadSpeed:         e.reading.Download,
+		UploadSpeed:           e.reading.Upload,
 		AverageDownload:       averageDownload,
 		AverageUpload:         averageUpload,
 		BusyWindow:            window,
 		Samples:               len(e.transferSamples),
-		DownloadTotal:         e.transfer.DownloadTotal,
-		UploadTotal:           e.transfer.UploadTotal,
-		DownloadLimit:         e.transfer.DownloadLimit,
-		UploadLimit:           e.transfer.UploadLimit,
-		ConnectionStatus:      e.transfer.ConnectionStatus,
+		DownloadTotal:         e.reading.DownloadedBytes,
+		UploadTotal:           e.reading.UploadedBytes,
+		DownloadLimit:         bitsFromBytes(e.qbSource.last.DownloadLimit),
+		UploadLimit:           bitsFromBytes(e.qbSource.last.UploadLimit),
+		ConnectionStatus:      e.qbSource.last.ConnectionStatus,
 		ListenPort:            e.qbPreferences.ListenPort,
 		ListenPortError:       e.qbPreferencesErr,
 		RandomPort:            e.qbPreferences.RandomPort,
@@ -477,40 +485,6 @@ func (e *Engine) transferView() TransferStatus {
 func (e *Engine) publishTransfer() {
 	view := e.transferView()
 	e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Transfer = view })
-}
-
-// formatRate renders bytes per second the way people read it.
-func formatRate(bytesPerSecond uint64) string {
-	const unit = 1000
-	if bytesPerSecond < unit {
-		return fmt.Sprintf("%d B/s", bytesPerSecond)
-	}
-	value := float64(bytesPerSecond)
-	for _, suffix := range []string{"kB/s", "MB/s", "GB/s", "TB/s"} {
-		value /= unit
-		if value < unit {
-			return fmt.Sprintf("%.1f %s", value, suffix)
-		}
-	}
-	return fmt.Sprintf("%.1f PB/s", value/unit)
-}
-
-// formatBytes renders a volume. Distinct from formatRate on purpose: logging a total as
-// "12.4 MB/s" states a rate that was never measured, and the two are easy to confuse
-// because they differ by three characters.
-func formatBytes(total uint64) string {
-	const unit = 1000
-	if total < unit {
-		return fmt.Sprintf("%d B", total)
-	}
-	value := float64(total)
-	for _, suffix := range []string{"kB", "MB", "GB", "TB"} {
-		value /= unit
-		if value < unit {
-			return fmt.Sprintf("%.1f %s", value, suffix)
-		}
-	}
-	return fmt.Sprintf("%.1f PB", value/unit)
 }
 
 // firstReadingGrace is how long automatic switching waits for qBittorrent's first answer

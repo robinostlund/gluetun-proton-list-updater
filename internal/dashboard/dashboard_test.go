@@ -1689,9 +1689,11 @@ func TestThePageIsOrderedDoThenRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The strip sits in the sticky top bar now, so it precedes everything in main - being
+	// visible while scrolling is worth more than being the second thing on the page.
 	order := []string{
-		`id="alerts"`,
 		`id="status-strip"`,
+		`id="alerts"`,
 		`<h2>Server selection</h2>`,
 		`<h2>Gluetun</h2>`,
 		`<h2>ProtonVPN</h2>`,
@@ -2545,20 +2547,33 @@ func TestTheStatusStripShowsTheLiveRatesNextToTheVerdict(t *testing.T) {
 		t.Fatal("could not find renderStatusStrip")
 	}
 
-	// Both directions, named in words the way every other direction on the page is.
-	for _, direction := range []string{`rateChip('Down'`, `rateChip('Up'`} {
+	// One chip for both directions, each named in words rather than left to a slash and the
+	// reader's assumption about which comes first.
+	if !bytes.Contains(strip, []byte(`chip('Transfer'`)) {
+		t.Error("the strip has no transfer chip")
+	}
+	for _, direction := range []string{"down ·", "} up`"} {
 		if !bytes.Contains(strip, []byte(direction)) {
-			t.Errorf("the strip does not show %s", direction)
+			t.Errorf("the transfer chip does not name a direction in words (%q)", direction)
 		}
+	}
+	// "Bandwidth" would be wrong: that is capacity, not what is flowing. The rendered label,
+	// not the word - the comment explaining the choice mentions it too.
+	if bytes.Contains(strip, []byte("chip('Bandwidth'")) {
+		t.Error(`the chip is labelled "Bandwidth", which means capacity rather than the current rate`)
 	}
 	// Only when there is something measuring them.
 	guard := bytes.Index(strip, []byte("if (transfer.configured)"))
-	if guard < 0 || guard > bytes.Index(strip, []byte("rateChip('Down'")) {
-		t.Error("the rate chips are not behind the qBittorrent-configured check")
+	if guard < 0 || guard > bytes.Index(strip, []byte(`chip('Transfer'`)) {
+		t.Error("the transfer chip is not behind the qBittorrent-configured check")
 	}
 	// Before the switching verdict: cause, then effect.
-	if bytes.Index(strip, []byte("rateChip('Up'")) > bytes.Index(strip, []byte("'Switching'")) {
+	if bytes.Index(strip, []byte(`chip('Transfer'`)) > bytes.Index(strip, []byte("'Switching'")) {
 		t.Error("the rates come after the switching verdict they explain")
+	}
+	// Idle says so, rather than spending thirty characters on two zeroes.
+	if !bytes.Contains(strip, []byte("'idle'")) {
+		t.Error("an idle tunnel is rendered as a pair of zeroes")
 	}
 
 	// Neutral, not coloured against the threshold.
@@ -2575,5 +2590,123 @@ func TestTheStatusStripShowsTheLiveRatesNextToTheVerdict(t *testing.T) {
 	// A stale reading says so, because it is still what defers switches.
 	if !bytes.Contains(strip, []byte("last reading taken")) {
 		t.Error("a stale rate does not say it is stale")
+	}
+}
+
+// One fact, one wording. A server outside the latency probe budget is "not probed" wherever it
+// appears - the Server selection card called the same thing "unmeasured", which reads as a
+// different fact and leaves the reader wondering which of the two they are looking at.
+func TestOneWordingPerFact(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if bytes.Contains(script, []byte("'unmeasured'")) {
+		t.Error(`"unmeasured" is back; unprobed latency is called "not probed" everywhere else`)
+	}
+	// Every place latency is absent says the same thing.
+	if count := bytes.Count(script, []byte("'not probed'")); count < 5 {
+		t.Errorf(`"not probed" appears %d times; the card, the table and the panel all need it`,
+			count)
+	}
+	// And the words that mean genuinely different things stay distinct: nothing measuring at
+	// all, versus measured and zero, versus Proton not supplying a value.
+	for _, distinct := range []string{"'not measured'", "'nothing yet'", "'not given'"} {
+		if !bytes.Contains(script, []byte(distinct)) {
+			t.Errorf("%s is gone; it distinguishes a case the others do not cover", distinct)
+		}
+	}
+}
+
+// The status strip lives in the sticky top bar, so "is everything working?" stays answerable
+// while reading anything further down the page.
+func TestTheStatusStripStaysVisibleWhileScrolling(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := regexp.MustCompile(`(?s)<header.*?</header>`).Find(page)
+	if header == nil {
+		t.Fatal("could not find the top bar")
+	}
+	if !bytes.Contains(header, []byte(`id="status-strip"`)) {
+		t.Error("the status strip is not in the top bar, so it scrolls out of view")
+	}
+	// Exactly once: two elements with the same id would leave the script writing to whichever
+	// the browser picked.
+	if count := bytes.Count(page, []byte(`id="status-strip"`)); count != 1 {
+		t.Errorf("the status strip appears %d times, want once", count)
+	}
+	// The bar has to be sticky for any of this to matter.
+	topbar := regexp.MustCompile(`(?s)\.topbar \{.*?\}`).Find(styles)
+	if topbar == nil || !bytes.Contains(topbar, []byte("position: sticky")) {
+		t.Error("the top bar is not sticky, so putting the strip in it achieves nothing")
+	}
+	// Centred, and scrolling sideways rather than wrapping: a wrapping strip would grow a
+	// sticky bar into the page and eat the viewport.
+	strip := regexp.MustCompile(`(?s)^\.strip \{.*?\}`).Find(
+		regexp.MustCompile(`(?ms)^\.strip \{.*?\}`).Find(styles))
+	if strip == nil {
+		t.Fatal("could not find the .strip rule")
+	}
+	for _, want := range []string{"justify-content: center", "flex-wrap: nowrap", "overflow-x: auto"} {
+		if !bytes.Contains(strip, []byte(want)) {
+			t.Errorf("the strip rule is missing %q", want)
+		}
+	}
+}
+
+// Rates are displayed in bits per second and volumes in bytes, and the two must not drift into
+// each other: they differ by a factor of eight and by what they mean.
+func TestRatesAreShownInBitsAndVolumesInBytes(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The value arrives in bits, so this function scales and nothing else. A conversion here
+	// would mean the unit is being carried around with the value rather than normalised where
+	// it is read.
+	rate := regexp.MustCompile(`(?ms)^function rate\(bitsPerSecond\) \{.*?^\}`).Find(script)
+	if rate == nil {
+		t.Fatal("could not find rate(bitsPerSecond) - the value should arrive already in bits")
+	}
+	if bytes.Contains(rate, []byte("* 8")) {
+		t.Error("rate() converts units; sources are supposed to normalise at their boundary")
+	}
+	for _, unit := range []string{"bit/s", "kbit/s", "Mbit/s", "Gbit/s"} {
+		if !bytes.Contains(rate, []byte(unit)) {
+			t.Errorf("rate() cannot render %s", unit)
+		}
+	}
+
+	// Volumes stay in bytes: nobody measures downloaded data in bits.
+	volume := regexp.MustCompile(`(?ms)^function bytes\(total\) \{.*?^\}`).Find(script)
+	if volume == nil {
+		t.Fatal("could not find bytes()")
+	}
+	if bytes.Contains(volume, []byte("* 8")) || bytes.Contains(volume, []byte("bit")) {
+		t.Error("bytes() renders a volume in bits")
+	}
+
+	// And no second rate formatter: one unit end to end means there is nothing to show
+	// alongside. A byte formatter for rates would be the unit creeping back in.
+	if bytes.Contains(script, []byte("function byteRate(")) {
+		t.Error("a byte rate formatter is back; rates are bits everywhere now")
+	}
+	if bytes.Contains(script, []byte("byteRate(")) {
+		t.Error("something still renders a rate in bytes")
 	}
 }

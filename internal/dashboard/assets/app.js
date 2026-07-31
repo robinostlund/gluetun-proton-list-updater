@@ -98,17 +98,28 @@ function portForwardingState(gluetun) {
   return requested ? 'on' : 'off';
 }
 
-// rate renders bytes per second the way the engine's log does, so the two agree.
-function rate(bytesPerSecond) {
-  const value = Number(bytesPerSecond || 0);
-  if (value < 1000) return `${value} B/s`;
-  const units = ['kB/s', 'MB/s', 'GB/s', 'TB/s'];
-  let scaled = value;
+// rate renders a rate in bits per second, scaling to the unit that fits.
+//
+// No conversion here: the value arrives in bits, because every source converts at the
+// boundary where it is read and the thresholds are configured in megabits. Bits because that
+// is how a link speed is quoted everywhere else - an ISP sells 100/10 Mbit, iperf and
+// speedtest report bits - so "am I saturating the connection?" needs no arithmetic.
+function rate(bitsPerSecond) {
+  const bits = Number(bitsPerSecond || 0);
+  if (bits < 1000) return `${Math.round(bits)} bit/s`;
+  const units = ['kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s'];
+  let scaled = bits;
   for (const unit of units) {
     scaled /= 1000;
-    if (scaled < 1000) return `${scaled.toFixed(1)} ${unit}`;
+    if (scaled < 1000) return `${trimZero(scaled)} ${unit}`;
   }
-  return `${(scaled / 1000).toFixed(1)} PB/s`;
+  return `${trimZero(scaled / 1000)} Pbit/s`;
+}
+
+// trimZero drops a trailing ".0": "90 Mbit/s" reads better than "90.0 Mbit/s", and the extra
+// digit is noise at that magnitude.
+function trimZero(value) {
+  return value.toFixed(1).replace(/\.0$/, '');
 }
 
 function bytes(total) {
@@ -317,35 +328,46 @@ function renderStatusStrip() {
       transfer.port_forwarding_detail || '');
 
     // The live rates, immediately before the switching verdict they explain: cause, then
-    // effect. The chip label carries the direction, which is what that slot is for - and it
-    // keeps the page's rule of naming directions in words rather than arrows.
+    // effect.
     //
-    // Deliberately left uncoloured. These are instantaneous and the verdict beside them is
-    // decided on the windowed average, so colouring these against the threshold would have
-    // them disagree with it every time traffic dips between pieces - which is exactly what
+    // "Transfer" rather than "Bandwidth": bandwidth is capacity, and calling 11 MB/s the
+    // bandwidth of a link that could do ten times that is simply wrong. It is also the word
+    // this tool uses everywhere else - transfer awareness, "a transfer is in progress".
+    //
+    // One chip for both directions, with each direction named in words. A slash - "11.2 / 1.1"
+    // - is shorter and relies on the reader knowing that down comes first; in a bar this
+    // small there is room to just say it.
+    //
+    // Deliberately uncoloured. These are instantaneous and the verdict beside them is decided
+    // on the windowed average, so colouring them against the threshold would have them
+    // disagree with it every time traffic dips between pieces - which is exactly what
     // averaging exists to absorb. The chip beside them carries the verdict; the tooltip
     // carries the average that produced it.
-    const rateChip = (label, now, average, threshold) => {
-      const parts = [`Instantaneous: ${rate(now)}.`];
-      if (transfer.busy_window) {
-        parts.push(`Switching is decided on the ${transfer.busy_window} average, which is `
-          + `${rate(average)}.`);
-      }
-      if (threshold) {
-        parts.push(`It defers switching at ${rate(threshold)}.`);
-      } else {
-        parts.push('This direction is not a trigger for deferring a switch.');
-      }
-      if (!transfer.reachable && transfer.has_reading) {
-        parts.push('qBittorrent is not answering, so this is the last reading taken - which '
-          + 'is what keeps deferring switches until it answers again.');
-      }
-      chip(label, rate(now), transfer.reachable ? 'info' : 'warn', parts.join(' '));
-    };
-    rateChip('Down', transfer.download_speed, transfer.average_download,
-      transfer.busy_download_threshold);
-    rateChip('Up', transfer.upload_speed, transfer.average_upload,
-      transfer.busy_upload_threshold);
+    const down = transfer.download_speed || 0;
+    const up = transfer.upload_speed || 0;
+    const detail = [`Instantaneous: ${rate(down)} down, ${rate(up)} up.`];
+    if (transfer.busy_window) {
+      detail.push(`Switching is decided on the ${transfer.busy_window} average, which is `
+        + `${rate(transfer.average_download)} down and ${rate(transfer.average_upload)} up.`);
+    }
+    const triggers = [
+      transfer.busy_download_threshold ? `${rate(transfer.busy_download_threshold)} down` : '',
+      transfer.busy_upload_threshold ? `${rate(transfer.busy_upload_threshold)} up` : '',
+    ].filter(Boolean);
+    detail.push(triggers.length
+      ? `Switching is deferred at ${triggers.join(' or ')}.`
+      : 'Neither direction is a trigger for deferring a switch.');
+    if (transfer.source) {
+      detail.push(`Measured by ${transfer.source}.`);
+    }
+    if (!transfer.reachable && transfer.has_reading) {
+      detail.push('qBittorrent is not answering, so this is the last reading taken - which is '
+        + 'what keeps deferring switches until it answers again.');
+    }
+    // "idle" rather than "0 B/s down · 0 B/s up", which is a lot of characters to say nothing
+    // and is the usual state.
+    chip('Transfer', down || up ? `${rate(down)} down · ${rate(up)} up` : 'idle',
+      transfer.reachable ? 'info' : 'warn', detail.join(' '));
   }
 
   // What the engine will actually do, which is the question behind all of the above.
@@ -374,7 +396,7 @@ function renderAlerts() {
         <form id="totp-form">
           <input type="text" id="totp-code" inputmode="numeric" autocomplete="one-time-code"
                  pattern="[0-9]*" maxlength="8" placeholder="123456" required>
-          <button type="submit" class="primary small">Submit code</button>
+          <button type="submit" class="control small">Submit code</button>
         </form>
       </div>
     </div>`);
@@ -467,7 +489,10 @@ function renderCurrent() {
   text('current-host', current ? current.hostname : '');
   el('current-tags').innerHTML = current ? featureTags(current) : '';
   el('current-load').innerHTML = current ? loadCell(current.load) : '–';
-  text('current-rtt', current && current.rtt_known ? `${current.rtt_ms} ms` : 'unmeasured');
+  // "not probed" everywhere, not "unmeasured": it is the same fact as in the candidate table
+  // and the detail panel - the prober only covers LATENCY_TOP_N servers - and naming one fact
+  // three ways makes a reader wonder which of the three they are looking at.
+  text('current-rtt', current && current.rtt_known ? `${current.rtt_ms} ms` : 'not probed');
   text('current-score', current && !current.excluded ? current.score.toFixed(3) : '–');
   text('current-rank', current && current.rank
     ? `#${current.rank} of ${snapshot.candidates_total}`
@@ -511,7 +536,7 @@ function renderBest() {
   text('best-host', best ? best.hostname : '');
   el('best-tags').innerHTML = best ? featureTags(best) : '';
   el('best-load').innerHTML = best ? loadCell(best.load) : '–';
-  text('best-rtt', best && best.rtt_known ? `${best.rtt_ms} ms` : 'unmeasured');
+  text('best-rtt', best && best.rtt_known ? `${best.rtt_ms} ms` : 'not probed');
   text('best-score', best ? best.score.toFixed(3) : '–');
   // The same row as on the current server, so the two read across: a candidate that
   // scores better on load and latency may still be one that was measurably slower.
@@ -615,8 +640,6 @@ function renderGluetun() {
   text('gluetun-check', timeAgo(gluetun.last_check));
   text('gluetun-error', gluetun.reachable ? (gluetun.last_error || '') : '');
 
-  const stream = el('stream-state');
-  stream.className = 'pill ' + (gluetun.status === 'running' ? 'pill-good' : 'pill-bad');
 }
 
 // Gluetun's public IP report: this is the exit address the internet actually
@@ -777,10 +800,11 @@ function renderTransfer() {
       + 'pieces. Averaging over this window stops a single dip letting a switch through '
       + 'mid-transfer. Set with SWITCHING_BUSY_WINDOW.'
     : 'SWITCHING_BUSY_WINDOW is 0, so the latest reading alone decides.';
-  text('transfer-down-limit', transfer.busy_download_threshold
-    ? rate(transfer.busy_download_threshold) : 'not a trigger');
-  text('transfer-up-limit', transfer.busy_upload_threshold
-    ? rate(transfer.busy_upload_threshold) : 'not a trigger');
+  // The configured thresholds, in the unit they are configured in: SWITCHING_BUSY_DOWNLOAD
+  // is megabits per second, and this is what that resolved to.
+  const threshold = (value) => value ? rate(value) : 'not a trigger';
+  text('transfer-down-limit', threshold(transfer.busy_download_threshold));
+  text('transfer-up-limit', threshold(transfer.busy_upload_threshold));
   // qBittorrent's own caps, which give the rates context: 900 kB/s means something
   // different against a 1 MB/s cap than against none. They are qBittorrent's settings,
   // not ours, and have no bearing on the busy thresholds above.
@@ -1303,7 +1327,8 @@ function renderCandidateStats(stats) {
   text('modal-stat-visits', measured.visits
     ? `${measured.visits} time${measured.visits === 1 ? '' : 's'}`
     : 'never used');
-  text('modal-stat-first', measured.first_seen ? timeAgo(measured.first_seen) : 'unknown');
+  // timeAgo already reports a zero time as "never", which is what an unmeasured server is.
+  text('modal-stat-first', timeAgo(measured.first_seen));
 
   // Three different reasons a transfer figure can be missing, and they must not be
   // conflated - the first is about this deployment, the other two about this server:
@@ -1365,8 +1390,7 @@ function renderCandidateStats(stats) {
       + `${measured.visits === 1 ? '' : 's'}` : 'no stay yet');
   text('modal-stat-reads', measured.transfer_readings
     ? `${measured.transfer_readings}` : 'none');
-  text('modal-stat-last-transfer', measured.last_transfer_at
-    ? timeAgo(measured.last_transfer_at) : 'never');
+  text('modal-stat-last-transfer', timeAgo(measured.last_transfer_at));
 }
 
 
@@ -1483,12 +1507,19 @@ function connect() {
     snapshot = JSON.parse(event.data);
     render();
   };
+  // Text and colour set together, both describing the stream.
+  //
+  // The colour used to be set in renderGluetun from the *VPN* status, which meant a
+  // perfectly healthy update stream turned red whenever the tunnel was stopped - a pill
+  // labelled "Live update stream" saying "live" in red - and a dead stream went green on the
+  // next render while still reading "reconnecting…".
   stream.onerror = () => {
     el('stream-state').className = 'pill pill-bad';
     el('stream-state').textContent = 'reconnecting…';
     // EventSource retries on its own; nothing to do but wait.
   };
   stream.onopen = () => {
+    el('stream-state').className = 'pill pill-good';
     el('stream-state').textContent = 'live';
   };
 }

@@ -292,7 +292,7 @@ type QBittorrent struct {
 	Interval time.Duration
 	// RequestTimeout bounds one read. It must stay well below Interval.
 	RequestTimeout time.Duration
-	// BusyDownload and BusyUpload are the rates, in bytes per second, above which
+	// BusyDownload and BusyUpload are the rates, in bits per second, above which
 	// automatic switching is deferred. They are separate because the two are not
 	// interchangeable: seeding at 5 MB/s and downloading at 5 MB/s are different
 	// situations, and an operator may care about protecting one and not the other.
@@ -422,8 +422,8 @@ func Load() (cfg Config, err error) {
 		APIKey:         r.str("QBITTORRENT_API_KEY", ""),
 		Interval:       r.duration("QBITTORRENT_INTERVAL", 15*time.Second),
 		RequestTimeout: r.duration("QBITTORRENT_TIMEOUT", 5*time.Second),
-		BusyDownload:   r.byteRate("SWITCHING_BUSY_DOWNLOAD", 1<<20),
-		BusyUpload:     r.byteRate("SWITCHING_BUSY_UPLOAD", 1<<20),
+		BusyDownload:   r.megabits("SWITCHING_BUSY_DOWNLOAD", 8),
+		BusyUpload:     r.megabits("SWITCHING_BUSY_UPLOAD", 8),
 		BusyWindow:     r.duration("SWITCHING_BUSY_WINDOW", 5*time.Minute),
 		MaxDefer:       r.duration("SWITCHING_BUSY_MAX_DEFER", 0),
 	}

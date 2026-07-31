@@ -24,7 +24,6 @@ import (
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/config"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/gluetunapi"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/proton"
-	"github.com/robinostlund/gluetun-proton-list-updater/internal/qbittorrent"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/scoring"
 )
 
@@ -2395,8 +2394,12 @@ func withQBittorrent(t *testing.T, cfg *config.Config, down, up uint64) *fakeQBi
 		// shorter than the interval, or a slow answer delays the next reading.
 		Interval:       200 * time.Millisecond,
 		RequestTimeout: 100 * time.Millisecond,
-		BusyDownload:   1 << 20,
-		BusyUpload:     1 << 20,
+		// Thresholds are bits per second, like everything inside the engine. The rates handed
+		// to the fake below are bytes per second, because that is what the real qBittorrent
+		// Web API answers and the adapter is what converts - so these are eight times the
+		// byte figures they are being compared against.
+		BusyDownload: 8 << 20,
+		BusyUpload:   8 << 20,
 	}
 	return fake
 }
@@ -2420,8 +2423,10 @@ func TestATransferInProgressDefersSwitching(t *testing.T) {
 	if !transfer.Busy {
 		t.Error("Busy should be true at 8 MB/s against a 1 MiB/s threshold")
 	}
-	if transfer.DownloadSpeed != 8<<20 {
-		t.Errorf("DownloadSpeed = %d, want %d", transfer.DownloadSpeed, uint64(8<<20))
+	// The fake answers in bytes per second and the snapshot carries bits, so this is the
+	// conversion the qBittorrent adapter is responsible for.
+	if transfer.DownloadSpeed != 8<<20*8 {
+		t.Errorf("DownloadSpeed = %d, want %d bits", transfer.DownloadSpeed, uint64(8<<20*8))
 	}
 	if !transfer.Configured || !transfer.Reachable {
 		t.Errorf("transfer should be configured and reachable: %+v", transfer)
@@ -2586,23 +2591,39 @@ func TestSwitchingResumesWhenTheTransferFinishes(t *testing.T) {
 	}
 }
 
+// Rates are rendered in bits per second, matching the dashboard and the way a link speed is
+// quoted everywhere else. The stored value is bytes per second, because that is what
+// qBittorrent reports and what the thresholds are stored as, so the conversion is the point of
+// this function.
 func TestRateFormatting(t *testing.T) {
 	t.Parallel()
 
+	// The input is already bits: sources convert at their boundary, so this function scales
+	// and nothing more. That is the whole point of having one unit inside the engine.
 	for _, testCase := range []struct {
-		bytes uint64
-		want  string
+		bits uint64
+		want string
 	}{
-		{0, "0 B/s"},
-		{999, "999 B/s"},
-		{1000, "1.0 kB/s"},
-		{1_500_000, "1.5 MB/s"},
-		{13_107_200, "13.1 MB/s"},
-		{2_500_000_000, "2.5 GB/s"},
+		{0, "0 bit/s"},
+		{800, "800 bit/s"},
+		// The default threshold, and the number an operator writes for it.
+		{8_000_000, "8 Mbit/s"},
+		{16_000_000, "16 Mbit/s"},
+		{104_857_600, "104.9 Mbit/s"},
+		{20_000_000_000, "20 Gbit/s"},
 	} {
-		if got := formatRate(testCase.bytes); got != testCase.want {
-			t.Errorf("formatRate(%d) = %q, want %q", testCase.bytes, got, testCase.want)
+		if got := formatRate(testCase.bits); got != testCase.want {
+			t.Errorf("formatRate(%d) = %q, want %q", testCase.bits, got, testCase.want)
 		}
+	}
+
+	// A volume is still a volume, in bytes: bits are for rates, and nobody measures
+	// downloaded data in them.
+	if got := formatBytes(2_000_000); got != "2 MB" {
+		t.Errorf("formatBytes = %q, want 2 MB", got)
+	}
+	if got := formatBytes(412 << 30); got != "442.4 GB" {
+		t.Errorf("formatBytes = %q, want 442.4 GB", got)
 	}
 }
 
@@ -3006,7 +3027,9 @@ func TestTheAverageFallsAwayOnceTheTransferReallyStops(t *testing.T) {
 	var fake *fakeQBittorrent
 	harness := newHarness(t, false, func(cfg *config.Config) {
 		fake = withQBittorrent(t, cfg, 0, 0)
-		cfg.QBittorrent.BusyDownload = 2 << 20
+		// Bits per second, like every threshold in the engine: the fake answers in bytes and
+		// the adapter converts, so this is eight times the byte figure it is compared against.
+		cfg.QBittorrent.BusyDownload = 2 << 20 * 8
 		cfg.QBittorrent.BusyUpload = 0
 		cfg.QBittorrent.BusyWindow = time.Hour
 	})
@@ -3038,7 +3061,9 @@ func TestAnUnreachableQBittorrentDoesNotDrainTheWindow(t *testing.T) {
 	var fake *fakeQBittorrent
 	harness := newHarness(t, false, func(cfg *config.Config) {
 		fake = withQBittorrent(t, cfg, 0, 0)
-		cfg.QBittorrent.BusyDownload = 2 << 20
+		// Bits per second, like every threshold in the engine: the fake answers in bytes and
+		// the adapter converts, so this is eight times the byte figure it is compared against.
+		cfg.QBittorrent.BusyDownload = 2 << 20 * 8
 		cfg.QBittorrent.BusyUpload = 0
 		cfg.QBittorrent.BusyWindow = 500 * time.Millisecond // tiny, so "now" would drain it
 	})
@@ -3071,7 +3096,9 @@ func TestAZeroWindowUsesTheLatestReadingAlone(t *testing.T) {
 	var fake *fakeQBittorrent
 	harness := newHarness(t, false, func(cfg *config.Config) {
 		fake = withQBittorrent(t, cfg, 0, 0)
-		cfg.QBittorrent.BusyDownload = 2 << 20
+		// Bits per second, like every threshold in the engine: the fake answers in bytes and
+		// the adapter converts, so this is eight times the byte figure it is compared against.
+		cfg.QBittorrent.BusyDownload = 2 << 20 * 8
 		cfg.QBittorrent.BusyUpload = 0
 		cfg.QBittorrent.BusyWindow = 0
 	})
@@ -3104,7 +3131,9 @@ func TestAnIsolatedSpikeDoesNotHoldTheTunnel(t *testing.T) {
 	var fake *fakeQBittorrent
 	harness := newHarness(t, false, func(cfg *config.Config) {
 		fake = withQBittorrent(t, cfg, 0, 0)
-		cfg.QBittorrent.BusyDownload = 2 << 20
+		// Bits per second, like every threshold: the fake's byte rates below are eight times
+		// smaller in this unit, so this is the old 2 MiB/s written in the new one.
+		cfg.QBittorrent.BusyDownload = 2 << 20 * 8
 		cfg.QBittorrent.BusyUpload = 0
 		cfg.QBittorrent.BusyWindow = time.Hour
 	})
@@ -3121,7 +3150,8 @@ func TestAnIsolatedSpikeDoesNotHoldTheTunnel(t *testing.T) {
 
 	if engine.Snapshot().Transfer.Busy {
 		down, _ := engine.averageRates()
-		t.Errorf("still busy after one spike and 30 quiet readings (average %d B/s)", down)
+		t.Errorf("still busy after one spike and 30 quiet readings (average %s)",
+			formatRate(down))
 	}
 }
 
@@ -3823,15 +3853,18 @@ func TestAThroughputPollDoesNotRewriteTheStateFile(t *testing.T) {
 	}
 }
 
-// transferOf builds a reading with the given rates. Session counters advance with the
-// rates so a test that does not care about volumes still produces coherent deltas.
-func transferOf(download, upload uint64) qbittorrent.Transfer {
+// transferOf builds a reading with the given rates, in the canonical unit. Cumulative
+// counters advance with the rates so a test that does not care about volumes still produces
+// coherent deltas.
+//
+// Rates are given in bits per second, like everything else inside the engine: a source
+// converts at its boundary, and past that point there is one unit.
+func transferOf(download, upload uint64) rateReading {
 	transferCounter.down += download
 	transferCounter.up += upload
-	return qbittorrent.Transfer{
-		DownloadSpeed: download, UploadSpeed: upload,
-		DownloadTotal: transferCounter.down, UploadTotal: transferCounter.up,
-		ConnectionStatus: "connected",
+	return rateReading{
+		Download: download, Upload: upload,
+		DownloadedBytes: transferCounter.down, UploadedBytes: transferCounter.up,
 	}
 }
 
@@ -3840,13 +3873,12 @@ func transferOf(download, upload uint64) qbittorrent.Transfer {
 // package shares one fake.
 var transferCounter struct{ down, up uint64 }
 
-// transferAt builds a reading with explicit session counters, for the delta rules where
-// the counter values are the whole point.
-func transferAt(speedDown, speedUp, totalDown, totalUp uint64) qbittorrent.Transfer {
-	return qbittorrent.Transfer{
-		DownloadSpeed: speedDown, UploadSpeed: speedUp,
-		DownloadTotal: totalDown, UploadTotal: totalUp,
-		ConnectionStatus: "connected",
+// transferAt builds a reading with explicit cumulative counters, for the delta rules where
+// the counter values are the whole point. Rates in bits, volumes in bytes.
+func transferAt(speedDown, speedUp, totalDown, totalUp uint64) rateReading {
+	return rateReading{
+		Download: speedDown, Upload: speedUp,
+		DownloadedBytes: totalDown, UploadedBytes: totalUp,
 	}
 }
 
@@ -4028,8 +4060,13 @@ func TestVolumesAndRatesAreFormattedDifferently(t *testing.T) {
 	if got := formatBytes(9663676416); got != "9.7 GB" {
 		t.Errorf("formatBytes = %q, want 9.7 GB", got)
 	}
-	if got := formatRate(9663676416); got != "9.7 GB/s" {
-		t.Errorf("formatRate = %q, want 9.7 GB/s", got)
+	// The same number formatted two ways that must not be confused for one another: one is a
+	// rate in bits, the other a volume in bytes.
+	if got := formatRate(9_663_676_416); got != "9.7 Gbit/s" {
+		t.Errorf("formatRate = %q, want 9.7 Gbit/s", got)
+	}
+	if got := formatBytes(9_663_676_416); got != "9.7 GB" {
+		t.Errorf("formatBytes = %q, want 9.7 GB", got)
 	}
 	if got := formatBytes(512); got != "512 B" {
 		t.Errorf("formatBytes = %q, want 512 B", got)
@@ -5157,5 +5194,60 @@ func TestRoutineWorkIsVisibleAtTheDefaultLogLevel(t *testing.T) {
 	}
 	if !strings.Contains(changed, "automatic switching is disabled") {
 		t.Errorf("the new reason is not in the line: %s", changed)
+	}
+}
+
+// The wire format must not depend on which Go toolchain compiled it.
+//
+// `omitzero` arrived in Go 1.24. This module targets 1.23, where encoding/json ignores the
+// option silently - while the container image is built with 1.24, where it works. Three time
+// fields carried it, so the same source produced different JSON locally and in the shipped
+// image, and the dashboard rendered "never" in one and "unknown" in the other.
+func TestTheWireFormatDoesNotDependOnTheToolchain(t *testing.T) {
+	t.Parallel()
+
+	module, err := os.ReadFile("../../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := regexp.MustCompile(`(?m)^go (\d+)\.(\d+)`).FindStringSubmatch(string(module))
+	if version == nil {
+		t.Fatal("could not read the Go version from go.mod")
+	}
+	major, minor := version[1], version[2]
+	supportsOmitzero := major > "1" || (major == "1" && len(minor) > 1 && minor >= "24")
+
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range sources {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The tag itself, not the word: the comment explaining why the option is avoided
+		// mentions it too.
+		tag := regexp.MustCompile(`json:"[^"]*,omitzero"`)
+		if tag.Match(source) && !supportsOmitzero {
+			t.Errorf("%s has a json tag using `omitzero`, which go %s.%s ignores - the option "+
+				"only works from Go 1.24, so the field would be serialised locally and omitted "+
+				"in the container image built with a newer toolchain", path, major, minor)
+		}
+	}
+
+	// And the thing that actually matters: a zero time arrives in the form the dashboard
+	// recognises, whichever toolchain built it.
+	encoded, err := json.Marshal(ServerStatsView{LoadLast: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"first_seen", "last_seen", "last_transfer_at"} {
+		if !bytes.Contains(encoded, []byte(`"`+field+`":"0001-01-01`)) {
+			t.Errorf("%s is not serialised as a recognisable zero time: %s", field, encoded)
+		}
 	}
 }

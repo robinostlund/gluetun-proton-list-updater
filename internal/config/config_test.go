@@ -248,37 +248,46 @@ func TestEmptyVariableFallsBackToDefault(t *testing.T) {
 func TestByteRateParsing(t *testing.T) {
 	t.Parallel()
 
+	// Megabits per second, written as a plain number. One unit end to end: the sources
+	// convert at their boundary, the engine carries bits, the dashboard displays bits.
 	for _, testCase := range []struct {
 		input string
 		want  uint64
 	}{
-		{"1MB", 1_000_000},
-		{"1mb", 1_000_000},
-		{"1 MB", 1_000_000},
-		{"1MB/s", 1_000_000},
-		{"500KB", 500_000},
-		{"1MiB", 1 << 20},
-		{"2MiB", 2 << 20},
-		{"1GB", 1_000_000_000},
-		{"1.5MB", 1_500_000},
-		{"2M", 2_000_000},
-		{"1024", 1024}, // a bare number is bytes per second
+		{"16", 16_000_000},
+		{"1", 1_000_000},
+		{"0.5", 500_000},
+		{"2.5", 2_500_000},
+		{" 8 ", 8_000_000},
 		{"0", 0},
-		{"1024B", 1024},
+		{"1000", 1_000_000_000},
 	} {
-		got, err := parseByteRate(testCase.input)
+		got, err := parseMegabits(testCase.input)
 		if err != nil {
-			t.Errorf("parseByteRate(%q): %v", testCase.input, err)
+			t.Errorf("parseMegabits(%q): %v", testCase.input, err)
 			continue
 		}
 		if got != testCase.want {
-			t.Errorf("parseByteRate(%q) = %d, want %d", testCase.input, got, testCase.want)
+			t.Errorf("parseMegabits(%q) = %d, want %d", testCase.input, got, testCase.want)
 		}
 	}
 
-	for _, bad := range []string{"", "lots", "-1MB", "MB", "1XB"} {
-		if _, err := parseByteRate(bad); err == nil {
-			t.Errorf("parseByteRate(%q) should have failed", bad)
+	for _, bad := range []string{"", "lots", "-1", "16Mbit", "MB"} {
+		if _, err := parseMegabits(bad); err == nil {
+			t.Errorf("parseMegabits(%q) should have failed", bad)
+		}
+	}
+
+	// The upgrade case, which must not be reinterpreted: "2MB" meant 2 megabytes per second,
+	// and reading it as 2 megabits would quietly cut the threshold to an eighth. It is refused
+	// with the arithmetic spelled out.
+	_, err := parseMegabits("2MB")
+	if err == nil {
+		t.Fatal(`parseMegabits("2MB") should be refused rather than reinterpreted`)
+	}
+	for _, want := range []string{"plain number", "megabits", "2MB becomes 16"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q should mention %q", err, want)
 		}
 	}
 }
@@ -360,22 +369,22 @@ func TestNonFiniteNumbersAreRejected(t *testing.T) {
 	t.Parallel()
 
 	for _, value := range []string{"nan", "NaN", "inf", "+Inf", "-inf", "1e400"} {
-		if _, err := parseByteRate(value); err == nil {
-			t.Errorf("parseByteRate(%q) should have been rejected", value)
+		if _, err := parseMegabits(value); err == nil {
+			t.Errorf("parseMegabits(%q) should have been rejected", value)
 		}
 	}
-	// And a value that overflows uint64 once scaled. Converting an out-of-range float
+	// And a value that overflows uint64 once scaled to bits. Converting an out-of-range float
 	// to an integer is undefined in Go, so this must be caught before the conversion.
-	// 2e19 is above MaxUint64 (~1.845e19); 1e19 is below it and must stay acceptable.
-	for _, value := range []string{"99999999999999999999TB", "1e30MB", "2e19"} {
-		if got, err := parseByteRate(value); err == nil {
-			t.Errorf("parseByteRate(%q) = %d, should have been rejected as too large", value, got)
+	// MaxUint64 is about 1.845e19 bits, so anything above 1.845e13 megabits overflows.
+	for _, value := range []string{"1e30", "2e13"} {
+		if got, err := parseMegabits(value); err == nil {
+			t.Errorf("parseMegabits(%q) = %d, should have been rejected as too large", value, got)
 		}
 	}
 	// Something large but genuinely representable stays acceptable.
-	for _, value := range []string{"10GB", "1e19"} {
-		if _, err := parseByteRate(value); err != nil {
-			t.Errorf("parseByteRate(%q) should be accepted: %v", value, err)
+	for _, value := range []string{"10000", "1e12"} {
+		if _, err := parseMegabits(value); err != nil {
+			t.Errorf("parseMegabits(%q) should be accepted: %v", value, err)
 		}
 	}
 }
@@ -545,7 +554,7 @@ func TestEveryVariableBelongsToAGroup(t *testing.T) {
 
 	var ungrouped []string
 	seen := map[string]bool{}
-	pattern := `r\.(?:str|choice|integer|boolean|duration|float|csv|required|byteRate)\("([A-Z_0-9]+)"`
+	pattern := `r\.(?:str|choice|integer|boolean|duration|float|csv|required|megabits)\("([A-Z_0-9]+)"`
 	for _, match := range regexp.MustCompile(pattern).FindAllSubmatch(source, -1) {
 		name := string(match[1])
 		if seen[name] || standalone[name] {
@@ -638,7 +647,7 @@ func TestNoDocumentedVariableNameIsUnknown(t *testing.T) {
 	}
 	known := map[string]bool{}
 	definition := regexp.MustCompile(
-		`(?:r\.(?:str|choice|integer|boolean|duration|float|csv|required|byteRate)|` +
+		`(?:r\.(?:str|choice|integer|boolean|duration|float|csv|required|megabits)|` +
 			`parseLevel|parseFormat)\(r?,? ?"([A-Z_0-9]+)"`)
 	for _, match := range definition.FindAllSubmatch(source, -1) {
 		name := string(match[1])
@@ -757,7 +766,7 @@ func TestEveryVariableIsReported(t *testing.T) {
 	}
 
 	definition := regexp.MustCompile(
-		`(?:r\.(?:str|choice|integer|boolean|duration|float|csv|required|byteRate)|` +
+		`(?:r\.(?:str|choice|integer|boolean|duration|float|csv|required|megabits)|` +
 			`parseLevel|parseFormat)\(r?,? ?"([A-Z_0-9]+)"`)
 	var missing []string
 	for _, match := range definition.FindAllSubmatch(source, -1) {
@@ -798,7 +807,7 @@ func TestNoSecretValueIsEverReported(t *testing.T) {
 	t.Setenv("PROTON_TOTP_SECRET", totp)
 	t.Setenv("QBITTORRENT_URL", "http://qbittorrent:8080")
 	t.Setenv("QBITTORRENT_API_KEY", apiKey)
-	t.Setenv("SWITCHING_BUSY_DOWNLOAD", "2MB")
+	t.Setenv("SWITCHING_BUSY_DOWNLOAD", "16")
 	t.Setenv("GLUETUN_API_KEY", gluetun)
 	// Both halves, since the config rejects one without the other.
 	t.Setenv("DASHBOARD_USERNAME", "admin")

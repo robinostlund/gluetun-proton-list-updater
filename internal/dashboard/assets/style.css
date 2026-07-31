@@ -96,8 +96,25 @@ main {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Status strip: one line answering "is everything working?". */
-.strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+/* Status strip: one line answering "is everything working?", in the sticky top bar so the
+   answer survives scrolling.
+
+   Scrolls sideways rather than wrapping: wrapping would grow a sticky bar into the page and
+   eat the viewport, which costs more than it gains. The top bar itself still wraps, so on a
+   narrow screen the strip drops to its own line instead of squeezing the title. */
+.strip {
+  display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  /* Room for the scrollbar when one appears, so it does not overlap the chips. */
+  padding-bottom: 2px;
+}
 .strip:empty { display: none; }
 .chip {
   display: inline-flex;
@@ -227,31 +244,7 @@ main {
 .compare-sub { font-size: 12px; color: var(--text-muted); font-family: inherit; }
 .selection .hostname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .selection .tags { margin: 4px 0 8px; }
-.card-exit { border-color: color-mix(in srgb, var(--good) 35%, var(--border)); }
 code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; }
-.card-headline {
-  margin: 0 0 2px;
-  font-size: 20px;
-  font-weight: 650;
-  font-family: var(--mono);
-  /* Never split an address or a server name across lines: truncate instead, and
-     the full value stays available as a tooltip. */
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.card-sub { margin: 0 0 2px; color: var(--text-muted); font-size: 13px; }
-/* A hostname on its own line, in mono, truncated rather than broken up. */
-.card-host {
-  margin: 0 0 10px;
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.card-host:empty, .card-sub:empty { margin-bottom: 0; }
 .card-note { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); }
 .card-note.error:not(:empty) { color: var(--bad); }
 
@@ -347,9 +340,6 @@ input[type="search"], input[type="text"] {
 }
 
 .muted { color: var(--text-muted); font-weight: 400; font-size: 12px; }
-/* The utilisation sparkline: full row width, fixed height, scales with the card. */
-.trace { white-space: normal; }
-.spark { width: 100%; max-width: 320px; height: 34px; display: block; margin-top: 2px; }
 
 .kv dd a { color: var(--accent); text-decoration: none; }
 .kv dd a:hover { text-decoration: underline; }
@@ -515,14 +505,6 @@ td.right, th.right { text-align: right; }
 .freshness { font-weight: 400; font-size: 12px; color: var(--text-muted); }
 .freshness.stale { color: var(--warn); }
 
-/* "Why nothing is happening", under the Best candidate card. */
-.reasoning:not(:empty) {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-muted);
-  white-space: normal;
-}
 .tag-free { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--border)); }
 .tag-paid { color: var(--text-muted); }
 

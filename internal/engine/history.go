@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/proton"
-	"github.com/robinostlund/gluetun-proton-list-updater/internal/qbittorrent"
 )
 
 // stateFlushInterval is how often pending in-memory changes are written.
@@ -93,8 +92,8 @@ func (e *Engine) recordSamples() {
 // Called after each successful poll. Every guard here exists to keep one server's figures
 // from being credited to another, which is the only way this data can mislead rather than
 // inform.
-func (e *Engine) recordTransfer(transfer qbittorrent.Transfer) {
-	download, upload := transfer.DownloadSpeed, transfer.UploadSpeed
+func (e *Engine) recordTransfer(reading rateReading) {
+	download, upload := reading.Download, reading.Upload
 
 	// Every path that declines to attribute this reading must also drop the byte
 	// baseline, or the next difference silently spans the gap and credits one server with
@@ -125,7 +124,7 @@ func (e *Engine) recordTransfer(transfer qbittorrent.Transfer) {
 		}
 	}
 
-	bytesDown, bytesUp := e.transferredSince(hostname, transfer)
+	bytesDown, bytesUp := e.transferredSince(hostname, reading)
 	attributed = true
 
 	// Nothing moved and nothing is moving: there is no measurement here, and creating a
@@ -226,23 +225,23 @@ func (e *Engine) recordTransfer(transfer qbittorrent.Transfer) {
 //
 // An idle interval is none of those. Nothing moved, which is a real zero rather than a
 // gap, so the baseline moves forward through quiet periods instead of restarting.
-func (e *Engine) transferredSince(hostname string, transfer qbittorrent.Transfer) (down, up uint64) {
+func (e *Engine) transferredSince(hostname string, reading rateReading) (down, up uint64) {
 	previousHost := e.transferBaselineHost
 	previousDown, previousUp := e.transferBaselineDown, e.transferBaselineUp
 
 	e.transferBaselineHost = hostname
-	e.transferBaselineDown = transfer.DownloadTotal
-	e.transferBaselineUp = transfer.UploadTotal
+	e.transferBaselineDown = reading.DownloadedBytes
+	e.transferBaselineUp = reading.UploadedBytes
 
 	if previousHost != hostname {
 		return 0, 0
 	}
-	if transfer.DownloadTotal < previousDown || transfer.UploadTotal < previousUp {
+	if reading.DownloadedBytes < previousDown || reading.UploadedBytes < previousUp {
 		e.logger.Debug("qbittorrent's session counters went backwards; it has restarted",
 			"consequence", "the bytes moved in this interval are not attributed")
 		return 0, 0
 	}
-	return transfer.DownloadTotal - previousDown, transfer.UploadTotal - previousUp
+	return reading.DownloadedBytes - previousDown, reading.UploadedBytes - previousUp
 }
 
 // pruneStats bounds how many servers keep statistics, least recently seen first.

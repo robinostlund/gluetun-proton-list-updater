@@ -16,19 +16,19 @@
         <p class="subtitle">Lowest-utilisation server picker for Gluetun</p>
       </div>
     </div>
+    <!-- In the top bar, which is sticky: "is everything working?" is the question most worth
+         being able to answer without scrolling back up. Each chip carries the detail as a
+         tooltip. -->
+    <section id="status-strip" class="strip" aria-label="Overall status"></section>
     <div class="topbar-right">
       <span id="activity" class="activity" hidden><span class="spinner"></span><span id="activity-text"></span></span>
-      <span id="stream-state" class="pill pill-muted" title="Live update stream">connecting…</span>
-      <span id="version" class="pill pill-muted"></span>
+      <span id="stream-state" class="pill" title="Live update stream">connecting…</span>
+      <span id="version" class="pill"></span>
     </div>
   </header>
 
   <main>
     <div id="alerts" class="alerts"></div>
-
-    <!-- One line answering "is everything working?", so that question does not require
-         reading four cards. Each pill carries the detail as a tooltip. -->
-    <section id="status-strip" class="strip" aria-label="Overall status"></section>
 
     <section class="cards">
       <!-- Three columns: the current server, the candidate that would replace it, and

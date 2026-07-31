@@ -445,8 +445,8 @@ namespace — so the rates have to come from something that knows about the traf
 ```yaml
 QBITTORRENT_URL: "http://qbittorrent:8080"
 QBITTORRENT_API_KEY: "qbt_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-SWITCHING_BUSY_DOWNLOAD: "2MB"      # defer while downloading faster than this
-SWITCHING_BUSY_UPLOAD: "512KB"      # and while uploading faster than this
+SWITCHING_BUSY_DOWNLOAD: "16"       # Mbit/s: defer while downloading faster than this
+SWITCHING_BUSY_UPLOAD: "4"          # Mbit/s: and while uploading faster than this
 SWITCHING_BUSY_WINDOW: 5m           # averaged over this period, not sampled once
 ```
 
@@ -456,8 +456,44 @@ than a username and password on purpose: it cannot expire mid-session, it is exe
 qBittorrent's CSRF protection so no `Referer` handling is needed, and it cannot trip the
 brute-force lockout that repeated logins would. Verified against a real qBittorrent **5.2.2**.
 
-Thresholds are written the way people say rates — `2MB`, `512KB`, `1.5MiB`, or a bare number for
-bytes per second. `KB`/`MB`/`GB` are powers of ten and `KiB`/`MiB`/`GiB` powers of two.
+### Where the rates come from
+
+Rates are read through an ordered list of sources, first answer wins, and the dashboard names
+whichever one answered — because it changes what the numbers cover.
+
+| Source | Covers | Status |
+|---|---|---|
+| **qBittorrent** | That client's own traffic | The only one today |
+| **Gluetun** | Everything crossing the tunnel | Not possible yet — see below |
+
+Gluetun would be the better source: it sits in the network namespace the traffic actually crosses, so
+its numbers would include everything through the tunnel rather than one client's share. It cannot be
+implemented yet — Gluetun's control server has no throughput route and it never reads the byte
+counters in its own namespace — so the seam exists and the list has one entry. Adding it later is a
+new file and a line in that list; nothing that consumes a reading has to change, because the
+conversion to the shared unit happens inside each source.
+
+### One unit: megabits per second
+
+Thresholds are **plain numbers in megabits per second**. `16` means 16 Mbit/s. No suffixes, no
+`MB`/`MiB`/`Mbit` vocabulary to remember, and no factor-of-eight trap between two spellings that look
+interchangeable.
+
+That is the same unit the dashboard displays and the same unit a link speed is quoted in — an ISP
+sells 100/10 Mbit, `iperf` and speedtest report bits — so a threshold, a live reading and a log line
+can be compared without arithmetic anywhere.
+
+**Volumes stay in bytes.** `412 GB downloaded` is a volume, and nobody measures data in bits.
+
+Rates are converted **once, where a source is read**: qBittorrent's Web API answers in bytes per
+second, its adapter converts, and everything past that point — the samples, the averages, the
+thresholds, the stored maxima, the JSON, the page — is bits. Nothing in the middle multiplies by
+anything.
+
+> **Upgrading:** the old spellings are refused rather than reinterpreted. `SWITCHING_BUSY_DOWNLOAD:
+> "2MB"` fails at startup with `write a plain number of megabits per second instead, so 2MB becomes
+> 16` — because silently reading `2MB` as 2 Mbit/s would cut the threshold to an eighth without
+> saying so.
 
 ### The rates are averaged, not sampled once
 

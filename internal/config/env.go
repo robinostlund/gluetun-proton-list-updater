@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Variable is one configuration setting as it was actually resolved.
@@ -273,95 +274,36 @@ func (r *reader) choice(key, defaultValue string, options ...string) (resolved s
 	return defaultValue
 }
 
-// byteRate reads a transfer rate in bytes per second.
+// parseMegabits reads a rate written in megabits per second.
 //
-// Rates are written the way people say them - "1MB", "500KB", "2.5MiB" - because a
-// threshold in bare bytes is unreadable and easy to get wrong by three orders of
-// magnitude. A bare number is accepted as bytes per second.
+// One unit, no suffixes. The dashboard displays bits, the engine carries bits, and a
+// threshold is compared against a measurement - so letting it be written in bytes, binary
+// bytes or bits meant four spellings of one number and a factor-of-eight trap between two of
+// them. "16" means 16 Mbit/s.
 //
-// Both conventions are supported: KB/MB/GB are powers of ten, KiB/MiB/GiB powers of
-// two, matching how each is normally defined. The "/s" is optional and ignored,
-// since a rate is the only thing this can mean.
-func (r *reader) byteRate(key string, defaultValue uint64) (resolved uint64) {
-	// Shown the way it was written rather than in bytes: "2 MB/s" is the threshold an
-	// operator set, and "2000000" is arithmetic they would have to do to recognise it.
-	configured := false
-	defer func() {
-		shown := "not a trigger"
-		if resolved > 0 {
-			shown = formatByteRate(resolved)
-		}
-		r.record(key, shown, configured)
-	}()
-
-	value, isSet := r.lookup(key)
-	if !isSet {
-		return defaultValue
-	}
-
-	parsed, err := parseByteRate(value)
-	if err != nil {
-		r.errorf("%s: %q is not a transfer rate (e.g. 1MB, 500KB, 2MiB, or bytes per second)", key, value)
-		return defaultValue
-	}
-	configured = true
-	return parsed
-}
-
-// formatByteRate renders a rate the way it is written in configuration.
-func formatByteRate(bytesPerSecond uint64) string {
-	const unit = 1000
-	if bytesPerSecond < unit {
-		return fmt.Sprintf("%d B/s", bytesPerSecond)
-	}
-	value := float64(bytesPerSecond)
-	for _, suffix := range []string{"kB/s", "MB/s", "GB/s", "TB/s"} {
-		value /= unit
-		if value < unit {
-			return fmt.Sprintf("%.3g %s", value, suffix)
-		}
-	}
-	return fmt.Sprintf("%.3g PB/s", value/unit)
-}
-
-// byteRateUnits is ordered longest-suffix-first, so "MiB" is matched before "B"
-// and "KB" before "B".
-var byteRateUnits = []struct {
-	suffix string
-	scale  float64
-}{
-	{"KIB", 1 << 10}, {"MIB", 1 << 20}, {"GIB", 1 << 30}, {"TIB", 1 << 40},
-	{"KB", 1e3}, {"MB", 1e6}, {"GB", 1e9}, {"TB", 1e12},
-	{"K", 1e3}, {"M", 1e6}, {"G", 1e9}, {"T", 1e12},
-	{"B", 1},
-}
-
-func parseByteRate(value string) (bytesPerSecond uint64, err error) {
-	text := strings.ToUpper(strings.TrimSpace(value))
-	text = strings.TrimSuffix(text, "/S")
-	text = strings.TrimSuffix(text, "PS")
-	text = strings.TrimSpace(text)
+// A value with any letters in it is refused rather than reinterpreted. That matters for the
+// upgrade specifically: "2MB" used to mean 2 megabytes per second, and silently reading it as
+// 2 megabits would quietly cut the threshold to an eighth - so it says what to write instead.
+func parseMegabits(value string) (bitsPerSecond uint64, err error) {
+	text := strings.TrimSpace(value)
 	if text == "" {
 		return 0, fmt.Errorf("empty rate")
 	}
-
-	scale := 1.0
-	for _, unit := range byteRateUnits {
-		if len(text) > len(unit.suffix) && strings.HasSuffix(text, unit.suffix) {
-			scale = unit.scale
-			text = strings.TrimSpace(strings.TrimSuffix(text, unit.suffix))
-			break
-		}
-	}
-
 	amount, err := strconv.ParseFloat(text, 64)
 	if err != nil {
+		// Only once parsing has failed, because a plain number can legitimately contain a
+		// letter: "1e12" is scientific notation, and rejecting it as "that looks like a unit"
+		// would be both wrong and confusing. This ordering is what a test caught.
+		if strings.ContainsFunc(text, unicode.IsLetter) {
+			return 0, fmt.Errorf("%q has a unit; write a plain number of megabits per second "+
+				"instead, so 2MB becomes 16 and 512KB becomes 4", value)
+		}
 		return 0, fmt.Errorf("%q is not a number", text)
 	}
-	// "nan" and "inf" parse cleanly and then defeat every range check below, because
-	// NaN compares false against everything. Left in, a NaN threshold would never be
-	// exceeded and an Inf one could never be reached - so the protection this setting
-	// exists to provide would be silently switched off by a typo.
+	// "nan" and "inf" parse cleanly and then defeat every range check below, because NaN
+	// compares false against everything. Left in, a NaN threshold would never be exceeded and
+	// an Inf one could never be reached - so the protection this setting exists to provide
+	// would be silently switched off by a typo.
 	if math.IsNaN(amount) || math.IsInf(amount, 0) {
 		return 0, fmt.Errorf("%q is not a finite number", text)
 	}
@@ -369,11 +311,38 @@ func parseByteRate(value string) (bytesPerSecond uint64, err error) {
 		return 0, fmt.Errorf("must not be negative")
 	}
 
-	// Converting an out-of-range float to an integer is undefined in Go, so the range
-	// has to be checked before the conversion rather than after.
-	total := amount * scale
-	if total > math.MaxUint64 {
+	// Converting an out-of-range float to an integer is undefined in Go, so the range has to
+	// be checked before the conversion rather than after.
+	bits := amount * 1e6
+	if bits > math.MaxUint64 {
 		return 0, fmt.Errorf("%q is too large to be a transfer rate", value)
 	}
-	return uint64(total), nil
+	return uint64(bits), nil
+}
+
+// megabits reads a rate in megabits per second.
+func (r *reader) megabits(key string, defaultMegabits float64) (resolved uint64) {
+	configured := false
+	defer func() { r.record(key, formatMegabits(resolved), configured) }()
+
+	value, isSet := r.lookup(key)
+	if !isSet {
+		return uint64(defaultMegabits * 1e6)
+	}
+	parsed, err := parseMegabits(value)
+	if err != nil {
+		r.errorf("%s: %v", key, err)
+		return uint64(defaultMegabits * 1e6)
+	}
+	configured = true
+	return parsed
+}
+
+// formatMegabits renders a rate for the settings panel, in the unit it is configured in.
+func formatMegabits(bitsPerSecond uint64) string {
+	if bitsPerSecond == 0 {
+		return "not a trigger"
+	}
+	return strings.TrimSuffix(strconv.FormatFloat(float64(bitsPerSecond)/1e6, 'f', 1, 64),
+		".0") + " Mbit/s"
 }

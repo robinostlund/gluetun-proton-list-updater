@@ -96,9 +96,20 @@ type Engine struct {
 	portForwardInferenceAbandoned bool
 	// qbittorrent reads current transfer rates, nil when QBITTORRENT_URL is unset.
 	// Its purpose is to keep a switch from interrupting an active transfer.
-	qbittorrent        *qbittorrent.Client
+	qbittorrent *qbittorrent.Client
+	// rateSources are consulted in order, first answer wins. One entry today; the ordering
+	// is what lets a better source be preferred later without touching its consumers.
+	rateSources []rateSource
+	// qbSource is the qBittorrent adapter, held separately because qBittorrent answers more
+	// than rates: the session byte counters and the peer connection state are its own facts,
+	// not something every source could provide.
+	qbSource *qbittorrentSource
+	// rateSource names whichever source answered last, so the dashboard can say where the
+	// numbers came from rather than leaving it to be assumed.
+	rateSourceName     string
 	qbittorrentVersion string
-	transfer           qbittorrent.Transfer
+	// reading is the most recent rates, in the canonical unit.
+	reading rateReading
 	// transferSamples is the recent rate history, used to average over
 	// SWITCHING_BUSY_WINDOW rather than deciding on one reading.
 	transferSamples []transferSample
@@ -233,6 +244,8 @@ func New(opts Options) (engine *Engine, err error) {
 			APIKey:  opts.Config.QBittorrent.APIKey,
 			Timeout: opts.Config.QBittorrent.RequestTimeout,
 		})
+		engine.qbSource = &qbittorrentSource{client: engine.qbittorrent}
+		engine.rateSources = []rateSource{engine.qbSource}
 		if !qbittorrent.APIKeyLooksValid(opts.Config.QBittorrent.APIKey) {
 			// Advisory: qBittorrent decides whether a key works, and the format
 			// could change. But a value that is plainly not a key - a password, a
