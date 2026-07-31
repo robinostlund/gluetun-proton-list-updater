@@ -89,8 +89,18 @@ type ServerStats struct {
 	// zero without it.
 	DownloadedBytes uint64 `json:"downloaded,omitempty"`
 	UploadedBytes   uint64 `json:"uploaded,omitempty"`
-	// MaxDownloadRate and MaxUploadRate are the fastest this server was ever seen to go,
-	// in bytes per second. Also from qBittorrent, and also never reset.
+	// MaxDownloadRate and MaxUploadRate are the fastest this server was seen to go during
+	// the current stay on it - or during the most recent one, for a server not in use.
+	//
+	// Not all-time, unlike the volumes above, because a rate is a claim about conditions
+	// rather than a count: a server that managed 14 MB/s two months ago says nothing about
+	// what it will do tonight, and quoting it invites exactly the wrong comparison.
+	//
+	// The replacement is lazy, which is the part that matters. Arriving on a server does not
+	// clear these; the *first reading with traffic in it* replaces them, and readings after
+	// that raise them. So the previous stay's figure stays visible until there is a real
+	// measurement to put in its place, instead of the card going blank the moment you
+	// reconnect and staying blank until you happen to start a download.
 	MaxDownloadRate uint64 `json:"max_download,omitempty"`
 	MaxUploadRate   uint64 `json:"max_upload,omitempty"`
 	// Samples counts load and latency observations, TransferReadings counts qBittorrent
@@ -186,6 +196,12 @@ type persistedState struct {
 	// noise.
 	GluetunHadServerData bool           `json:"gluetun_had_server_data,omitempty"`
 	History              []SwitchRecord `json:"history,omitempty"`
+	// MeasuringHost is the server the transfer measurement currently belongs to.
+	//
+	// Persisted because a stay is defined by where the tunnel is, not by whether this
+	// process has been running the whole time. Held only in memory, every restart would
+	// look like a fresh arrival and discard the stay's measured rates.
+	MeasuringHost string `json:"measuring_host,omitempty"`
 	// Stats is what has been observed about each server, keyed by hostname.
 	//
 	// One record per server, fixed size. Load, latency and Proton's own score describe a

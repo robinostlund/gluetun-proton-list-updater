@@ -3978,10 +3978,12 @@ func TestTransferredTotalsSurviveANewStay(t *testing.T) {
 	if record.DownloadedBytes != 5<<30 {
 		t.Errorf("total = %d, want 5 GiB across both stays", record.DownloadedBytes)
 	}
-	// The maximum is all-time, like the totals: "the fastest this server has ever gone"
-	// is the question, and an earlier stay is still evidence for it.
-	if record.MaxDownloadRate != 50<<20 {
-		t.Errorf("max rate = %d, want the all-time 50 MB/s", record.MaxDownloadRate)
+	// The rate, by contrast, describes the current stay: it is a claim about conditions, and
+	// an earlier stay's figure is not evidence about them. See
+	// TestMeasuredRatesDescribeTheCurrentStayAndVolumesDoNot.
+	if record.MaxDownloadRate != 3<<20 {
+		t.Errorf("max rate = %s, want the current stay's 3 MB/s",
+			formatRate(record.MaxDownloadRate))
 	}
 	if record.Visits != 2 {
 		t.Errorf("visits = %d, want 2", record.Visits)
@@ -4899,5 +4901,103 @@ func TestTheCurrentServerCanBeIdentifiedFromTheExitAddress(t *testing.T) {
 	engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Gluetun.Exit.IP = "203.0.113.7" })
 	if hostname, source := engine.currentHostname(); hostname != "" || source != "unknown" {
 		t.Errorf("hostname = %q (%s), want unknown for an unmatched address", hostname, source)
+	}
+}
+
+// A rate is a claim about conditions, not a count, so it describes the current stay on a
+// server - or the most recent one, for a server not in use. A server that managed 14 MB/s
+// two months ago says nothing about what it will do tonight.
+//
+// The replacement is lazy on purpose: arriving does not clear the figure, the first reading
+// with traffic in it replaces it. Otherwise reconnecting would blank the card and leave it
+// blank until a download happened to start, which is when the number is most wanted.
+func TestMeasuredRatesDescribeTheCurrentStayAndVolumesDoNot(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+	const first, second = "se-01.protonvpn.net", "se-02.protonvpn.net"
+
+	// A fast stay on the first server.
+	pinCurrent(t, engine, first, time.Hour)
+	engine.recordTransfer(transferAt(50<<20, 5<<20, 10<<30, 1<<30))
+	engine.recordTransfer(transferAt(40<<20, 4<<20, 14<<30, 2<<30))
+
+	record := engine.state.snapshot().Stats[first]
+	if record.MaxDownloadRate != 50<<20 {
+		t.Fatalf("max download = %s, want 50 MB/s", formatRate(record.MaxDownloadRate))
+	}
+
+	// Away on another server: the first server's figure is untouched, because it is the
+	// answer to "what did it do last time".
+	pinCurrent(t, engine, second, time.Hour)
+	engine.recordTransfer(transferAt(2<<20, 0, 15<<30, 2<<30))
+	engine.recordTransfer(transferAt(2<<20, 0, 16<<30, 2<<30))
+
+	if got := engine.state.snapshot().Stats[first].MaxDownloadRate; got != 50<<20 {
+		t.Errorf("the away server's rate changed to %s; it should keep its last stay's figure",
+			formatRate(got))
+	}
+
+	// Back on the first server, and *before* any traffic: the old figure is still shown,
+	// because there is nothing real to replace it with yet.
+	pinCurrent(t, engine, first, time.Hour)
+	engine.recordTransfer(transferAt(0, 0, 16<<30, 2<<30))
+	if got := engine.state.snapshot().Stats[first].MaxDownloadRate; got != 50<<20 {
+		t.Errorf("arriving cleared the rate to %s before measuring anything",
+			formatRate(got))
+	}
+
+	// The first reading with traffic replaces it - the server is busier now, and saying so
+	// is the whole point.
+	engine.recordTransfer(transferAt(6<<20, 1<<20, 17<<30, 3<<30))
+	record = engine.state.snapshot().Stats[first]
+	if record.MaxDownloadRate != 6<<20 {
+		t.Errorf("max download = %s, want the new stay's 6 MB/s rather than the old 50",
+			formatRate(record.MaxDownloadRate))
+	}
+	if record.MaxUploadRate != 1<<20 {
+		t.Errorf("max upload = %s, want the new stay's figure", formatRate(record.MaxUploadRate))
+	}
+
+	// And within the stay it still rises.
+	engine.recordTransfer(transferAt(9<<20, 0, 18<<30, 3<<30))
+	if got := engine.state.snapshot().Stats[first].MaxDownloadRate; got != 9<<20 {
+		t.Errorf("max download = %s, want 9 MB/s within the same stay", formatRate(got))
+	}
+
+	// The volumes, meanwhile, only ever grow: 4 GiB from the first stay plus 2 more from
+	// the second, and never reset by either arrival.
+	if got := engine.state.snapshot().Stats[first].DownloadedBytes; got != 6<<30 {
+		t.Errorf("downloaded = %s, want 6 GiB accumulated across both stays",
+			formatBytes(got))
+	}
+}
+
+// A restart is not an arrival. The tunnel has not moved, so the stay continues and the rates
+// measured so far belong to it - which is why the current stay is persisted rather than held
+// in memory.
+func TestARestartDoesNotEndTheStayForMeasuredRates(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+	const hostname = "se-01.protonvpn.net"
+
+	pinCurrent(t, engine, hostname, time.Hour)
+	engine.recordTransfer(transferAt(50<<20, 0, 10<<30, 0))
+	engine.recordTransfer(transferAt(40<<20, 0, 11<<30, 0))
+
+	// As after a restart: nothing in memory, the state file as it was left.
+	engine.throughputHost = ""
+	engine.transferBaselineHost = ""
+
+	// A slower reading must not replace the stay's peak, because it is the same stay.
+	engine.recordTransfer(transferAt(3<<20, 0, 12<<30, 0))
+	engine.recordTransfer(transferAt(4<<20, 0, 13<<30, 0))
+
+	record := engine.state.snapshot().Stats[hostname]
+	if record.MaxDownloadRate != 50<<20 {
+		t.Errorf("max download = %s, want the stay's 50 MB/s kept across the restart",
+			formatRate(record.MaxDownloadRate))
+	}
+	if record.Visits != 1 {
+		t.Errorf("visits = %d, want 1: a restart is not a new visit", record.Visits)
 	}
 }

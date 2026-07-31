@@ -137,7 +137,10 @@ func (e *Engine) recordTransfer(transfer qbittorrent.Transfer) {
 		return
 	}
 
-	newStay := hostname != e.throughputHost
+	// A stay is defined by where the tunnel is, so this comes from persisted state rather
+	// than from memory: otherwise a restart would look like a fresh arrival and throw away
+	// the rates measured so far on the server the tunnel never left.
+	newStay := hostname != e.state.snapshot().MeasuringHost
 	now := time.Now()
 
 	// Deliberately mutate rather than update: this runs on every qBittorrent poll, and
@@ -169,17 +172,36 @@ func (e *Engine) recordTransfer(transfer qbittorrent.Transfer) {
 			stats.LastTransferUnix = now.Unix()
 		}
 		if download > 0 || upload > 0 {
-			stats.MaxDownloadRate = max(stats.MaxDownloadRate, download)
-			stats.MaxUploadRate = max(stats.MaxUploadRate, upload)
+			// The first reading of a new stay replaces the rates; the rest raise them.
+			//
+			// Volumes accumulate for ever and rates do not, because they are different
+			// kinds of claim. "412 GB have gone through this server" only grows truer with
+			// time. "This server does 14 MB/s" was true on one evening under one set of
+			// conditions, and repeating it about a server that is busier now is worse than
+			// saying nothing.
+			//
+			// Replacing on the first reading rather than clearing on arrival is what keeps
+			// the previous stay's figure visible until there is something real to put in its
+			// place - reconnecting does not blank the card and leave it blank until a
+			// download happens to start.
+			if newStay {
+				stats.MaxDownloadRate, stats.MaxUploadRate = download, upload
+			} else {
+				stats.MaxDownloadRate = max(stats.MaxDownloadRate, download)
+				stats.MaxUploadRate = max(stats.MaxUploadRate, upload)
+			}
 			stats.TransferReadings++
 			stats.LastSeenUnix = now.Unix()
+			// The stay is only established once it has a rate of its own, for the same
+			// reason: until then the figure on display still belongs to the previous one.
+			state.MeasuringHost = hostname
 		}
 
 		state.Stats[hostname] = stats
 	})
 
 	if newStay {
-		if e.throughputHost != "" {
+		if e.throughputHost != "" && e.throughputHost != hostname {
 			e.logger.Debug("transfer measurement moved to a new server",
 				"from", e.throughputHost, "to", hostname)
 		}

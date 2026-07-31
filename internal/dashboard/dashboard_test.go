@@ -2452,3 +2452,73 @@ func TestTheSettingsPanelUsesThePageColourVocabulary(t *testing.T) {
 		t.Error("the configured marker has no styling")
 	}
 }
+
+// A "fastest" figure means nothing without saying what period it covers, and this one covers
+// a single stay on the server rather than all time.
+func TestTheMeasuredRateSaysWhichStayItDescribes(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The card's row names the period rather than implying an all-time best.
+	if !bytes.Contains(page, []byte("<dt>Fastest this stay</dt>")) {
+		t.Error("the card does not say the rate covers one stay")
+	}
+	if bytes.Contains(page, []byte("<dt>Fastest measured rate</dt>")) {
+		t.Error(`"Fastest measured rate" is back; it reads as an all-time best`)
+	}
+	// The panel states which stay, since for a server not in use it is the previous one.
+	if !bytes.Contains(page, []byte(`id="modal-stat-stay"`)) {
+		t.Error("the panel does not say which stay the rates describe")
+	}
+	for _, want := range []string{"this stay, in progress", "the most recent of"} {
+		if !bytes.Contains(script, []byte(want)) {
+			t.Errorf("the panel cannot distinguish an in-progress stay from a past one (%q)", want)
+		}
+	}
+	// And the explanation of why it is not all-time is where it is read, not only in the
+	// README.
+	if !bytes.Contains(script, []byte("Not all-time")) {
+		t.Error("nothing explains why the rate is not an all-time figure")
+	}
+}
+
+// "Which row am I on" is what the candidate table is scanned for most, so the current tag is
+// filled rather than outlined like the rest: a green outline among a dozen outlined tags is
+// barely easier to find than a grey one.
+func TestTheCurrentServerTagStandsOut(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(script, []byte(`class="tag tag-current"`)) {
+		t.Error("the current tag has no class of its own, so it cannot be styled apart")
+	}
+	rule := regexp.MustCompile(`(?s)\.tag-current \{.*?\}`).Find(styles)
+	if rule == nil {
+		t.Fatal("no .tag-current rule")
+	}
+	// Filled with the same green the page uses for a good state, not merely coloured text.
+	if !bytes.Contains(rule, []byte("background: var(--good)")) {
+		t.Error("the current tag is not filled with the page's green")
+	}
+	// The row tint stays: the tag answers the question at a glance, the tint holds while
+	// reading across a wide row.
+	if !bytes.Contains(styles, []byte("tr.is-current {")) {
+		t.Error("the current row lost its tint")
+	}
+}

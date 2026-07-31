@@ -508,12 +508,26 @@ affordable for **every candidate** rather than a chosen few.
 |---|---|
 | **Load** now / best / worst | Proton's utilisation, and the extremes ever seen. A server that is quiet now but has peaked at 95 % is a different proposition from one that never has |
 | **Latency** now / best / worst | Round trip, same idea. Absent for servers outside `LATENCY_TOP_N`, which reads *not probed* rather than as a zero |
-| **Downloaded / Uploaded** | Every byte ever moved through this server |
-| **Fastest download / upload** | The best single reading ever taken on it |
+| **Downloaded / Uploaded** | Every byte ever moved through this server, all time |
+| **Fastest download / upload** | The best readings during **one stay** — the current one, or the most recent for a server not in use |
 | **Observations**, **Stays**, **First seen** | How much evidence is behind the extremes, and since when |
 
 Best means *lowest* for both load and latency. The stored field names say `lowest` and `highest`
 rather than best and worst, because reading those requires already knowing which direction is good.
+
+**Rates cover one stay; volumes cover all time.** They are different kinds of claim. "412 GB have
+gone through this server" only grows truer with age. "This server does 14 MB/s" was true on one
+evening under one set of conditions, and repeating it about a server that is busier now is worse than
+saying nothing — so a rate describes the current stay, or the most recent one for a server not in use.
+
+The replacement is **lazy**, which is the part worth knowing: arriving on a server does not clear the
+figure, the first reading with traffic in it replaces it. Otherwise reconnecting would blank the row
+and leave it blank until a download happened to start, which is exactly when the number is wanted. A
+restart is not an arrival either — the stay is persisted, so the tunnel not having moved means the
+stay continues.
+
+Load and latency extremes stay all-time, because they are sampled for every candidate whether or not
+it is in use, so they are not tied to stays at all.
 
 Load and latency are recorded for every candidate on each loads refresh, so they accumulate whether
 or not a server is ever used. The four transfer figures need the qBittorrent integration; without it

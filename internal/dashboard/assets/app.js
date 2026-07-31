@@ -59,7 +59,7 @@ function loadCell(load) {
 // same server never appears to have different properties in two places.
 function featureTags(candidate, options = {}) {
   const tags = [];
-  if (options.current) tags.push('<span class="tag">current</span>');
+  if (options.current) tags.push('<span class="tag tag-current">current</span>');
   if (candidate.p2p) tags.push('<span class="tag tag-p2p">p2p</span>');
   if (candidate.stream) tags.push('<span class="tag">stream</span>');
   if (candidate.secure_core) tags.push('<span class="tag">secure core</span>');
@@ -139,11 +139,11 @@ function fastestRateCell(measured) {
 
   const down = rate(measured.max_download || 0);
   const up = rate(measured.max_upload || 0);
-  const readings = measured.transfer_readings
-    ? ` from ${measured.transfer_readings} readings` : '';
-  const title = `The fastest single readings ever taken on this server${readings}: `
-    + `${down} down, ${up} up. A rate reflects the swarm and your peers as much as the `
-    + 'server, so treat it as the best it has managed rather than what it will do.';
+  const title = `The fastest readings taken during this stay on the server: ${down} down, `
+    + `${up} up. Deliberately not all-time - a rate is a claim about conditions, and what a `
+    + 'server managed two months ago says nothing about what it will do now. Reconnecting '
+    + 'replaces it with the first real reading of the new stay, not before. A rate also '
+    + 'reflects the swarm and your peers as much as the server.';
 
   return `<div title="${escapeHTML(title)}">${escapeHTML(down)} down</div>`
     + `<div class="muted" title="${escapeHTML(title)}">${escapeHTML(up)} up</div>`;
@@ -1320,9 +1320,18 @@ function renderCandidateStats(stats) {
   text('modal-stat-max-down', speed(measured.max_download));
   text('modal-stat-max-up', speed(measured.max_upload));
   el('modal-stat-max-down').title = el('modal-stat-max-up').title =
-    'The fastest single reading ever taken on this server. A rate reflects the swarm as '
-    + 'much as the server, so treat it as the best it has managed, not a guarantee.';
+    (measured.current
+      ? 'The fastest readings so far during this stay on the server. '
+      : 'The fastest readings during the most recent stay on this server. ')
+    + 'Not all-time: a rate is a claim about conditions, and one from months ago says '
+    + 'nothing about the server now. Reconnecting replaces it with the first real reading '
+    + 'of the new stay. It reflects the swarm and your peers as much as the server, so it '
+    + 'is the best it has managed rather than a guarantee.';
 
+  // Which stay the rates above belong to, since "fastest" means nothing without it.
+  text('modal-stat-stay', measured.current ? 'this stay, in progress'
+    : measured.visits ? `the most recent of ${measured.visits} stay`
+      + `${measured.visits === 1 ? '' : 's'}` : 'no stay yet');
   text('modal-stat-reads', measured.transfer_readings
     ? `${measured.transfer_readings}` : 'none');
   text('modal-stat-last-transfer', measured.last_transfer_at

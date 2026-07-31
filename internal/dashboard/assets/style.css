@@ -493,6 +493,16 @@ td.right, th.right { text-align: right; }
 .toast.good { border-color: var(--good); }
 
 .card-tags { margin: 0 0 10px; }
+/* Filled rather than outlined, unlike every other tag: "which row am I on" is the question
+   the table is scanned for most, and a green outline among a dozen outlined tags is not much
+   easier to find than a grey one. The row tint says the same thing but is easy to lose on a
+   long page. */
+.tag-current {
+  background: var(--good);
+  border-color: var(--good);
+  color: var(--accent-text);
+  font-weight: 600;
+}
 .tag-p2p { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .tag-excluded { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
 .tag-blocked { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
