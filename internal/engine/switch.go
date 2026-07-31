@@ -98,11 +98,29 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 	e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Selection.LastError = "" })
 
 	if !verdict.shouldSwitch {
-		e.logger.Debug("staying on current server",
-			"trigger", trigger, "reason", verdict.explanation, "current", currentHostname)
+		// Logged at info when the reason changes, at debug when it repeats.
+		//
+		// Debug for all of them meant a tool doing its job looked identical to a wedged one:
+		// at the default level, nothing at all appeared between startup and the first latency
+		// sweep half an hour later. Info for all of them would be 288 identical lines a day
+		// from the five-minute evaluation alone, which is its own kind of invisible.
+		//
+		// The reason changing is the part worth reading: "cooldown active for another 12m"
+		// once, then silence until it becomes something else.
+		if verdict.explanation != e.lastEvaluationReason {
+			e.lastEvaluationReason = verdict.explanation
+			e.logger.Info("staying on current server",
+				"trigger", trigger, "reason", verdict.explanation, "current", currentHostname)
+		} else {
+			e.logger.Debug("staying on current server",
+				"trigger", trigger, "reason", verdict.explanation, "current", currentHostname)
+		}
 		explain(verdict.explanation)
 		return
 	}
+	// A switch resets it, so the next stay explains itself rather than being suppressed as a
+	// repeat of whatever was true before the move.
+	e.lastEvaluationReason = ""
 	explain("")
 
 	e.logger.Info("switching server",

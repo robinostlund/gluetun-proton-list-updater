@@ -1113,6 +1113,30 @@ would bury the useful rows under hundreds of self-inflicted ones.
 | `LOG_FORMAT` | `text` | `text` or `json` |
 | `TZ` | – | Timezone for log timestamps |
 
+### What `info` shows
+
+The default level is meant to answer "is it working" without being read continuously. In steady
+state that is roughly four lines an hour:
+
+| Event | Cadence |
+|---|---|
+| Loads refreshed | every `PROTON_LOAD_REFRESH_INTERVAL` (15 min) |
+| Latency swept | every `LATENCY_INTERVAL` (30 min) |
+| Server list fetched, servers file written | every `PROTON_REFRESH_INTERVAL` (12 h) |
+| Not switching, and why | when the **reason changes** |
+| Switching, transfers starting and stopping, anything that failed | when it happens |
+
+Two of those used to be `debug`, which meant that at the default level **nothing at all appeared
+between startup and the first latency sweep half an hour later** — a healthy tool looked exactly like
+a wedged one. The reason for not switching is logged on change rather than every time, because the
+five-minute evaluation would otherwise contribute 288 identical lines a day, which is its own kind of
+invisible.
+
+The 30-second health check and the one-minute state flush stay at `debug`: at 2 880 and 1 440 lines a
+day they would bury everything else. Raise `LOG_LEVEL=debug` to see them, and note that the
+dashboard's *Recent activity* panel shows exactly what the level admits — it is fed by the same
+handler.
+
 ---
 
 ## Fault tolerance

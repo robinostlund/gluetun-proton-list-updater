@@ -110,6 +110,9 @@ type Engine struct {
 	// transferGraceExpired records that the wait for qBittorrent's first answer has been
 	// given up on, so the warning is said once rather than on every evaluation.
 	transferGraceExpired bool
+	// lastEvaluationReason is the last reason logged for not switching, so a reason that
+	// holds for hours is reported once rather than on every evaluation.
+	lastEvaluationReason string
 	// throughputPeakDownload and throughputPeakUpload are the highest rates seen since
 	// the last graph point was written, held in memory and cleared when it is.
 	throughputPeakDownload uint64

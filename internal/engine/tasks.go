@@ -195,8 +195,13 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 		snapshot.Proton.LastLoadError = ""
 		snapshot.Proton.CacheStale = false
 	})
-	e.logger.Debug("refreshed server loads",
-		"trigger", trigger, "updated", updated, "disabled", dropped)
+	// Info, not debug: this is the routine work this container exists to do, every fifteen
+	// minutes, and it was invisible at the default log level - which made a healthy tool
+	// indistinguishable from a stalled one. Ninety-six lines a day is a price worth paying
+	// for that.
+	e.logger.Info("refreshed server loads",
+		"trigger", trigger, "updated", updated, "disabled", dropped,
+		"candidates", len(e.candidates))
 }
 
 // applyLoads refreshes utilisation across every set the dashboard shows.

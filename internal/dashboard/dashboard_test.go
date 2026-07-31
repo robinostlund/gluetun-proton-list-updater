@@ -2522,3 +2522,58 @@ func TestTheCurrentServerTagStandsOut(t *testing.T) {
 		t.Error("the current row lost its tint")
 	}
 }
+
+// The live rates belong in the status strip, next to the switching verdict they explain.
+//
+// They are also the one thing in the strip that is a measurement rather than a state, and the
+// distinction has to survive: colouring a rate against its threshold would make it disagree
+// with the verdict beside it every time traffic dips between pieces, because the verdict is
+// decided on the windowed average.
+func TestTheStatusStripShowsTheLiveRatesNextToTheVerdict(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	strip := regexp.MustCompile(`(?s)function renderStatusStrip.*?\n\}`).Find(script)
+	if strip == nil {
+		t.Fatal("could not find renderStatusStrip")
+	}
+
+	// Both directions, named in words the way every other direction on the page is.
+	for _, direction := range []string{`rateChip('Down'`, `rateChip('Up'`} {
+		if !bytes.Contains(strip, []byte(direction)) {
+			t.Errorf("the strip does not show %s", direction)
+		}
+	}
+	// Only when there is something measuring them.
+	guard := bytes.Index(strip, []byte("if (transfer.configured)"))
+	if guard < 0 || guard > bytes.Index(strip, []byte("rateChip('Down'")) {
+		t.Error("the rate chips are not behind the qBittorrent-configured check")
+	}
+	// Before the switching verdict: cause, then effect.
+	if bytes.Index(strip, []byte("rateChip('Up'")) > bytes.Index(strip, []byte("'Switching'")) {
+		t.Error("the rates come after the switching verdict they explain")
+	}
+
+	// Neutral, not coloured against the threshold.
+	if !bytes.Contains(strip, []byte("? 'info' : 'warn'")) {
+		t.Error("the rate chips are not neutral while qBittorrent is answering")
+	}
+	if !bytes.Contains(styles, []byte(".chip-info b")) {
+		t.Error("the neutral chip level has no styling, so its value inherits a verdict colour")
+	}
+	// The average that actually decides is one hover away, since the number shown is not it.
+	if !bytes.Contains(strip, []byte("Switching is decided on the")) {
+		t.Error("nothing explains that the verdict uses the average rather than this number")
+	}
+	// A stale reading says so, because it is still what defers switches.
+	if !bytes.Contains(strip, []byte("last reading taken")) {
+		t.Error("a stale rate does not say it is stale")
+	}
+}

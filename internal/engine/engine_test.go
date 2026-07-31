@@ -5001,3 +5001,161 @@ func TestARestartDoesNotEndTheStayForMeasuredRates(t *testing.T) {
 		t.Errorf("visits = %d, want 1: a restart is not a new visit", record.Visits)
 	}
 }
+
+// closureBodies returns the body of every closure passed to opener in a source file, found
+// by matching braces. A regex cannot do this correctly, and being approximate would either
+// miss cases or cry wolf.
+func closureBodies(t *testing.T, path, opener string) (bodies []string, lines []int) {
+	t.Helper()
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+
+	for offset := 0; ; {
+		start := strings.Index(text[offset:], opener)
+		if start < 0 {
+			return bodies, lines
+		}
+		start += offset
+		open := strings.Index(text[start:], "{") + start
+		depth, end := 1, open+1
+		for depth > 0 && end < len(text) {
+			switch text[end] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+			end++
+		}
+		bodies = append(bodies, text[open:end])
+		lines = append(lines, 1+strings.Count(text[:start], "\n"))
+		offset = end
+	}
+}
+
+// The snapshot lock and the state lock must never be held at the same time.
+//
+// Two independent mutexes taken in two different orders is the classic deadlock: one
+// goroutine holding the snapshot lock and wanting the state lock, another holding the state
+// lock and wanting the snapshot lock, and neither can proceed. The engine is a single
+// goroutine today, which hides it - but the dashboard reads the snapshot from HTTP handlers,
+// so a second goroutine already touches one of the two.
+//
+// Nesting them at all is also how a lock gets taken twice on one goroutine, which for a
+// non-reentrant RWMutex is an immediate self-deadlock.
+func TestTheSnapshotAndStateLocksAreNeverNested(t *testing.T) {
+	t.Parallel()
+
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var checked int
+	for _, path := range sources {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+
+		// Holding the snapshot lock, reaching for the state lock.
+		bodies, lines := closureBodies(t, path, "mutateSnapshot(func(snapshot *Snapshot)")
+		for i, body := range bodies {
+			checked++
+			for _, reach := range []string{
+				"e.state.update(", "e.state.mutate(", "e.state.snapshot(", "e.state.flush(",
+			} {
+				if strings.Contains(body, reach) {
+					t.Errorf("%s:%d holds the snapshot lock and calls %s: the two locks must "+
+						"never be nested, in either order", path, lines[i], reach)
+				}
+			}
+		}
+
+		// Holding the state lock, reaching for the snapshot lock.
+		for _, opener := range []string{
+			"e.state.update(func(state *persistedState)",
+			"e.state.mutate(func(state *persistedState)",
+		} {
+			bodies, lines := closureBodies(t, path, opener)
+			for i, body := range bodies {
+				checked++
+				for _, reach := range []string{
+					"e.mutateSnapshot(", "e.Snapshot()", "e.publish()", "e.currentHostname(",
+					"e.state.update(", "e.state.mutate(",
+				} {
+					if strings.Contains(body, reach) {
+						t.Errorf("%s:%d holds the state lock and calls %s: the two locks must "+
+							"never be nested, in either order", path, lines[i], reach)
+					}
+				}
+			}
+		}
+	}
+	if checked < 30 {
+		t.Fatalf("only inspected %d closures; the scan is not working", checked)
+	}
+	t.Logf("inspected %d lock-holding closures", checked)
+}
+
+// A tool doing its job must not look identical to a wedged one.
+//
+// At the default level nothing at all was logged between startup and the first latency sweep
+// half an hour later: the fifteen-minute loads refresh logged at debug, and every evaluation
+// that decided to stay put logged at debug too. Both are the routine work this container
+// exists to do.
+func TestRoutineWorkIsVisibleAtTheDefaultLogLevel(t *testing.T) {
+	var buffer bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buffer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+	engine.logger = logger
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	// The periodic loads refresh says so.
+	engine.refreshLoads(context.Background(), "scheduled")
+	if !strings.Contains(buffer.String(), "refreshed server loads") {
+		t.Error("a loads refresh is invisible at the default log level")
+	}
+
+	// An evaluation that decides to stay says why - once.
+	buffer.Reset()
+	pinCurrent(t, engine, engine.ranked[0].Candidate.Hostname, time.Hour)
+	engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Gluetun.SettingsReadable = true })
+	engine.evaluate(context.Background(), "scheduled", false)
+
+	first := buffer.String()
+	if !strings.Contains(first, "staying on current server") {
+		t.Errorf("an evaluation that changed nothing is invisible: %s", first)
+	}
+
+	// And repeating itself does not fill the log: the same reason again is debug.
+	buffer.Reset()
+	engine.evaluate(context.Background(), "scheduled", false)
+	engine.evaluate(context.Background(), "scheduled", false)
+	if repeated := buffer.String(); strings.Contains(repeated, "staying on current server") {
+		t.Errorf("an unchanged reason was logged again, which is 288 lines a day: %s", repeated)
+	}
+
+	// A different reason is worth reading, so it is reported rather than suppressed.
+	buffer.Reset()
+	enabled := false
+	if err := engine.state.update(func(state *persistedState) {
+		state.AutoSwitch = &enabled
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine.evaluate(context.Background(), "scheduled", false)
+
+	changed := buffer.String()
+	if !strings.Contains(changed, "staying on current server") {
+		t.Errorf("a changed reason was suppressed as a repeat: %s", changed)
+	}
+	if !strings.Contains(changed, "automatic switching is disabled") {
+		t.Errorf("the new reason is not in the line: %s", changed)
+	}
+}

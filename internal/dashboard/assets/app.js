@@ -315,6 +315,37 @@ function renderStatusStrip() {
     chip('Port forwarding', verdict,
       verdict === 'working' ? 'good' : verdict === 'unknown' || verdict === 'not requested' ? 'warn' : 'bad',
       transfer.port_forwarding_detail || '');
+
+    // The live rates, immediately before the switching verdict they explain: cause, then
+    // effect. The chip label carries the direction, which is what that slot is for - and it
+    // keeps the page's rule of naming directions in words rather than arrows.
+    //
+    // Deliberately left uncoloured. These are instantaneous and the verdict beside them is
+    // decided on the windowed average, so colouring these against the threshold would have
+    // them disagree with it every time traffic dips between pieces - which is exactly what
+    // averaging exists to absorb. The chip beside them carries the verdict; the tooltip
+    // carries the average that produced it.
+    const rateChip = (label, now, average, threshold) => {
+      const parts = [`Instantaneous: ${rate(now)}.`];
+      if (transfer.busy_window) {
+        parts.push(`Switching is decided on the ${transfer.busy_window} average, which is `
+          + `${rate(average)}.`);
+      }
+      if (threshold) {
+        parts.push(`It defers switching at ${rate(threshold)}.`);
+      } else {
+        parts.push('This direction is not a trigger for deferring a switch.');
+      }
+      if (!transfer.reachable && transfer.has_reading) {
+        parts.push('qBittorrent is not answering, so this is the last reading taken - which '
+          + 'is what keeps deferring switches until it answers again.');
+      }
+      chip(label, rate(now), transfer.reachable ? 'info' : 'warn', parts.join(' '));
+    };
+    rateChip('Down', transfer.download_speed, transfer.average_download,
+      transfer.busy_download_threshold);
+    rateChip('Up', transfer.upload_speed, transfer.average_upload,
+      transfer.busy_upload_threshold);
   }
 
   // What the engine will actually do, which is the question behind all of the above.

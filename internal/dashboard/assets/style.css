@@ -112,6 +112,9 @@ main {
 }
 .chip b { font-weight: 600; }
 .chip-label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; }
+/* A measurement rather than a state: no border tint, and the value in body text. Colouring
+   a rate would make it look like a verdict, and the verdict is the chip next to it. */
+.chip-info b { color: var(--text); font-variant-numeric: tabular-nums; }
 .chip-good { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
 .chip-good b { color: var(--good); }
 .chip-warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
