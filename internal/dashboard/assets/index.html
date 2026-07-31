@@ -70,6 +70,7 @@
               <div><dt>Rank</dt><dd id="current-rank">–</dd></div>
               <div><dt>On this server</dt><dd id="current-since">–</dd></div>
               <div><dt>Forwarded port</dt><dd id="current-port">–</dd></div>
+              <div><dt>Measured throughput</dt><dd id="current-throughput">–</dd></div>
               <div class="wide"><dt>Load over time</dt><dd id="current-trace" class="trace">–</dd></div>
             </dl>
           </div>
@@ -85,6 +86,7 @@
               <div><dt>Latency</dt><dd id="best-rtt">–</dd></div>
               <div><dt>Score</dt><dd id="best-score">–</dd></div>
               <div><dt>Rank</dt><dd id="best-rank">–</dd></div>
+              <div><dt>Measured throughput</dt><dd id="best-throughput">–</dd></div>
             </dl>
           </div>
 
@@ -280,6 +282,7 @@
               <th class="num">Load</th>
               <th class="num">Latency</th>
               <th class="num">Score</th>
+              <th class="num">Throughput</th>
               <th>Features</th>
               <th class="right">Action</th>
             </tr>
@@ -319,6 +322,69 @@
       <dl id="settings" class="settings"></dl>
     </section>
   </main>
+
+  <!-- Detail for one candidate. A native <dialog> so Escape, focus trapping and the
+       backdrop come from the browser rather than from hand-written script.
+
+       Read-only on purpose: the row's own Use button is the one way to act, so opening
+       a panel can never be the click that moves the tunnel. -->
+  <dialog id="candidate-modal">
+    <div class="modal-head">
+      <div>
+        <h2 id="modal-name">–</h2>
+        <div id="modal-host" class="hostname"></div>
+      </div>
+      <button id="modal-close" class="small" autofocus>Close</button>
+    </div>
+    <div id="modal-tags" class="tags card-tags"></div>
+    <p id="modal-blocked" class="card-note error" hidden></p>
+
+    <div class="band">
+      <h3 class="card-section">Identity</h3>
+      <dl class="kv">
+        <div><dt>Server</dt><dd id="modal-server-name">–</dd></div>
+        <div><dt>Logical ID</dt><dd id="modal-logical-id">–</dd></div>
+        <div><dt>Tier</dt><dd id="modal-tier">–</dd></div>
+        <div><dt>Entry IPv4</dt><dd id="modal-entry-ip">–</dd></div>
+        <div><dt>Entry IPv6</dt><dd id="modal-entry-ipv6">–</dd></div>
+        <div><dt>Exit IPv4</dt><dd id="modal-exit-ip">–</dd></div>
+        <div><dt>WireGuard key</dt><dd id="modal-wireguard">–</dd></div>
+      </dl>
+    </div>
+
+    <div class="band">
+      <h3 class="card-section">Location</h3>
+      <dl class="kv">
+        <div><dt>Country</dt><dd id="modal-country">–</dd></div>
+        <div><dt>City</dt><dd id="modal-city">–</dd></div>
+        <div><dt>Region</dt><dd id="modal-region">–</dd></div>
+      </dl>
+    </div>
+
+    <div class="band">
+      <h3 class="card-section">Ranking</h3>
+      <dl class="kv">
+        <div><dt>Rank</dt><dd id="modal-rank">–</dd></div>
+        <div><dt>Score</dt><dd id="modal-score">–</dd></div>
+        <div><dt>Load penalty</dt><dd id="modal-score-load">–</dd></div>
+        <div><dt>Latency penalty</dt><dd id="modal-score-latency">–</dd></div>
+        <div><dt>Proton penalty</dt><dd id="modal-score-proton">–</dd></div>
+        <div><dt>Proton's own score</dt><dd id="modal-proton-score">–</dd></div>
+        <div><dt>Load now</dt><dd id="modal-load">–</dd></div>
+        <div><dt>Latency now</dt><dd id="modal-rtt">–</dd></div>
+      </dl>
+    </div>
+
+    <div class="band">
+      <h3 class="card-section">History</h3>
+      <dl class="kv">
+        <div class="wide"><dt>Load</dt><dd id="modal-load-graph" class="trace">–</dd></div>
+        <div class="wide"><dt>Latency</dt><dd id="modal-rtt-graph" class="trace">–</dd></div>
+        <div><dt>Readings</dt><dd id="modal-readings">–</dd></div>
+        <div><dt>Measured throughput</dt><dd id="modal-throughput">–</dd></div>
+      </dl>
+    </div>
+  </dialog>
 
   <div id="toast" class="toast" hidden></div>
   <script src="app.js"></script>

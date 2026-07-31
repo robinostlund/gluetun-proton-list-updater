@@ -44,6 +44,7 @@ type Controller interface {
 	WriteServersFile(ctx context.Context) error
 	SetAutoSwitch(ctx context.Context, enabled bool) error
 	ClearHistory(ctx context.Context) error
+	ServerHistory(hostname string) engine.ServerHistory
 	RunUpdater(ctx context.Context) error
 	SetVPN(ctx context.Context, status string) error
 	SetDNS(ctx context.Context, status string) error
@@ -126,6 +127,7 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("GET /api/events", s.handleEvents)
 	protected.HandleFunc("GET /api/logs", s.handleLogs)
 	protected.HandleFunc("GET /api/explain", s.handleExplain)
+	protected.HandleFunc("GET /api/history", s.handleServerHistory)
 	protected.HandleFunc("POST /api/refresh", s.command("refresh", s.controller.RefreshList))
 	protected.HandleFunc("POST /api/loads", s.command("loads", s.controller.RefreshLoads))
 	protected.HandleFunc("POST /api/probe", s.command("probe", s.controller.ProbeLatency))
@@ -216,6 +218,25 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 		"query":   query,
 		"matches": explanations,
 	})
+}
+
+// handleServerHistory answers with one server's measured history.
+//
+// Per server on demand rather than in the snapshot: the candidate list runs to hundreds
+// of rows, and attaching a series to every one would put tens of thousands of points on
+// the wire on every update to show the one panel someone opened.
+func (s *Server) handleServerHistory(w http.ResponseWriter, r *http.Request) {
+	hostname := r.URL.Query().Get("host")
+	if hostname == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":    false,
+			"error": "pass a hostname as ?host=, for example ?host=node-se-01.protonvpn.net",
+		})
+		return
+	}
+	// An unknown hostname is not an error: a server may simply never have been sampled,
+	// and an empty history is the honest answer to "what do you have on this one?".
+	writeJSON(w, http.StatusOK, s.controller.ServerHistory(hostname))
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

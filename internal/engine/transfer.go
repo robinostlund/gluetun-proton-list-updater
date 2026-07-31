@@ -66,6 +66,10 @@ func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
 	e.transfer = transfer
 	e.transferCheckedAt = time.Now()
 	e.recordTransferSample(transfer)
+	// Credit the reading to whichever server carried it, so there is a record of what
+	// each one actually delivered. Deliberately after recordTransferSample: the
+	// sustained figure is the windowed average, which has to include this reading.
+	e.recordThroughput(transfer.DownloadSpeed, transfer.UploadSpeed)
 
 	// Track when the tunnel became busy, so the wait can be bounded and shown.
 	busy := e.transferIsBusy()

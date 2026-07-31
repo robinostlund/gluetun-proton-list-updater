@@ -91,13 +91,13 @@ Dashboard: <http://localhost:8080>
 
 | Component | Minimum | Recommended | Why |
 |---|---|---|---|
-| **Gluetun** | `v3.41.2` | `v3.41.2` or `latest` (both tested) | `v3.41.2` is the oldest release supported. Earlier versions are not tested and not supported: they lack `secure_core`/`tor` in their server model (added in `v3.39.0`), so Gluetun cannot filter on those at all. Both **storage layouts** are supported and detected automatically — see below. |
+| **Gluetun** | `v3.41.3` | `v3.41.3` or `latest` (both tested) | `v3.41.3` is the oldest release supported. **Avoid `v3.41.2` specifically:** it has a port-forwarding deadlock that hangs the VPN loop on `stopping`, so every switch request from here times out and the tunnel never returns — `v3.41.3` is a one-commit hotfix for it. Earlier versions than that are not tested and not supported: they lack `secure_core`/`tor` in their server model (added in `v3.39.0`), so Gluetun cannot filter on those at all. Both **storage layouts** are supported and detected automatically — see below. |
 | **Gluetun setting** | `STORAGE_SERVERS_ENABLED=yes` | (the default) | With server storage off, Gluetun keeps no server data on disk and reads none, so the curated list written here is ignored. |
 | **Proton account** | paid | paid | Proton's server list has required authentication since 2025 — an unauthenticated `/vpn/v1/logicals` answers `401`. There is no credential-free mode. |
 | **Docker Engine** | `20.10` | `24+` | `docker compose` v2 syntax; multi-arch images are `linux/amd64` and `linux/arm64`. |
 | **Go** (only to build from source) | `1.23` | `1.24` | The module targets 1.23; the container image builds with 1.24. |
 
-Verified against Gluetun `v3.41.2` and `latest` by integration tests that run against a
+Verified against Gluetun `v3.41.3` and `latest` by integration tests that run against a
 real Gluetun container — see [Development](#development). The ProtonVPN schema version has been `4`
 throughout, and is detected at runtime regardless.
 
@@ -107,7 +107,7 @@ This is worth knowing, because getting it wrong is invisible:
 
 | Gluetun | Layout | What it reads |
 |---|---|---|
-| up to `v3.41.2` | **legacy** | one fat file, `/gluetun/servers.json` |
+| up to `v3.41.3` | **legacy** | one fat file, `/gluetun/servers.json` |
 | current `master` / `:latest` | **directory** | `/gluetun/servers/` with `manifest.json` plus one file per provider, e.g. `/gluetun/servers/protonvpn.json` |
 
 A Gluetun using the directory layout reads the legacy file **only when
@@ -118,7 +118,7 @@ The layout is therefore **detected on every write**, by looking for the artefact
 on startup, and the data goes wherever that Gluetun actually reads.
 
 > **The artefacts outlive the Gluetun that made them.** This bit the author. Running `:latest`
-> once leaves `servers/manifest.json` on the volume for good; point `v3.41.2` (legacy layout) at
+> once leaves `servers/manifest.json` on the volume for good; point `v3.41.3` (legacy layout) at
 > that same volume and the manifest is still there, describing a layout nothing reads any more.
 > Trusting it sent every write to a file the running Gluetun ignored, and the only symptom was
 > that it refused every hostname offered — having quietly kept its small built-in list.
@@ -313,10 +313,12 @@ The current column also answers the two questions a single load figure prompts:
   own, or the tunnel was already up when this container started, the arrival time is genuinely not
   known and a number would be a guess.
 - **Load over time** — a sparkline of the current server's utilisation, one point per loads refresh,
-  persisted so it survives a restart and bounded to 24 hours at the default interval. The y-axis is
+  persisted so it survives a restart and bounded to 12 hours at the default interval. The y-axis is
   pinned to 0–100 %, not to the data: a server that stayed between 40 % and 44 % should look flat,
-  and the point is judging load against the thresholds that act on it. The line stops at a server
-  change — splicing two servers' figures together would draw a trend that never happened. The
+  and the point is judging load against the thresholds that act on it. It is drawn from that
+  server's own series, so it cannot splice two servers' figures into a trend that never happened.
+  The same history, with latency alongside it, is in the [candidate detail
+  panel](#clicking-a-candidate). The
 **Improvement** row states its own verdict — `0.021 too low, needs 0.100` in red, or `0.180 meets
 0.100` in green — because that single number decides whether the best candidate is used at all.
 Below it: the **Decision** in the engine's own words (`cooldown active for another 12m`), the
@@ -386,9 +388,9 @@ namespace — so the rates have to come from something that knows about the traf
 ```yaml
 QBITTORRENT_URL: "http://qbittorrent:8080"
 QBITTORRENT_API_KEY: "qbt_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-SWITCH_BUSY_DOWNLOAD: "2MB"      # defer while downloading faster than this
-SWITCH_BUSY_UPLOAD: "512KB"      # and while uploading faster than this
-SWITCH_BUSY_WINDOW: 5m           # averaged over this period, not sampled once
+SWITCHING_BUSY_DOWNLOAD: "2MB"      # defer while downloading faster than this
+SWITCHING_BUSY_UPLOAD: "512KB"      # and while uploading faster than this
+SWITCHING_BUSY_WINDOW: 5m           # averaged over this period, not sampled once
 ```
 
 Generate the key in qBittorrent itself: **Preferences → Web UI → API keys**. It is sent as
@@ -420,6 +422,118 @@ and a switch was allowed — silently undoing the fail-safe below.
 situations, and you may want to protect one and not the other. Setting either to `0` stops it being
 a trigger; setting both to `0` is rejected at startup, since the feature would read as enabled while
 never deferring anything.
+
+### Clicking a candidate
+
+Clicking a row in the candidate list opens a **read-only detail panel** for that server. It exists
+because several facts had nowhere to live: the score breakdown was a tooltip, the measured
+throughput was squeezed into one table cell, and a blocked server's reasons were a hover.
+
+It is read-only deliberately. The row's own **Use** button remains the only way to move the tunnel,
+so opening a panel can never be the click that reconnects you — the row handler ignores any click
+that landed on a control, and the switch handler returns before the row handler is reached.
+
+Beyond what the table already shows, the panel surfaces the Proton fields that were parsed but never
+displayed: the **logical ID** (what a Proton support conversation needs), the **plan tier**,
+Proton's **own score** before this tool weights it, the **region**, and the **IPv6 entry address**.
+That last one distinguishes *not recorded* from *no IPv6* — the address is only kept when
+`GLUETUN_SERVERS_INCLUDE_IPV6` is on, so its absence says nothing about the server's capability.
+
+#### Load and latency history
+
+The panel graphs how a server has behaved over time. One reading per loads refresh, carrying
+Proton's load figure and whatever the prober last measured, so both series have exactly the
+resolution the underlying data does.
+
+The two are scaled differently, on purpose. **Load is pinned to 0–100 %** because a percentage has an
+absolute meaning and autoscaling would stretch a flat 10–12 % into a dramatic climb. **Latency
+autoscales**, because milliseconds have no natural ceiling — and the graph's label then states what
+it scaled to, so the shape is readable. A reading taken before latency was ever probed is drawn as a
+**gap, not a zero**: an unmeasured server is not a fast one.
+
+History is not kept for every candidate — there are hundreds, and most will never be chosen. It is
+kept for three kinds of server, for three reasons:
+
+| Kept for | Because |
+|---|---|
+| The current server | Its trend answers "is this getting worse?" |
+| The best ~10 candidates | Their trend answers "is that alternative *reliably* quieter, or quiet just now?" — which a single load figure cannot |
+| Anything measured for throughput | So one server's records do not outlive each other |
+
+**Bounded in both dimensions**, because the state file is rewritten in full several times an hour:
+at most **24 servers**, at most **48 readings** each (12 hours at the default refresh). The stored
+form is deliberately terse — single-letter keys and unix seconds — which is ugly to read and roughly
+halves a file nothing but this program parses. At absolute full capacity, with every bounded list
+full, `state.json` measures **124 KB**, and a test fails if a future change pushes it past 192 KB.
+
+The series are fetched **per server on demand** rather than published in the snapshot. Attaching 48
+readings to each of several hundred candidate rows would put tens of thousands of points on the wire
+on every update, to show the one panel someone opened.
+
+### What each server actually delivered
+
+Load and latency both describe a server *before* you use it, and neither predicts bandwidth: Proton's
+load figure says how busy a server is, not how much throughput it will give you, and two servers
+reporting the same load routinely differ several-fold. Since qBittorrent is already being polled for
+rates, those rates are also recorded **per server** — so the candidate list can show what each one
+was measured to deliver rather than only what it is predicted to be like.
+
+It comes free with the qBittorrent integration; there is nothing extra to configure. Each record
+carries two figures per direction:
+
+| Figure | What it is |
+|---|---|
+| **Peak** | The highest single reading — the fastest this server was ever seen to go |
+| **Sustained** | The highest average over `SWITCHING_BUSY_WINDOW` — a rate it actually held |
+
+The sustained figure is the fair comparison between servers, and the peak is the number you would
+recognise from qBittorrent's own display. Both are shown: the column in the candidate list gives the
+peak, and the tooltip gives everything else.
+
+**It describes the most recent stay, not all time.** "What did this server give me last time I used
+it" is the useful question; a server that was fast once, months ago, on a busy swarm, is not evidence
+about the server now. Returning to a server therefore starts a fresh measurement, and the tooltip
+says which stay you are looking at. A restart does *not* start a new stay — the tunnel is usually
+still where this tool left it, and throwing away the measurement because the process bounced would
+lose exactly the data being collected. A gap longer than ten minutes does, because too much happened
+unobserved to keep calling it one stay.
+
+Every reading has to be earned by the server it is credited to, so a reading is skipped when:
+
+- **nothing was flowing** — an idle poll is not a measurement, and counting it would build up a long
+  history with a peak of zero, which reads as "this server is slow" when it means "nothing was
+  downloading". A server with no active readings shows **not measured**, never `0 B/s`;
+- **the tunnel is not up** — whatever qBittorrent reports while it is down describes the moments
+  before it fell over;
+- **it spans a switch** — a reading covers the interval before it, so the first one after a move
+  belongs partly to the previous server;
+- **the averaging window is not yet entirely on this server** — until it is, the average still
+  contains the previous server's rates, and a slow server would inherit a fast one's figures. The
+  peak is recorded immediately; the sustained figure waits.
+
+Two honest limitations. The rates are measured **through the tunnel by a torrent client**, so they
+reflect the swarm and your own peers as much as the server — a low figure may mean the server is
+slow, or simply that nothing fast was available while you were on it. And this is **not part of
+scoring**: selection still ranks on load and latency, and these figures are shown for you to judge,
+not fed back into the decision.
+
+Records are kept in the state file and bounded at 200 servers, least recently measured dropped first.
+A server Proton **retires** has its record dropped on the next successful list refresh — it can never
+be a candidate again, so the record could never be displayed. Three rules stop that from deleting
+live data:
+
+- **only on a freshly fetched list.** A cached list is the fallback for when Proton is unreachable,
+  and treating "I could not ask" as "Proton retired it" would erase records during an outage;
+- **compared against every server Proton returned, before any filtering.** A server excluded by
+  `FILTER_MAX_LOAD`, outside `FILTER_COUNTRIES`, or sitting in maintenance still exists — and Proton
+  moves servers in and out of maintenance routinely. Comparing against the *candidate* list instead
+  would wipe the history of every server today's filters happen to exclude;
+- **never on an implausibly short list.** Every server holding a record was in Proton's list when it
+  was measured, so a list shorter than the number of records held is a truncated response rather
+  than a mass retirement. It is logged and skipped.
+
+When records are dropped, the hostnames are logged at info level — it is the disappearance of data
+you may have been comparing servers on, not a routine cleanup.
 
 ### What it does and does not hold back
 
@@ -511,7 +625,7 @@ ANDs every selection filter, so a hostname left to intersect with the original t
 would match nothing the moment the chosen server sat outside them — and an empty match crashes
 Gluetun's VPN loop rather than being ignored.
 
-Verified against a real `v3.41.2`:
+Verified against a real `v3.41.3`:
 
 | Moment | `countries` | `cities` | `hostnames` |
 |---|---|---|---|
@@ -614,9 +728,9 @@ least-loaded of the servers sharing a machine.
 Lower is better. The score is a weighted sum of penalties, each normalised to `[0,1]`:
 
 ```
-score = LOAD_WEIGHT    × (load / 100)
-      + LATENCY_WEIGHT × (min(rtt, LATENCY_CEILING) / LATENCY_CEILING)
-      + PROTON_WEIGHT  × (Proton's own score, normalised across candidates)
+score = SCORING_LOAD_WEIGHT    × (load / 100)
+      + SCORING_LATENCY_WEIGHT × (min(rtt, SCORING_LATENCY_CEILING) / SCORING_LATENCY_CEILING)
+      + SCORING_PROTON_WEIGHT  × (Proton's own score, normalised across candidates)
 ```
 
 With the defaults (`load 1.0`, `latency 0.7`, ceiling `150ms`):
@@ -786,7 +900,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 
 | Variable | Default | Description |
 |---|---|---|
-| `GLUETUN_SERVERS_FILE` | `/gluetun/servers.json` | Gluetun's **legacy** fat file (used by v3.41.2) |
+| `GLUETUN_SERVERS_FILE` | `/gluetun/servers.json` | Gluetun's **legacy** fat file (used by v3.41.3 and earlier) |
 | `GLUETUN_SERVERS_DIR` | `/gluetun/servers` | Gluetun's **directory** layout (current versions). Which one is used is detected automatically |
 | `GLUETUN_SERVERS_PREFERRED` | `true` | Set Gluetun's `preferred` flag, making it use our list regardless of timestamps |
 | `GLUETUN_SERVERS_WRITE_MODE` | `update` | `update` keeps other providers' sections, `replace` writes only ProtonVPN, `none` disables writing |
@@ -1069,7 +1183,7 @@ here. Two causes, in order of likelihood:
 2. **The data was written in the layout Gluetun is not reading.** If the reported choice count is
    only a few hundred while the dashboard shows thousands of servers written, this is it. Check the
    `Servers written to` row in *Gluetun's own view* against the layout the running Gluetun uses —
-   `v3.41.2` reads `/gluetun/servers.json`, `:latest` reads `/gluetun/servers/protonvpn.json`. Both
+   `v3.41.3` reads `/gluetun/servers.json`, `:latest` reads `/gluetun/servers/protonvpn.json`. Both
    are written whenever the layout is ambiguous, so this should not happen; if it does, please open
    an issue with that row and the Gluetun version.
 
@@ -1084,8 +1198,13 @@ email is empty - skipping update"*. Refreshing Gluetun's in-memory list needs
 `UPDATER_PROTONVPN_EMAIL` and `UPDATER_PROTONVPN_PASSWORD` on the **Gluetun** container. Without
 them, restart Gluetun to pick up the list written here.
 
-**Gluetun is stuck at `[vpn] stopping`, and a switch times out after two minutes.** This is a
-Gluetun-side stall, not something this tool can clear. Gluetun applies a selection *synchronously* —
+**Gluetun is stuck at `[vpn] stopping`, and a switch times out after two minutes.** First check the
+Gluetun version: **`v3.41.2` has a port-forwarding deadlock that causes exactly this**, and it was
+[fixed in `v3.41.3`](https://github.com/passteque/gluetun/releases/tag/v3.41.3) by a one-commit
+hotfix. Upgrading is the fix; nothing here can work around a hung VPN loop.
+
+Beyond that specific bug it can still happen, and it is a Gluetun-side stall rather than something
+this tool can clear. Gluetun applies a selection *synchronously* —
 it stops the VPN loop, applies the change, starts it again, and only then answers — so a stalled
 stop blocks the HTTP response for as long as it lasts. Two things make the collision likely rather
 than rare: Gluetun's health monitor restarts the loop on its own whenever the tunnel fails a check,

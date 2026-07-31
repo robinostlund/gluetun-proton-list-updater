@@ -125,6 +125,51 @@ function bytes(total) {
 
 // A rate shown against the threshold that would defer a switch, with a bar so the
 // margin is visible at a glance rather than needing two numbers compared by eye.
+// throughputCell renders what a server was measured to deliver, and says how much
+// evidence is behind it.
+//
+// Two figures, because they answer different questions: the peak is the fastest this
+// server was ever seen to go, the sustained figure is what it held for a whole
+// averaging window. Comparing servers on the sustained one is the fair comparison; the
+// peak is what an operator actually recognises from their torrent client.
+//
+// Nothing is shown for a server that has never been used with traffic flowing. An
+// unmeasured server is not a slow one, and printing "0 B/s" would say it was.
+function throughputCell(measured, { compact = false } = {}) {
+  if (!measured) {
+    return '<span class="muted">not measured</span>';
+  }
+
+  const down = rate(measured.peak_download);
+  const up = rate(measured.peak_upload);
+  const sustained = measured.sustained_download || measured.sustained_upload
+    ? `Highest sustained: ${rate(measured.sustained_download)} down, `
+      + `${rate(measured.sustained_upload)} up.`
+    : 'No sustained figure yet: it needs a full averaging window on this server.';
+
+  const readings = `${measured.readings} reading${measured.readings === 1 ? '' : 's'} `
+    + 'with traffic in them';
+  const when = measured.current
+    ? 'Being measured now, so it may still rise.'
+    : `Last measured ${timeAgo(measured.last_reading)}.`;
+  const visits = measured.visits > 1
+    ? ` This is stay ${measured.visits} on this server; earlier stays are not kept.`
+    : '';
+
+  const title = `Peak: ${down} down, ${up} up. ${sustained} From ${readings}. ${when}`
+    + visits
+    + ' Measured through this tunnel by qBittorrent, so it reflects the swarm as well '
+    + 'as the server.';
+
+  const marker = measured.current ? '<span class="muted" title="still being measured">·</span> ' : '';
+  if (compact) {
+    return `<div title="${escapeHTML(title)}">${marker}${escapeHTML(down)}</div>`
+      + `<div class="muted" title="${escapeHTML(title)}">${escapeHTML(up)} up</div>`;
+  }
+  return `<span title="${escapeHTML(title)}">${marker}${escapeHTML(down)} down · `
+    + `${escapeHTML(up)} up</span>`;
+}
+
 function rateAgainst(speed, threshold) {
   const shown = escapeHTML(rate(speed));
   if (!threshold) return shown;
@@ -218,6 +263,54 @@ function stateSpan(state) {
     : value === 'crashed' || value === 'failed' ? 'no'
       : 'muted';
   return `<span class="${level}">${escapeHTML(value)}</span>`;
+}
+
+// seriesGraph draws one measured series.
+//
+// Two scaling rules, because the two quantities are not alike. Load is a percentage with
+// an absolute meaning, so it is always drawn against a fixed 0-100: autoscaling would
+// stretch a flat 10-12% into a dramatic climb. Latency has no natural ceiling, so it is
+// scaled to its own maximum - and the label says what that maximum is, since the shape
+// alone would otherwise be unreadable.
+//
+// Missing values are gaps rather than zeroes. A reading taken before latency was ever
+// probed is not a fast server.
+function seriesGraph(points, options) {
+  const { value, known, max, format, colour } = options;
+  const usable = points.filter((point) => !known || known(point));
+  if (usable.length < 2) {
+    return `<span class="muted">${escapeHTML(points.length
+      ? 'not enough history yet' : 'no readings yet')}</span>`;
+  }
+
+  const width = 240;
+  const height = 34;
+  const first = new Date(usable[0].at).getTime();
+  const last = new Date(usable[usable.length - 1].at).getTime();
+  const span = Math.max(1, last - first);
+  const values = usable.map(value);
+  const ceiling = max || Math.max(1, ...values);
+
+  const points2d = usable.map((point) => {
+    const x = ((new Date(point.at).getTime() - first) / span) * width;
+    const y = height - (Math.min(ceiling, Math.max(0, value(point))) / ceiling) * height;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+
+  const latest = values[values.length - 1];
+  const hours = ((last - first) / 3600000).toFixed(1);
+  const label = `${usable.length} readings over ${hours}h — low ${format(Math.min(...values))}, `
+    + `high ${format(Math.max(...values))}, now ${format(latest)}`
+    + (max ? '' : `. Scaled to ${format(ceiling)}, not to a fixed ceiling`)
+    + (known && usable.length < points.length
+      ? `. ${points.length - usable.length} reading(s) had no measurement and are omitted` : '');
+
+  return `<svg class="spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"`
+    + ` role="img" aria-label="${escapeHTML(label)}"><title>${escapeHTML(label)}</title>`
+    + `<line x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"`
+    + ` stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>`
+    + `<polyline fill="none" stroke="${colour(latest)}" stroke-width="1.5"`
+    + ` stroke-linejoin="round" points="${points2d.join(' ')}"/></svg>`;
 }
 
 function escapeHTML(value) {
@@ -441,6 +534,10 @@ function renderCurrent() {
       + 'the tunnel was already up when this container started.';
   }
 
+  // What this server actually delivered. Load and latency describe a server before it
+  // is used; this is the only row that says what came out of it.
+  el('current-throughput').innerHTML = throughputCell(current && current.throughput);
+
   el('current-trace').innerHTML = sparkline(snapshot.selection.load_trace || []);
   // Whether Gluetun even asks for a port distinguishes "not yet" from "never".
   const ports = gluetun.forwarded_ports || [];
@@ -462,6 +559,9 @@ function renderBest() {
   el('best-load').innerHTML = best ? loadCell(best.load) : '–';
   text('best-rtt', best && best.rtt_known ? `${best.rtt_ms} ms` : 'unmeasured');
   text('best-score', best ? best.score.toFixed(3) : '–');
+  // The same row as on the current server, so the two read across: a candidate that
+  // scores better on load and latency may still be one that was measurably slower.
+  el('best-throughput').innerHTML = throughputCell(best && best.throughput);
   // The improvement is the number that decides whether the best candidate is used at
   // all, so it says so rather than leaving the reader to compare it against the
   // threshold two rows below.
@@ -484,8 +584,8 @@ function renderBest() {
       + ` <span class="no">too low</span> <span class="muted">needs ${minimum}</span>`;
     el('improvement').title =
       `The best candidate scores only ${improvement} better than the current server, and `
-      + `SWITCH_MIN_IMPROVEMENT requires ${minimum}. Reconnecting drops every connection through `
-      + 'the tunnel, so a gain this small is not worth it. Lower SWITCH_MIN_IMPROVEMENT to act on '
+      + `SWITCHING_MIN_IMPROVEMENT requires ${minimum}. Reconnecting drops every connection through `
+      + 'the tunnel, so a gain this small is not worth it. Lower SWITCHING_MIN_IMPROVEMENT to act on '
       + 'smaller gains, or use "Reconnect to best" to switch anyway.';
   }
 
@@ -719,8 +819,8 @@ function renderTransfer() {
   el('transfer-window').title = transfer.busy_window
     ? 'Traffic is bursty: a torrent that is plainly active drops to nothing between '
       + 'pieces. Averaging over this window stops a single dip letting a switch through '
-      + 'mid-transfer. Set with SWITCH_BUSY_WINDOW.'
-    : 'SWITCH_BUSY_WINDOW is 0, so the latest reading alone decides.';
+      + 'mid-transfer. Set with SWITCHING_BUSY_WINDOW.'
+    : 'SWITCHING_BUSY_WINDOW is 0, so the latest reading alone decides.';
   text('transfer-down-limit', transfer.busy_download_threshold
     ? rate(transfer.busy_download_threshold) : 'not a trigger');
   text('transfer-up-limit', transfer.busy_upload_threshold
@@ -854,7 +954,8 @@ function renderCandidates() {
     const blockedWhy = `Gluetun cannot use this server: it enforces ${blockedBy || 'a filter'}`;
 
     return `<tr class="${candidate.is_current ? 'is-current' : ''} ${candidate.blocked ? 'is-blocked' : ''}"
-      ${candidate.blocked ? `title="${escapeHTML(blockedWhy)}"` : ''}>
+      data-hostname="${escapeHTML(candidate.hostname)}"
+      title="${escapeHTML(candidate.blocked ? blockedWhy : 'Click for details')}">
       <td class="num">${candidate.blocked ? '<span class="muted">–</span>' : candidate.rank}</td>
       <td><div>${escapeHTML(candidate.server_name)}</div><div class="hostname">${escapeHTML(candidate.hostname)}</div></td>
       <td>${escapeHTML(candidate.country)}</td>
@@ -866,6 +967,7 @@ function renderCandidates() {
       <td class="num" title="${escapeHTML(scoreTitle)}">${candidate.rtt_known
         ? candidate.score.toFixed(3)
         : '~' + candidate.score.toFixed(3)}</td>
+      <td class="num">${throughputCell(candidate.throughput, { compact: true })}</td>
       <td><div class="tags">${featureTags(candidate, { current: candidate.is_current })}</div></td>
       <td class="right">
         <button class="small" data-switch="${escapeHTML(candidate.hostname)}"
@@ -1086,7 +1188,145 @@ document.addEventListener('click', (event) => {
     const hostname = use.dataset.switch;
     toast(`Switching to ${hostname}… this waits for the tunnel to come back up.`);
     runAction(use, '/api/switch', { hostname }, `Now on ${hostname}.`);
+    return;
   }
+
+  // A candidate row opens its detail panel. Checked last, and only for clicks that were
+  // not on a control: the Use button lives inside the row, and a click that both
+  // switched the tunnel and opened a panel would be indefensible.
+  const row = event.target.closest('tr[data-hostname]');
+  if (row && !event.target.closest('button, a, input')) {
+    openCandidateModal(row.dataset.hostname);
+  }
+});
+
+// The detail panel for one candidate.
+//
+// Read-only. Everything here is either already in the snapshot or fetched from
+// /api/history for this one server - the series are deliberately not in the snapshot,
+// because attaching 48 readings to each of several hundred rows would put tens of
+// thousands of points on the wire on every update to show the one panel someone opened.
+async function openCandidateModal(hostname) {
+  const candidate = (snapshot.candidates || []).find((entry) => entry.hostname === hostname);
+  if (!candidate) return;
+  const modal = el('candidate-modal');
+
+  text('modal-name', candidate.server_name);
+  text('modal-host', candidate.hostname);
+  el('modal-tags').innerHTML = featureTags(candidate, { current: candidate.is_current });
+
+  // A blocked server is listed but unusable, and the panel is where there is finally
+  // room to say which Gluetun setting is responsible.
+  const blocked = el('modal-blocked');
+  blocked.hidden = !candidate.blocked;
+  blocked.textContent = candidate.blocked
+    ? `Gluetun cannot use this server: it enforces ${(candidate.blocked_by || []).join(', ') || 'a filter'}.`
+    : '';
+
+  text('modal-server-name', candidate.server_name);
+  text('modal-logical-id', candidate.logical_id || 'unknown');
+  text('modal-tier', tierName(candidate.tier));
+  text('modal-entry-ip', candidate.entry_ip || 'unknown');
+  // Absent means "not recorded", which is a different fact from "no IPv6": the address
+  // is only kept when GLUETUN_SERVERS_INCLUDE_IPV6 is on.
+  text('modal-entry-ipv6', candidate.entry_ipv6
+    || (candidate.ipv6 ? 'not recorded (GLUETUN_SERVERS_INCLUDE_IPV6 is off)' : 'none'));
+  text('modal-exit-ip', candidate.exit_ip || 'unknown');
+  text('modal-wireguard', candidate.wireguard ? 'present' : 'missing');
+  el('modal-wireguard').title = candidate.wireguard
+    ? 'Proton published a WireGuard public key for this server.'
+    : 'Without a key this server cannot be used for WireGuard at all.';
+
+  text('modal-country', candidate.country || 'unknown');
+  text('modal-city', candidate.city || 'not given');
+  // Proton fills Region in for some servers and not others, which is why it is here and
+  // not a column that would be empty most of the time.
+  text('modal-region', candidate.region || 'not given');
+
+  text('modal-rank', candidate.blocked ? 'not selectable'
+    : candidate.rank ? `#${candidate.rank} of ${snapshot.candidates_total}` : 'unranked');
+  text('modal-score', candidate.score.toFixed(3)
+    + (candidate.rtt_known ? '' : ' (latency assumed, not probed)'));
+  text('modal-score-load', candidate.score_load.toFixed(4));
+  text('modal-score-latency', candidate.score_latency.toFixed(4));
+  text('modal-score-proton', candidate.score_proton.toFixed(4));
+  // Proton's own number, before this tool weights it. The penalty above is what it
+  // becomes; this is the input, and the two are worth being able to compare.
+  text('modal-proton-score', String(candidate.proton_score ?? 0));
+  el('modal-load').innerHTML = loadCell(candidate.load);
+  text('modal-rtt', candidate.rtt_known ? `${candidate.rtt_ms} ms` : 'not probed');
+
+  // Placeholders while the fetch is in flight, so a slow answer never shows the
+  // previous server's graphs.
+  text('modal-load-graph', 'loading…');
+  text('modal-rtt-graph', 'loading…');
+  text('modal-readings', '…');
+  el('modal-throughput').innerHTML = throughputCell(candidate.throughput);
+
+  if (!modal.open) modal.showModal();
+
+  try {
+    const response = await fetch(`/api/history?host=${encodeURIComponent(hostname)}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const history = await response.json();
+    // The panel may have been closed or moved on while this was in flight.
+    if (!modal.open || el('modal-host').textContent !== hostname) return;
+    renderCandidateHistory(history);
+  } catch (error) {
+    text('modal-load-graph', `could not load history: ${error.message}`);
+    text('modal-rtt-graph', '–');
+    text('modal-readings', 'unknown');
+  }
+}
+
+function renderCandidateHistory(history) {
+  const readings = history.readings || [];
+
+  el('modal-load-graph').innerHTML = seriesGraph(readings, {
+    value: (point) => point.load,
+    max: 100, // absolute: a percentage must not be autoscaled
+    format: (value) => `${Math.round(value)}%`,
+    colour: (latest) => latest >= 80 ? 'var(--bad)' : latest >= 60 ? 'var(--warn)' : 'var(--good)',
+  });
+  el('modal-rtt-graph').innerHTML = seriesGraph(readings, {
+    value: (point) => point.rtt_ms,
+    known: (point) => point.rtt_known,
+    format: (value) => `${Math.round(value)} ms`,
+    colour: () => 'var(--accent)',
+  });
+
+  const withLatency = readings.filter((point) => point.rtt_known).length;
+  text('modal-readings', readings.length
+    ? `${readings.length} of at most ${history.capacity}, every ${history.interval}`
+      + `, ${withLatency} with latency`
+    : 'none yet');
+  el('modal-readings').title = readings.length
+    ? 'Recorded on each load refresh, for the current server, the best few candidates '
+      + 'and any server whose throughput has been measured. Bounded so the state file '
+      + 'stays small.'
+    : 'This server has not been sampled: history is kept for the current server, the '
+      + 'best few candidates and any server measured for throughput.';
+
+  if (history.throughput) {
+    el('modal-throughput').innerHTML = throughputCell(history.throughput);
+  }
+}
+
+// tierName maps Proton's plan level to its name. Reported as unknown rather than guessed
+// when Proton did not say, and the raw number is kept alongside so an unfamiliar tier is
+// still legible.
+function tierName(tier) {
+  if (tier === undefined || tier === null) return 'unknown';
+  const names = { 0: 'Free', 1: 'Basic', 2: 'Plus', 3: 'Visionary' };
+  return names[tier] ? `${names[tier]} (${tier})` : `tier ${tier}`;
+}
+
+el('modal-close').addEventListener('click', () => el('candidate-modal').close());
+
+// Clicking the backdrop closes it. The dialog element itself is the click target only
+// when the click landed outside its content box.
+el('candidate-modal').addEventListener('click', (event) => {
+  if (event.target === el('candidate-modal')) el('candidate-modal').close();
 });
 
 // Clearing throws data away, so both ask first. The switch history is the only

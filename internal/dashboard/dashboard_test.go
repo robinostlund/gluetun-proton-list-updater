@@ -33,6 +33,7 @@ type stubController struct {
 	totpAccepts bool
 	healthy     bool
 	updates     chan struct{}
+	history     map[string]engine.ServerHistory
 }
 
 func newStub() *stubController {
@@ -97,6 +98,16 @@ func (s *stubController) ClearHistory(_ context.Context) error {
 
 func (s *stubController) RunUpdater(_ context.Context) error {
 	return s.record("run-updater")
+}
+
+func (s *stubController) ServerHistory(hostname string) engine.ServerHistory {
+	_ = s.record("history:" + hostname)
+	if history, found := s.history[hostname]; found {
+		return history
+	}
+	// An unsampled server is an empty history, not an error: that is the honest answer
+	// to "what do you have on this one?".
+	return engine.ServerHistory{Hostname: hostname, Readings: []engine.HistoryPoint{}}
 }
 
 func (s *stubController) SetVPN(_ context.Context, status string) error {
@@ -806,7 +817,8 @@ func TestCandidateTableColumnsMatchTheRenderedCells(t *testing.T) {
 	for _, match := range headings {
 		got = append(got, strings.TrimSpace(string(match[1])))
 	}
-	want := []string{"#", "Server", "Country", "City", "Load", "Latency", "Score", "Features", "Action"}
+	want := []string{"#", "Server", "Country", "City", "Load", "Latency", "Score",
+		"Throughput", "Features", "Action"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("headings = %v, want %v", got, want)
 	}
@@ -1254,14 +1266,15 @@ func TestTagsAreOnlyUsedForServersAndTheStatusStrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The only tag containers left in the markup are the two server ones, inside the
-	// comparison, where a server's features genuinely are a set of flags.
+	// Every tag container left in the markup describes a *server*, where features
+	// genuinely are a set of flags: the two in the comparison, and the one in the
+	// candidate detail panel, which is a server too.
 	var containers []string
 	for _, match := range regexp.MustCompile(`id="([a-z0-9-]+)" class="tags`).FindAllSubmatch(page, -1) {
 		containers = append(containers, string(match[1]))
 	}
 	sort.Strings(containers)
-	want := []string{"best-tags", "current-tags"}
+	want := []string{"best-tags", "current-tags", "modal-tags"}
 	if strings.Join(containers, ",") != strings.Join(want, ",") {
 		t.Errorf("tag containers = %v, want %v", containers, want)
 	}
@@ -1358,7 +1371,7 @@ func TestTheImprovementVerdictAppearsOnlyOnce(t *testing.T) {
 	for _, match := range regexp.MustCompile(`<dt>([^<]*)</dt>`).FindAllSubmatch(best, -1) {
 		rows = append(rows, string(match[1]))
 	}
-	want := []string{"Load", "Latency", "Score", "Rank"}
+	want := []string{"Load", "Latency", "Score", "Rank", "Measured throughput"}
 	if strings.Join(rows, "|") != strings.Join(want, "|") {
 		t.Errorf("best column rows = %v, want %v", rows, want)
 	}
@@ -2045,5 +2058,166 @@ func TestTheGluetunCardHasItsOwnControls(t *testing.T) {
 	// assumption is the opposite.
 	if !bytes.Contains(card, []byte("does not read the list written here")) {
 		t.Error("the Run updater button does not explain that it fetches Gluetun's own list")
+	}
+}
+
+// The series are fetched per server rather than published in the snapshot, so the
+// endpoint is the whole contract for the detail panel's graphs.
+func TestTheServerHistoryEndpoint(t *testing.T) {
+	t.Parallel()
+
+	stub := newStub()
+	stub.history = map[string]engine.ServerHistory{
+		"node-se-01.protonvpn.net": {
+			Hostname: "node-se-01.protonvpn.net",
+			Interval: "15m",
+			Capacity: 48,
+			Readings: []engine.HistoryPoint{
+				{At: time.Now().Add(-time.Hour), Load: 40, RTTMS: 31, RTTKnown: true},
+				{At: time.Now(), Load: 44},
+			},
+		},
+	}
+	server := newTestServer(t, stub, Options{})
+
+	t.Run("a sampled server returns its readings", func(t *testing.T) {
+		response, err := server.Client().Get(
+			server.URL + "/api/history?host=node-se-01.protonvpn.net")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+		var history engine.ServerHistory
+		if err := json.NewDecoder(response.Body).Decode(&history); err != nil {
+			t.Fatal(err)
+		}
+		if len(history.Readings) != 2 {
+			t.Fatalf("readings = %d, want 2", len(history.Readings))
+		}
+		// RTTKnown is what tells a missing measurement apart from a fast one, so it has
+		// to survive the round trip.
+		if !history.Readings[0].RTTKnown || history.Readings[1].RTTKnown {
+			t.Errorf("rtt_known did not survive: %+v", history.Readings)
+		}
+		if history.Capacity != 48 || history.Interval != "15m" {
+			t.Errorf("the graph cannot label itself: %+v", history)
+		}
+	})
+
+	t.Run("an unsampled server is an empty history, not an error", func(t *testing.T) {
+		response, err := server.Client().Get(server.URL + "/api/history?host=unknown.example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200: never having sampled a server is not an error",
+				response.StatusCode)
+		}
+	})
+
+	t.Run("no hostname is a bad request", func(t *testing.T) {
+		response, err := server.Client().Get(server.URL + "/api/history")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", response.StatusCode)
+		}
+	})
+}
+
+// A click on a row opens a panel; a click on the Use button inside that row switches the
+// tunnel. Both firing from one click would be indefensible, so the ordering and the
+// control guard are pinned here.
+func TestARowClickCannotAlsoSwitchTheTunnel(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The switch branch must return, so it cannot fall through to the row branch.
+	switchBranch := regexp.MustCompile(`(?s)const use = event\.target\.closest\('button\[data-switch\]'\);.*?\n  \}`).Find(script)
+	if switchBranch == nil {
+		t.Fatal("could not find the switch branch")
+	}
+	if !bytes.Contains(switchBranch, []byte("return;")) {
+		t.Error("the switch branch does not return, so a Use click would also open the panel")
+	}
+
+	// And the row branch must ignore clicks that landed on any control.
+	rowBranch := regexp.MustCompile(`(?s)const row = event\.target\.closest\('tr\[data-hostname\]'\);.*?\n  \}`).Find(script)
+	if rowBranch == nil {
+		t.Fatal("could not find the row branch")
+	}
+	if !bytes.Contains(rowBranch, []byte("!event.target.closest('button, a, input')")) {
+		t.Error("the row branch does not exclude controls")
+	}
+	// The panel is read-only: it must not contain a way to move the tunnel.
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modal := regexp.MustCompile(`(?s)<dialog id="candidate-modal">.*?</dialog>`).Find(page)
+	if modal == nil {
+		t.Fatal("could not find the candidate modal")
+	}
+	for _, forbidden := range []string{"data-switch", "data-action", "data-lifecycle"} {
+		if bytes.Contains(modal, []byte(forbidden)) {
+			t.Errorf("the detail panel contains %q; it is meant to be read-only", forbidden)
+		}
+	}
+}
+
+// The panel exists to give the facts that had nowhere to live. If a section is dropped,
+// the data goes back to being invisible.
+func TestTheCandidatePanelShowsWhatTheTableCannot(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modal := regexp.MustCompile(`(?s)<dialog id="candidate-modal">.*?</dialog>`).Find(page)
+	if modal == nil {
+		t.Fatal("could not find the candidate modal")
+	}
+
+	// Every field that had no home before must have one now.
+	for _, id := range []string{
+		"modal-logical-id", "modal-tier", "modal-region", "modal-entry-ipv6",
+		"modal-proton-score", "modal-score-load", "modal-score-latency", "modal-score-proton",
+		"modal-load-graph", "modal-rtt-graph", "modal-readings", "modal-throughput",
+	} {
+		if !bytes.Contains(modal, []byte(`id="`+id+`"`)) {
+			t.Errorf("the panel has no %q row", id)
+		}
+		if !bytes.Contains(script, []byte(`'`+id+`'`)) {
+			t.Errorf("%q is in the markup but never filled in", id)
+		}
+	}
+
+	// A load graph must be drawn against a fixed 0-100. Autoscaling a percentage turns a
+	// flat 10-12%% into a dramatic climb, which is the opposite of informative.
+	if !regexp.MustCompile(`value: \(point\) => point\.load,\s*\n\s*max: 100`).Match(script) {
+		t.Error("the load graph is not pinned to a 0-100 scale")
+	}
+	// Latency has no natural ceiling, so it autoscales - but must then say what to.
+	if !bytes.Contains(script, []byte("Scaled to ${format(ceiling)}")) {
+		t.Error("an autoscaled graph does not report its ceiling")
+	}
+	// A reading taken before latency was known is a gap, not a zero.
+	if !bytes.Contains(script, []byte("known: (point) => point.rtt_known")) {
+		t.Error("the latency graph does not skip readings with no measurement")
 	}
 }

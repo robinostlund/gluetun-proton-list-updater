@@ -129,7 +129,7 @@ type Gluetun struct {
 // Servers describes how the server data Gluetun reads is produced.
 type Servers struct {
 	// FilePath is Gluetun's legacy single servers file, /gluetun/servers.json by
-	// default. Used by Gluetun v3.41.2, the oldest supported release.
+	// default. Used by Gluetun v3.41.3, the oldest supported release.
 	FilePath string
 	// DirPath is Gluetun's servers directory, /gluetun/servers/ by default.
 	// Current Gluetun versions keep one file per provider there, and read the
@@ -462,7 +462,7 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 		// Both thresholds at zero means nothing can ever defer a switch, so the
 		// configuration reads as enabled while doing nothing at all.
 		if cfg.QBittorrent.BusyDownload == 0 && cfg.QBittorrent.BusyUpload == 0 {
-			r.errorf("QBITTORRENT_URL is set but both SWITCH_BUSY_DOWNLOAD and " +
+			r.errorf("QBITTORRENT_URL is set but both SWITCHING_BUSY_DOWNLOAD and " +
 				"SWITCHING_BUSY_UPLOAD are 0, so no transfer would ever defer a switch")
 		}
 		// A window shorter than the poll interval would hold one sample, which is the
@@ -496,7 +496,7 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 		r.errorf("score weights must not be negative")
 	}
 	if cfg.Score.LoadWeight+cfg.Score.LatencyWeight+cfg.Score.ProtonScoreWeight == 0 {
-		r.errorf("at least one of SCORE_LOAD_WEIGHT, SCORE_LATENCY_WEIGHT, SCORE_PROTON_WEIGHT must be greater than 0")
+		r.errorf("at least one of SCORING_LOAD_WEIGHT, SCORING_LATENCY_WEIGHT, SCORING_PROTON_WEIGHT must be greater than 0")
 	}
 	if cfg.Score.LatencyCeiling <= 0 {
 		r.errorf("SCORING_LATENCY_CEILING: must be greater than 0")

@@ -168,7 +168,7 @@ type ServersStatus struct {
 	Path      string `json:"path"`
 	WriteMode string `json:"write_mode"`
 	// Layout is the Gluetun storage layout that was detected: "directory" for
-	// current versions, "legacy" for v3.41.2, "both" when Gluetun has
+	// current versions, "legacy" for v3.41.3 and earlier, "both" when Gluetun has
 	// not written anything yet.
 	Layout string `json:"layout"`
 	// Paths lists the files actually written.
@@ -329,13 +329,31 @@ type LoadPoint struct {
 
 // CandidateView is one ranked server, flattened for the UI.
 type CandidateView struct {
-	Rank        int     `json:"rank"`
-	Hostname    string  `json:"hostname"`
-	ServerName  string  `json:"server_name"`
-	Country     string  `json:"country"`
-	City        string  `json:"city"`
-	EntryIP     string  `json:"entry_ip"`
-	ExitIP      string  `json:"exit_ip,omitempty"`
+	Rank       int    `json:"rank"`
+	Hostname   string `json:"hostname"`
+	ServerName string `json:"server_name"`
+	Country    string `json:"country"`
+	City       string `json:"city"`
+	// Region is Proton's own grouping, which it fills in for some servers and not
+	// others. Shown in the detail panel rather than the table, where it would be an
+	// empty column most of the time.
+	Region string `json:"region,omitempty"`
+	// LogicalID identifies the logical server to Proton. It is what a Proton support
+	// conversation or a raw API query needs, and nothing else in the UI can supply it.
+	LogicalID string `json:"logical_id,omitempty"`
+	EntryIP   string `json:"entry_ip"`
+	// EntryIPv6 is only recorded when GLUETUN_SERVERS_INCLUDE_IPV6 is on, so its
+	// absence says nothing about whether the server supports IPv6 - that is the IPv6
+	// flag below.
+	EntryIPv6 string `json:"entry_ipv6,omitempty"`
+	ExitIP    string `json:"exit_ip,omitempty"`
+	// ProtonScore is Proton's own routing preference, lower better, exactly as Proton
+	// reported it. ProtonPart below is what that becomes after weighting; this is the
+	// input, and the two are worth being able to compare.
+	ProtonScore float64 `json:"proton_score"`
+	// Tier is the plan level the server requires: 0 free, 2 Plus. Nil when Proton did
+	// not say, which is reported as unknown rather than guessed at.
+	Tier        *uint8  `json:"tier,omitempty"`
 	Load        uint8   `json:"load"`
 	RTTMS       float64 `json:"rtt_ms"`
 	RTTKnown    bool    `json:"rtt_known"`
@@ -358,6 +376,30 @@ type CandidateView struct {
 	// selectable, and BlockedBy names the Gluetun settings responsible.
 	Blocked   bool     `json:"blocked,omitempty"`
 	BlockedBy []string `json:"blocked_by,omitempty"`
+	// Throughput is what this server was measured to deliver the last time the tunnel
+	// was on it, or nil if it has never been measured. Present only when qBittorrent
+	// is configured, since it is the only source of rates.
+	Throughput *ThroughputView `json:"throughput,omitempty"`
+}
+
+// ThroughputView is the dashboard's view of one server's measured throughput.
+//
+// Rates in bytes per second. Both a peak and a sustained figure are reported because
+// they answer different questions: the peak is the best this server was ever seen to
+// do, the sustained figure is what it held for a whole averaging window and is the one
+// worth comparing between servers.
+type ThroughputView struct {
+	PeakDownload      uint64    `json:"peak_download,omitempty"`
+	PeakUpload        uint64    `json:"peak_upload,omitempty"`
+	SustainedDownload uint64    `json:"sustained_download,omitempty"`
+	SustainedUpload   uint64    `json:"sustained_upload,omitempty"`
+	Readings          int       `json:"readings"`
+	Visits            int       `json:"visits"`
+	StartedAt         time.Time `json:"started_at"`
+	LastReading       time.Time `json:"last_reading"`
+	// Current marks the measurement still in progress, so a figure that is still
+	// rising is not read as a final verdict on the server.
+	Current bool `json:"current,omitempty"`
 }
 
 // SettingsView exposes the effective configuration, so the dashboard can show

@@ -169,7 +169,7 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 	updated := e.applyLoads(loads)
 	dropped := before - len(e.candidates)
 	e.rerank()
-	e.recordCurrentLoad()
+	e.recordReadings()
 
 	// Persisted separately from the server list: a few kilobytes rewritten every
 	// refresh, so a restart during a Proton outage resumes with recent
@@ -448,7 +448,7 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 	// Gluetun usually takes longer to start than this container does, so the first
 	// few health checks find it unreachable. Waiting for the evaluation ticker
 	// after that would leave the tunnel on whatever server Gluetun picked for
-	// itself for up to SWITCH_EVALUATION_INTERVAL - long enough that the obvious
+	// itself for up to SWITCHING_EVALUATION_INTERVAL - long enough that the obvious
 	// reaction is to go and press the button by hand.
 	if becameUsable(was, e.Snapshot().Gluetun) && len(e.ranked) > 0 {
 		e.logger.Info("gluetun became usable, evaluating now rather than waiting for the next round",

@@ -62,6 +62,10 @@ type Candidate struct {
 	// different questions: "does this server support IPv6" and "are we offering
 	// Gluetun its v6 entry address".
 	IPv6 bool
+	// Tier is the Proton plan level the server requires - 0 free, 2 Plus - or nil
+	// when Proton did not say. Free above is the same fact reduced to a filter; the
+	// value is kept as well so it can be reported exactly rather than inferred.
+	Tier *uint8
 }
 
 // Stats records how the Proton list was reduced, for the dashboard and logs.
@@ -307,6 +311,7 @@ func Build(logicals []proton.LogicalServer, opts Options) (candidates []Candidat
 				P2P:         logical.P2P(),
 				Stream:      logical.Streaming(),
 				IPv6:        logical.IPv6(),
+				Tier:        logical.Tier,
 			}
 			if opts.IncludeIPv6 && physical.EntryIPv6 != "" {
 				if address, err := netip.ParseAddr(physical.EntryIPv6); err == nil && address.Is6() {

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -613,5 +615,116 @@ func TestGluetunServersVariablesAreRead(t *testing.T) {
 	}
 	if !cfg.Servers.IncludeIPv6 {
 		t.Error("IncludeIPv6 should be true")
+	}
+}
+
+// Every variable name that appears in the documentation, the dashboard or a message an
+// operator will read has to be one that actually exists.
+//
+// This is not hypothetical: renaming the SWITCH_* and SCORE_* variables into groups left
+// stale names behind in the README, in two dashboard tooltips and in a validation error
+// telling operators to set a variable that had ceased to exist. Nothing failed, because
+// nothing was checking.
+func TestNoDocumentedVariableNameIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	// The definitions in config.go are the authority on what exists, read the same way
+	// TestEveryVariableBelongsToAGroup reads them.
+	source, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := map[string]bool{}
+	definition := regexp.MustCompile(
+		`(?:r\.(?:str|choice|integer|boolean|duration|float|csv|required|byteRate)|` +
+			`parseLevel|parseFormat)\(r?,? ?"([A-Z_0-9]+)"`)
+	for _, match := range definition.FindAllSubmatch(source, -1) {
+		name := string(match[1])
+		known[name] = true
+		// Every variable also accepts a _FILE form, which is how a secret is passed
+		// without putting it in the environment.
+		known[name+"_FILE"] = true
+	}
+	if len(known) < 40 {
+		t.Fatalf("only found %d variable definitions; the pattern has stopped matching", len(known))
+	}
+	// Variables belonging to other programs, which legitimately appear in the compose
+	// file and the documentation.
+	for _, name := range []string{
+		"TZ", "WIREGUARD_PRIVATE_KEY", "SERVER_COUNTRIES", "SERVER_CITIES", "SERVER_NAMES",
+		"VPN_SERVICE_PROVIDER", "VPN_TYPE", "VPN_PORT_FORWARDING", "PORT_FORWARD_ONLY",
+		"HTTP_CONTROL_SERVER_ADDRESS", "HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE",
+		"UPDATER_PERIOD", "UPDATER_PROTONVPN_EMAIL", "UPDATER_PROTONVPN_PASSWORD",
+		"STORAGE_SERVERS_ENABLED", "HEALTH_RESTART_VPN", "COUNTRIES", "DOCKER_BUILDKIT",
+		// Makefile variables, which configure a build or a test run rather than the tool.
+		"GLUETUN_VERSION", "GLUETUN_IMAGE",
+		"CGO_ENABLED", "GOFLAGS", "GOOS", "GOARCH", "GOCACHE", "GOPATH",
+		"QBT_SID", "SID",
+	} {
+		known[name] = true
+	}
+
+	// A name is only a claim about this tool's configuration when it looks like one:
+	// upper snake case with a prefix this tool uses.
+	prefixes := []string{"FILTER_", "SWITCH", "SCOR", "GLUETUN_", "PROTON_", "LATENCY_",
+		"QBITTORRENT_", "DASHBOARD_", "LOG_", "STATE_", "SERVERS_"}
+	// The integration harness has its own variables, which configure the test rather
+	// than the tool.
+	exempt := []string{"GLUETUN_ITEST_"}
+	pattern := regexp.MustCompile(`\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b`)
+
+	// The repository root, not the package's parent: the README and the compose file
+	// are the documents most likely to keep a name a rename left behind, and an earlier
+	// version of this test walked only internal/ and so proved nothing about them.
+	root := "../.."
+	var offenders []string
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); name == ".git" || name == "dist" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(entry.Name()) {
+		case ".go", ".md", ".js", ".html", ".yml", ".yaml":
+		default:
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, name := range pattern.FindAllString(string(content), -1) {
+			if known[name] {
+				continue
+			}
+			var claimed bool
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(name, prefix) {
+					claimed = true
+					break
+				}
+			}
+			for _, prefix := range exempt {
+				if strings.HasPrefix(name, prefix) {
+					claimed = false
+					break
+				}
+			}
+			if claimed {
+				offenders = append(offenders, fmt.Sprintf("%s: %s", path, name))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("these look like this tool's variables but are not defined:\n  %s",
+			strings.Join(offenders, "\n  "))
 	}
 }

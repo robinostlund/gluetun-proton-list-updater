@@ -545,7 +545,7 @@ func TestWriteRejectsRelativePaths(t *testing.T) {
 }
 
 // A /gluetun volume outlives the Gluetun that wrote it. Running :latest once leaves
-// servers/manifest.json behind for ever; pointing v3.41.2 (legacy layout) at that
+// servers/manifest.json behind for ever; pointing v3.41.3 (legacy layout) at that
 // same volume left this tool writing only servers/protonvpn.json - a file that
 // Gluetun never reads - so it kept its small built-in list and refused every
 // hostname offered. Observed in a real deployment.

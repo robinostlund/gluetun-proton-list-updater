@@ -1,13 +1,16 @@
 services:
   gluetun:
-    # v3.41.2 is the oldest supported release. Earlier ones are untested.
+    # v3.41.3 is the oldest supported release. Do not use v3.41.2: it has a port
+    # forwarding deadlock that hangs the VPN loop on "stopping", so this tool's
+    # switch requests time out and the tunnel never comes back. v3.41.3 is a
+    # one-commit hotfix for exactly that.
     #
     # Pinned deliberately rather than tracking :latest. The two differ in where
-    # Gluetun keeps server data - v3.41.2 uses /gluetun/servers.json, current
+    # Gluetun keeps server data - v3.41.3 uses /gluetun/servers.json, current
     # master uses /gluetun/servers/ - and moving between them leaves artefacts of
     # the other layout behind on the volume. Both are handled, but a pinned
     # version is one less thing changing underneath the sidecar.
-    image: qmcgaw/gluetun:v3.41.2
+    image: qmcgaw/gluetun:v3.41.3
     container_name: gluetun
     cap_add:
       - NET_ADMIN
@@ -117,7 +120,7 @@ services:
 
       # Reconnect pacing. Every switch drops the tunnel and with it every
       # connection through it, so these bound how often that can happen:
-      # at most one automatic switch per SWITCH_MIN_INTERVAL, normally spaced by
+      # at most one automatic switch per SWITCHING_MIN_INTERVAL, normally spaced by
       # SWITCHING_COOLDOWN, and only when the gain is worth it.
       SWITCHING_AUTO: "true"
       SWITCHING_MODE: settings

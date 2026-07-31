@@ -3,7 +3,7 @@
 // Gluetun has two storage layouts, and which one is in use decides where the
 // data has to go:
 //
-//   - Legacy (v3.41.2, the oldest supported release): one "fat" file,
+//   - Legacy (v3.41.3, the oldest supported release): one "fat" file,
 //     /gluetun/servers.json,
 //     holding a schema version and one section per provider.
 //   - Directory (current master, published as :latest): /gluetun/servers/ with a
@@ -127,7 +127,7 @@ func (p Paths) ProviderPath() string { return filepath.Join(p.Directory, Provide
 //
 // The artefacts outlive the Gluetun that made them, which is the trap here. A
 // /gluetun volume that once ran a directory-layout image keeps servers/manifest.json
-// for ever; point a legacy-layout image (v3.41.2 and earlier) at that same volume and
+// for ever; point a legacy-layout image (v3.41.3 and earlier) at that same volume and
 // the manifest is still sitting there, describing a layout nothing is reading any
 // more. Trusting it sends every write to a file the running Gluetun ignores, and the
 // only symptom is that it refuses every hostname offered - having quietly kept its

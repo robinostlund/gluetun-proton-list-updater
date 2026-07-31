@@ -492,3 +492,42 @@ td.right, th.right { text-align: right; }
 .explain-note { padding: 12px 16px; margin: 0; color: var(--text-muted); font-size: 13px; }
 .explain-note.error { color: var(--bad); }
 #explain-form { display: flex; gap: 8px; }
+
+/* Candidate detail panel.
+
+   A native <dialog>, so Escape, focus handling and the backdrop are the browser's job.
+   Styled to match a card, because that is what it is: the same bands and kv rows, given
+   the room the table row could not spare. */
+#candidate-modal {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  /* Wide enough for the two-column kv rows, but never wider than a small screen. */
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+}
+#candidate-modal::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+#candidate-modal .modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+#candidate-modal h2 {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+#candidate-modal .hostname { margin-top: 2px; }
+#candidate-modal .card-tags { margin-top: 10px; }
+
+/* A row is clickable, so it says so on hover. The pointer is the only affordance that
+   fits in a dense table. */
+#candidates tbody tr[data-hostname] { cursor: pointer; }
+#candidates tbody tr[data-hostname]:hover { background: var(--bg-inset); }

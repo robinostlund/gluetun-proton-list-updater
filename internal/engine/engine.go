@@ -100,10 +100,13 @@ type Engine struct {
 	qbittorrentVersion string
 	transfer           qbittorrent.Transfer
 	// transferSamples is the recent rate history, used to average over
-	// SWITCH_BUSY_WINDOW rather than deciding on one reading.
+	// SWITCHING_BUSY_WINDOW rather than deciding on one reading.
 	transferSamples []transferSample
 	qbPreferences   qbittorrent.Preferences
 	qbPreferencesAt time.Time
+	// throughputHost is the server the last throughput reading was attributed to. A
+	// change of hostname is what ends one stay's measurement and begins the next.
+	throughputHost string
 	// qbPreferencesErr is why the port settings could not be read. Kept rather than
 	// discarded: without them the listen port is simply unknown, and an unexplained
 	// "unknown" on the dashboard is not something an operator can act on.
@@ -544,7 +547,13 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 	if len(candidates) == 0 {
 		e.logger.Warn("no candidate servers survived filtering",
 			"from_cache", fromCache,
-			"hint", "check COUNTRIES, MAX_LOAD and the feature filters")
+			"hint", "check FILTER_COUNTRIES, FILTER_MAX_LOAD and the feature filters")
+	}
+
+	// A fresh list is the only authority on which servers still exist, so it is also
+	// the only moment a retired server's measurements may be discarded.
+	if !fromCache {
+		e.forgetRetiredThroughput(logicals)
 	}
 }
 
@@ -707,6 +716,12 @@ func (e *Engine) publish() {
 		views = append(views, toCandidateView(i+1, entry, entry.Candidate.Hostname == currentHostname))
 	}
 	views = append(views, e.blockedViews(currentHostname)...)
+	// What each server actually delivered, for the ones that have been used. Attached
+	// here rather than inside toCandidateView because it comes from persisted state
+	// rather than from the scored candidate.
+	for i := range views {
+		views[i].Throughput = e.throughputFor(views[i].Hostname)
+	}
 
 	var current, best *CandidateView
 	switch scored, found := scoring.Find(ranked, currentHostname); {
@@ -726,6 +741,12 @@ func (e *Engine) publish() {
 	if len(ranked) > 0 {
 		view := toCandidateView(1, ranked[0], ranked[0].Candidate.Hostname == currentHostname)
 		best = &view
+	}
+	if current != nil {
+		current.Throughput = e.throughputFor(current.Hostname)
+	}
+	if best != nil {
+		best.Throughput = e.throughputFor(best.Hostname)
 	}
 
 	improvement := 0.0
@@ -905,7 +926,11 @@ func toCandidateView(rank int, scored scoring.Scored, isCurrent bool) CandidateV
 		ServerName:  candidate.ServerName,
 		Country:     candidate.Country,
 		City:        candidate.City,
+		Region:      candidate.Region,
+		LogicalID:   candidate.LogicalID,
 		EntryIP:     candidate.EntryIP.String(),
+		ProtonScore: round(candidate.ProtonScore, 4),
+		Tier:        candidate.Tier,
 		Load:        candidate.Load,
 		RTTKnown:    scored.LatencyKnown,
 		Score:       round(scored.Score, 4),
@@ -923,6 +948,9 @@ func toCandidateView(rank int, scored scoring.Scored, isCurrent bool) CandidateV
 	}
 	if candidate.ExitIP.IsValid() {
 		view.ExitIP = candidate.ExitIP.String()
+	}
+	if candidate.EntryIPv6.IsValid() {
+		view.EntryIPv6 = candidate.EntryIPv6.String()
 	}
 	if scored.LatencyKnown {
 		view.RTTMS = round(float64(scored.RTT)/float64(time.Millisecond), 1)

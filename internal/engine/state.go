@@ -23,12 +23,20 @@ const (
 // that is needed to keep the state bounded.
 const maxHistory = 100
 
-// maxLoadSamples bounds the utilisation trace kept for the current server: 96 samples is
-// 24 hours at the default PROTON_LOAD_REFRESH_INTERVAL of 15 minutes.
+// maxSeriesServers and maxSeriesReadings bound the per-server load and latency history.
 //
-// It is persisted because its whole value is showing a trend, and a trace that restarted
-// empty on every container restart would rarely be long enough to show one.
-const maxLoadSamples = 96
+// The state file is rewritten in full on every update, several times an hour, so this
+// budget is deliberately tight: 24 servers x 48 readings x roughly 30 bytes is about
+// 35 KB, which is the whole point of the compact encoding on Reading. Widening either
+// number multiplies both the file and the cost of every write.
+//
+// 48 readings is 12 hours at the default PROTON_LOAD_REFRESH_INTERVAL of 15 minutes -
+// long enough to show whether a server is reliably quiet or merely quiet right now. 24
+// servers is far more than the handful a deployment actually rotates between.
+const (
+	maxSeriesServers  = 24
+	maxSeriesReadings = 48
+)
 
 // SwitchRecord is one entry of the switch history shown on the dashboard.
 type SwitchRecord struct {
@@ -52,11 +60,20 @@ type SwitchRecord struct {
 	PublicIP string `json:"public_ip,omitempty"`
 }
 
-// LoadSample is one utilisation reading for whichever server the tunnel was on.
-type LoadSample struct {
-	At       time.Time `json:"at"`
-	Hostname string    `json:"hostname"`
-	Load     uint8     `json:"load"`
+// Reading is one observation of a server: how utilised Proton said it was, and what it
+// last measured as latency.
+//
+// The field names are single letters and the timestamp is unix seconds, which is ugly
+// and deliberate. This is the only structure in the state file that is stored in bulk,
+// and RFC 3339 timestamps with readable keys would roughly double a file that is
+// rewritten in full several times an hour. Nothing reads it but this program.
+type Reading struct {
+	At   int64 `json:"t"`
+	Load uint8 `json:"l"`
+	// RTTMS is the round trip in whole milliseconds, or 0 when latency was not known
+	// at the time. Whole milliseconds because this is drawn as a graph, where
+	// sub-millisecond precision is invisible.
+	RTTMS uint16 `json:"r,omitempty"`
 }
 
 // persistedState is what survives a restart.
@@ -79,11 +96,22 @@ type persistedState struct {
 	// noise.
 	GluetunHadServerData bool           `json:"gluetun_had_server_data,omitempty"`
 	History              []SwitchRecord `json:"history,omitempty"`
-	// LoadSamples is the utilisation trace for the server the tunnel has been on.
+	// Series is the load and latency history of individual servers, keyed by hostname.
 	//
-	// Each sample carries its hostname so a switch is visible in the data rather than
-	// silently splicing two servers' figures into one misleading line.
-	LoadSamples []LoadSample `json:"load_samples,omitempty"`
+	// Keyed by hostname rather than kept as one list with a hostname on each sample,
+	// which is what this replaced. That earlier shape could only ever describe the
+	// server the tunnel was on, and drawing it meant carefully taking the contiguous
+	// tail so a switch did not splice two servers into one line that showed a trend
+	// that never happened. Keyed per server, that problem cannot arise.
+	Series map[string][]Reading `json:"series,omitempty"`
+	// Throughput is what each server was observed to deliver, keyed by hostname.
+	//
+	// Utilisation and latency describe a server before it is used; this is the only
+	// record of what actually came out of it. Proton's load figure says how busy a
+	// server is, not how much bandwidth it will give you, and two servers with the
+	// same load routinely differ several-fold - so this is measured rather than
+	// predicted.
+	Throughput map[string]ThroughputRecord `json:"throughput,omitempty"`
 }
 
 // stateStore persists engine state atomically.
@@ -130,9 +158,8 @@ func (s *stateStore) update(mutate func(state *persistedState)) (err error) {
 	if len(s.state.History) > maxHistory {
 		s.state.History = s.state.History[len(s.state.History)-maxHistory:]
 	}
-	if len(s.state.LoadSamples) > maxLoadSamples {
-		s.state.LoadSamples = s.state.LoadSamples[len(s.state.LoadSamples)-maxLoadSamples:]
-	}
+	pruneSeries(s.state.Series)
+	pruneThroughput(s.state.Throughput)
 	state := s.state
 	s.mu.Unlock()
 
