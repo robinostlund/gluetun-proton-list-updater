@@ -192,16 +192,17 @@ func (e *Engine) transferBlocksSwitch() (blocked bool, reason string) {
 	//     because of a misconfiguration is a worse outcome than a switch, and the failure
 	//     is reported loudly elsewhere rather than silently freezing selection.
 	if e.transferCheckedAt.IsZero() {
-		// Waiting is only defensible when there is something to protect. With the tunnel
-		// down, or up on a server this tool cannot identify, no transfer is running through
-		// it - so connecting matters more than waiting to find out, and a fresh start with
-		// qBittorrent still booting must not sit idle for the whole grace period.
+		// Waiting is only defensible when there is something to protect, and the thing that
+		// decides that is whether the *tunnel* is up - not whether this tool can name the
+		// server it is on.
 		//
-		// Note this is narrower than the gate above it: once a reading exists, a transfer on
-		// a server outside the allowed set is still protected. Only the "we have not been
-		// told anything yet" case gives way.
-		hostname, _ := e.currentHostname()
-		if hostname == "" || e.Snapshot().Gluetun.Status != gluetunapi.StatusRunning {
+		// Those were conflated here, and it is exactly the case that matters: on startup the
+		// current server is routinely unidentifiable for a moment (Gluetun restarted and
+		// discarded the pin, so nothing has been re-pinned yet) while the tunnel is up and
+		// carrying a download at full speed. Treating that as "nothing to protect" switched
+		// servers mid-transfer on every restart - the precise failure this whole feature
+		// exists to prevent.
+		if status := e.Snapshot().Gluetun.Status; status != "" && status != gluetunapi.StatusRunning {
 			return false, ""
 		}
 		if waited := time.Since(e.startedAt); waited < firstReadingGrace {

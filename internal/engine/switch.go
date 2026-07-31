@@ -343,6 +343,16 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 			snapshot.Selection.NeedsGluetunRestart = false
 			snapshot.Selection.LastError = ""
 			snapshot.Gluetun.Exit.IP = publicIP
+			// Gluetun's selection now names this hostname, because this is what was just
+			// applied and Gluetun accepted it. Recording it here rather than waiting for the
+			// next health check closes a window that produced a real double switch: the
+			// snapshot still held the pre-switch selection, so the very next evaluation saw
+			// readable settings naming no hostname, took that as proof the remembered pin
+			// was stale - which it is, in general - and switched again four seconds later.
+			if snapshot.Gluetun.Selection == nil {
+				snapshot.Gluetun.Selection = map[string][]string{}
+			}
+			snapshot.Gluetun.Selection["hostnames"] = []string{target.Candidate.Hostname}
 		})
 		e.logger.Info("switched server",
 			"hostname", target.Candidate.Hostname,

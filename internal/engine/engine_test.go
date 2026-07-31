@@ -452,8 +452,12 @@ func TestEngineSwitchesToTheLeastUtilisedServer(t *testing.T) {
 	if snapshot.Selection.Current == nil || snapshot.Selection.Current.Hostname != "se-02.protonvpn.net" {
 		t.Errorf("current server = %+v, want se-02", snapshot.Selection.Current)
 	}
-	if snapshot.Selection.CurrentSource != "public-ip" {
-		t.Errorf("CurrentSource = %q, want public-ip", snapshot.Selection.CurrentSource)
+	// Identified from Gluetun's own selection, which is exact: the pin was applied and
+	// accepted, so there is nothing to infer. This used to read "public-ip" - the exit
+	// address matched, which is a weaker signal and a slower one, and it left a window in
+	// which the tunnel's own server was unidentifiable straight after being chosen.
+	if snapshot.Selection.CurrentSource != "pinned" {
+		t.Errorf("CurrentSource = %q, want pinned", snapshot.Selection.CurrentSource)
 	}
 
 	history := snapshot.History
@@ -4306,9 +4310,12 @@ func TestTheFirstReadingWaitDoesNotDelayTheInitialConnection(t *testing.T) {
 		// Nothing is running through a tunnel that is down, so there is nothing to protect.
 		{"the tunnel is down", "se-01.protonvpn.net", "crashed", false},
 		{"the tunnel is stopped", "se-01.protonvpn.net", "stopped", false},
-		// Nor through one whose server cannot be identified.
-		{"the server is unknown", "", "running", false},
-		// But a running tunnel on a known server may well be carrying something.
+		// A running tunnel may be carrying something whether or not this tool can name the
+		// server it is on. Conflating those two shipped as a bug: on startup the server is
+		// routinely unidentifiable for a moment while the tunnel is downloading at full
+		// speed, and "unidentifiable" was taken as "nothing to protect", which switched
+		// servers mid-transfer on every restart.
+		{"running, server not yet identified", "", "running", true},
 		{"running on a known server", "se-01.protonvpn.net", "running", true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -4722,5 +4729,175 @@ func TestAListFetchCountsAsALoadRefresh(t *testing.T) {
 	}
 	if withLoad == 0 {
 		t.Error("statistics exist but none carries a load reading")
+	}
+}
+
+// The startup sequence, reproduced from a real restart that switched servers during a
+// 1.1 MB/s upload.
+//
+// What happened: Gluetun was checked first, found usable, and evaluated on the spot - all
+// before qBittorrent had been asked whether anything was flowing. With no reading, switching
+// fell open. Then the freshly applied pin was not recorded in the snapshot, so four seconds
+// later the next evaluation saw readable settings naming no hostname, took that as proof the
+// pin was stale, and switched again.
+func TestARestartDuringATransferDoesNotSwitch(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		// Uploading hard, well over the threshold - the situation from the report.
+		withQBittorrent(t, cfg, 0, 8<<20)
+	})
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	// The state a restart inherits: a remembered selection from the previous run, which
+	// Gluetun has since forgotten because it restarted too.
+	if err := engine.state.update(func(state *persistedState) {
+		state.PinnedHostname = "node-se-p2p.protonvpn.net"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.Status = "running"
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = map[string][]string{"countries": {"Sweden"}}
+	})
+
+	// Startup order: the transfer reading must be in hand before anything evaluates.
+	engine.identifyQBittorrent(context.Background())
+	engine.refreshTransfer(context.Background(), "startup")
+
+	if !engine.Snapshot().Transfer.HasReading {
+		t.Fatal("no transfer reading after the startup poll; the order under test is wrong")
+	}
+	if !engine.Snapshot().Transfer.Busy {
+		t.Fatalf("8 MB/s up should read as busy: %+v", engine.Snapshot().Transfer)
+	}
+
+	// The current server is genuinely unidentifiable at this point - that is the case that
+	// went wrong - and switching must still be deferred.
+	if hostname, _ := engine.currentHostname(); hostname != "" {
+		t.Fatalf("hostname = %q, expected unidentifiable at this point", hostname)
+	}
+	blocked, reason := engine.transferBlocksSwitch()
+	if !blocked {
+		t.Error("switching was allowed during an active upload after a restart")
+	}
+	if !strings.Contains(reason, "transfer is in progress") {
+		t.Errorf("reason = %q, want it to name the transfer", reason)
+	}
+
+	// And the whole decision agrees, rather than only the gate.
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false)
+	if verdict.shouldSwitch {
+		t.Errorf("decided to switch mid-transfer: %+v", verdict)
+	}
+}
+
+// A pin Gluetun accepted is where the tunnel is, and the snapshot has to say so at once.
+//
+// Otherwise the next evaluation sees readable settings naming no hostname, treats the
+// remembered pin as disproven - which it is, in general - and switches again. That produced
+// two switches four seconds apart on a restart.
+func TestAnAcceptedPinIsImmediatelyTheCurrentServer(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	// Gluetun readable but naming no hostname: the post-restart state.
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = map[string][]string{"countries": {"Sweden"}}
+	})
+
+	target := engine.ranked[0]
+	engine.performSwitch(context.Background(), "", scoring.Scored{}, false, "test")
+
+	hostname, source := engine.currentHostname()
+	if hostname != target.Candidate.Hostname {
+		t.Errorf("current = %q (%s), want the server just pinned, %q",
+			hostname, source, target.Candidate.Hostname)
+	}
+	if source != "pinned" {
+		t.Errorf("source = %q, want it identified from Gluetun's own selection", source)
+	}
+
+	// So a second evaluation immediately afterwards has nothing to fix.
+	verdict := engine.decide(target, true, target, false)
+	if verdict.shouldSwitch {
+		t.Errorf("switched again straight after a successful switch: %+v", verdict)
+	}
+}
+
+// The startup order is load-bearing, and a reordering of six adjacent lines would break it
+// silently, so it is asserted rather than left to a comment.
+func TestTheStartupOrderReadsTheTransferStateBeforeAnythingEvaluates(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("engine.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := regexp.MustCompile(`(?s)func \(e \*Engine\) Run\(.*?\n\tfor \{`).Find(source)
+	if run == nil {
+		t.Fatal("could not find the startup sequence")
+	}
+
+	position := func(call string) int {
+		at := bytes.Index(run, []byte(call))
+		if at < 0 {
+			t.Fatalf("the startup sequence does not call %s", call)
+		}
+		return at
+	}
+
+	transfer := position("e.refreshTransfer(ctx, \"startup\")")
+	// checkGluetun evaluates on its own when Gluetun becomes usable, so it must not run
+	// before the transfer state is known: with no reading, switching falls open and a
+	// restart during a download moves the tunnel.
+	if gluetun := position("e.checkGluetun(ctx)"); gluetun < transfer {
+		t.Error("checkGluetun runs before the first transfer reading; it evaluates on its " +
+			"own when Gluetun becomes usable, and an evaluation with no reading switches")
+	}
+	// And the explicit startup evaluation comes after everything it depends on.
+	if evaluate := position("e.evaluate(ctx, \"startup\", false)"); evaluate < transfer {
+		t.Error("the startup evaluation runs before the first transfer reading")
+	}
+	if identify := position("e.identifyQBittorrent(ctx)"); identify > transfer {
+		t.Error("qBittorrent is identified after its rates are first read")
+	}
+}
+
+// Identification from Gluetun's exit address, for when its selection cannot be read.
+//
+// The weaker of the two signals, and the only one available in the modes that never pin a
+// hostname - so it keeps its own test now that a successful pin identifies itself exactly.
+func TestTheCurrentServerCanBeIdentifiedFromTheExitAddress(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	// Proton publishes an exit address per server; Gluetun reports the address the internet
+	// sees. When they match, that is the server - no selection needed.
+	target := engine.ranked[0].Candidate
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = map[string][]string{"countries": {"Sweden"}}
+		snapshot.Gluetun.Exit.IP = target.ExitIP.String()
+	})
+
+	hostname, source := engine.currentHostname()
+	if hostname != target.Hostname {
+		t.Errorf("hostname = %q, want %q from the matching exit address", hostname, target.Hostname)
+	}
+	if source != "public-ip" {
+		t.Errorf("source = %q, want public-ip", source)
+	}
+
+	// An address matching no Proton server means nothing rather than something wrong: Proton
+	// publishes the server address, which is often not the one the internet sees.
+	engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Gluetun.Exit.IP = "203.0.113.7" })
+	if hostname, source := engine.currentHostname(); hostname != "" || source != "unknown" {
+		t.Errorf("hostname = %q (%s), want unknown for an unmatched address", hostname, source)
 	}
 }

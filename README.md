@@ -622,9 +622,16 @@ The first case is not hypothetical: without it, a restart during an active downl
 every time — the exact interruption this feature exists to prevent, at the moment it is most likely
 to happen. The second keeps a wrong URL or key from freezing selection for ever.
 
-The wait applies only when there is something to protect. With the tunnel **down**, or up on a server
-this tool cannot identify, nothing is flowing through it, so an initial connection is never delayed
-waiting to find out.
+The wait applies only when there is something to protect, and what decides that is whether the
+**tunnel** is up — not whether this tool can name the server it is on. Those are easy to conflate and
+it matters: on startup the current server is routinely unidentifiable for a moment, because a
+restarted Gluetun has discarded the pin and nothing has been re-pinned yet, while the tunnel is up and
+downloading at full speed.
+
+**Startup order is part of this.** qBittorrent is polled before Gluetun is checked, because checking
+Gluetun evaluates on its own as soon as it becomes usable — so an evaluation could otherwise happen
+before anything knew whether a transfer was running. A test asserts the order, since it is six
+adjacent lines that would reorder silently.
 
 ### Is the forwarded port actually reaching qBittorrent?
 

@@ -292,9 +292,17 @@ func (e *Engine) Run(ctx context.Context) (err error) {
 	// Kick off the first round of work immediately rather than waiting a full
 	// interval, but do it inside the loop so a slow Proton API cannot delay
 	// dashboard responsiveness.
-	e.checkGluetun(ctx)
+	// qBittorrent first, and before checkGluetun in particular.
+	//
+	// Order matters here because checkGluetun evaluates on its own when Gluetun becomes
+	// usable, and an evaluation with no transfer reading yet falls open and switches. That
+	// is how a restart came to move the tunnel mid-download: Gluetun was checked, decided
+	// the tunnel was fine, evaluated, and switched - all before qBittorrent had been asked
+	// whether anything was flowing. It is also the cheapest of the three, being on the local
+	// network, so nothing is lost by asking it first.
 	e.identifyQBittorrent(ctx)
 	e.refreshTransfer(ctx, "startup")
+	e.checkGluetun(ctx)
 	e.refreshServerList(ctx, "startup")
 	e.probeLatency(ctx, "startup")
 	e.evaluate(ctx, "startup", false)
