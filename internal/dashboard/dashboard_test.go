@@ -33,7 +33,6 @@ type stubController struct {
 	totpAccepts bool
 	healthy     bool
 	updates     chan struct{}
-	history     map[string]engine.ServerHistory
 }
 
 func newStub() *stubController {
@@ -98,16 +97,6 @@ func (s *stubController) ClearHistory(_ context.Context) error {
 
 func (s *stubController) RunUpdater(_ context.Context) error {
 	return s.record("run-updater")
-}
-
-func (s *stubController) ServerHistory(hostname string) engine.ServerHistory {
-	_ = s.record("history:" + hostname)
-	if history, found := s.history[hostname]; found {
-		return history
-	}
-	// An unsampled server is an empty history, not an error: that is the honest answer
-	// to "what do you have on this one?".
-	return engine.ServerHistory{Hostname: hostname, Readings: []engine.HistoryPoint{}}
 }
 
 func (s *stubController) SetVPN(_ context.Context, status string) error {
@@ -818,7 +807,7 @@ func TestCandidateTableColumnsMatchTheRenderedCells(t *testing.T) {
 		got = append(got, strings.TrimSpace(string(match[1])))
 	}
 	want := []string{"#", "Server", "Country", "City", "Load", "Latency", "Score",
-		"Throughput", "Features", "Action"}
+		"Transferred", "Features", "Action"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("headings = %v, want %v", got, want)
 	}
@@ -1216,8 +1205,13 @@ func TestSelectionIsThreeColumns(t *testing.T) {
 	if card == nil {
 		t.Fatal("could not find the server selection card")
 	}
+	// The three comparison columns, in order. A band across the bottom of the card is
+	// not a column and must not be counted as one - the selection-column check below is
+	// what keeps the comparison itself to three.
 	var headings []string
-	for _, match := range regexp.MustCompile(`<h3 class="card-section">([^<]*)</h3>`).FindAllSubmatch(card, -1) {
+	for _, match := range regexp.MustCompile(
+		`(?s)<div class="selection-column">.*?<h3 class="card-section">([^<]*)</h3>`,
+	).FindAllSubmatch(card, -1) {
 		headings = append(headings, string(match[1]))
 	}
 	want := []string{"Current", "Best candidate", "Decision"}
@@ -1842,67 +1836,6 @@ func TestUpdaterSettingsNameTheirVariables(t *testing.T) {
 	}
 }
 
-// The sparkline is inline SVG because the page is self-contained: no charting library,
-// no CDN. Its y-axis is pinned to 0-100 rather than to the data, so a server that stayed
-// between 40% and 44% looks flat instead of volatile - the point is judging load against
-// the thresholds that act on it, not against its own range.
-func TestTheLoadSparklineIsSelfContainedAndFixedScale(t *testing.T) {
-	t.Parallel()
-
-	page, err := assetsFS.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script, err := assetsFS.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	styles, err := assetsFS.ReadFile("assets/style.css")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !bytes.Contains(page, []byte(`id="current-trace"`)) {
-		t.Error("the current-server column has no trace row")
-	}
-	if !bytes.Contains(script, []byte("selection.load_trace")) {
-		t.Error("app.js never reads the published trace")
-	}
-	// Drawn inline, with no external anything.
-	if !bytes.Contains(script, []byte("<svg class=\"spark\"")) {
-		t.Error("the sparkline is not inline SVG")
-	}
-	// Scoped to the sparkline: the page has one deliberate outbound *link* (the
-	// coordinates), which is navigation rather than a subresource.
-	spark := regexp.MustCompile(`(?s)function sparkline\(trace\) \{.*?\n\}`).Find(script)
-	if spark == nil {
-		t.Fatal("could not find the sparkline function")
-	}
-	if regexp.MustCompile(`https?://|url\(`).Match(spark) {
-		t.Error("the sparkline fetches something external; it must be drawn inline")
-	}
-	// Fixed scale: the load is divided by 100, not by the observed range.
-	if !bytes.Contains(script, []byte("/ 100) * height")) {
-		t.Error("the y-axis is not pinned to 0-100")
-	}
-	// Two points are the minimum for a line; fewer must say so rather than draw nothing.
-	if !bytes.Contains(script, []byte("trace.length < 2")) {
-		t.Error("a trace too short to draw is not handled")
-	}
-	if !bytes.Contains(script, []byte("not enough history yet")) {
-		t.Error("a short trace should say why it is empty")
-	}
-	// Accessible: the summary is available as text, not only as a shape.
-	for _, fragment := range []string{"aria-label=", "<title>"} {
-		if !bytes.Contains(script, []byte(fragment)) {
-			t.Errorf("the sparkline has no %s", fragment)
-		}
-	}
-	if !bytes.Contains(styles, []byte(".spark {")) {
-		t.Error("style.css has no .spark rule")
-	}
-}
-
 // "On this server" must admit when it does not know, rather than attributing a reconnect
 // this tool did not make.
 func TestTimeOnCurrentServerAdmitsWhenUnknown(t *testing.T) {
@@ -2061,76 +1994,6 @@ func TestTheGluetunCardHasItsOwnControls(t *testing.T) {
 	}
 }
 
-// The series are fetched per server rather than published in the snapshot, so the
-// endpoint is the whole contract for the detail panel's graphs.
-func TestTheServerHistoryEndpoint(t *testing.T) {
-	t.Parallel()
-
-	stub := newStub()
-	stub.history = map[string]engine.ServerHistory{
-		"node-se-01.protonvpn.net": {
-			Hostname: "node-se-01.protonvpn.net",
-			Interval: "15m",
-			Capacity: 48,
-			Readings: []engine.HistoryPoint{
-				{At: time.Now().Add(-time.Hour), Load: 40, RTTMS: 31, RTTKnown: true},
-				{At: time.Now(), Load: 44},
-			},
-		},
-	}
-	server := newTestServer(t, stub, Options{})
-
-	t.Run("a sampled server returns its readings", func(t *testing.T) {
-		response, err := server.Client().Get(
-			server.URL + "/api/history?host=node-se-01.protonvpn.net")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d", response.StatusCode)
-		}
-		var history engine.ServerHistory
-		if err := json.NewDecoder(response.Body).Decode(&history); err != nil {
-			t.Fatal(err)
-		}
-		if len(history.Readings) != 2 {
-			t.Fatalf("readings = %d, want 2", len(history.Readings))
-		}
-		// RTTKnown is what tells a missing measurement apart from a fast one, so it has
-		// to survive the round trip.
-		if !history.Readings[0].RTTKnown || history.Readings[1].RTTKnown {
-			t.Errorf("rtt_known did not survive: %+v", history.Readings)
-		}
-		if history.Capacity != 48 || history.Interval != "15m" {
-			t.Errorf("the graph cannot label itself: %+v", history)
-		}
-	})
-
-	t.Run("an unsampled server is an empty history, not an error", func(t *testing.T) {
-		response, err := server.Client().Get(server.URL + "/api/history?host=unknown.example")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Errorf("status = %d, want 200: never having sampled a server is not an error",
-				response.StatusCode)
-		}
-	})
-
-	t.Run("no hostname is a bad request", func(t *testing.T) {
-		response, err := server.Client().Get(server.URL + "/api/history")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusBadRequest {
-			t.Errorf("status = %d, want 400", response.StatusCode)
-		}
-	})
-}
-
 // A click on a row opens a panel; a click on the Use button inside that row switches the
 // tunnel. Both firing from one click would be indefensible, so the ordering and the
 // control guard are pinned here.
@@ -2197,7 +2060,11 @@ func TestTheCandidatePanelShowsWhatTheTableCannot(t *testing.T) {
 	for _, id := range []string{
 		"modal-logical-id", "modal-tier", "modal-region", "modal-entry-ipv6",
 		"modal-proton-score", "modal-score-load", "modal-score-latency", "modal-score-proton",
-		"modal-load-graph", "modal-rtt-graph", "modal-readings", "modal-throughput",
+		"modal-stat-load-lowest", "modal-stat-load-highest",
+		"modal-stat-rtt-lowest", "modal-stat-rtt-highest",
+		"modal-stat-downloaded", "modal-stat-uploaded",
+		"modal-stat-max-down", "modal-stat-max-up",
+		"modal-stat-samples", "modal-stat-visits",
 	} {
 		if !bytes.Contains(modal, []byte(`id="`+id+`"`)) {
 			t.Errorf("the panel has no %q row", id)
@@ -2207,17 +2074,91 @@ func TestTheCandidatePanelShowsWhatTheTableCannot(t *testing.T) {
 		}
 	}
 
-	// A load graph must be drawn against a fixed 0-100. Autoscaling a percentage turns a
-	// flat 10-12%% into a dramatic climb, which is the opposite of informative.
-	if !regexp.MustCompile(`value: \(point\) => point\.load,\s*\n\s*max: 100`).Match(script) {
-		t.Error("the load graph is not pinned to a 0-100 scale")
+	// Absent figures must read as absent. A zero here would be a claim about the server
+	// rather than an admission about us.
+	if !bytes.Contains(script, []byte("'not probed'")) {
+		t.Error("a server never probed for latency is not distinguished from a fast one")
 	}
-	// Latency has no natural ceiling, so it autoscales - but must then say what to.
-	if !bytes.Contains(script, []byte("Scaled to ${format(ceiling)}")) {
-		t.Error("an autoscaled graph does not report its ceiling")
+	if !bytes.Contains(script, []byte("'needs qBittorrent'")) {
+		t.Error("transfer figures do not say when nothing is measuring them")
 	}
-	// A reading taken before latency was known is a gap, not a zero.
-	if !bytes.Contains(script, []byte("known: (point) => point.rtt_known")) {
-		t.Error("the latency graph does not skip readings with no measurement")
+	if !bytes.Contains(script, []byte("'nothing yet'")) {
+		t.Error("a server that carried nothing is not distinguished from an unmeasured one")
+	}
+
+	// Lowest is best for load and latency, so the rows say best and worst rather than
+	// leaving the reader to work out the polarity.
+	for _, label := range []string{"Load best", "Load worst", "Latency best", "Latency worst"} {
+		if !bytes.Contains(modal, []byte("<dt>"+label+"</dt>")) {
+			t.Errorf("the panel has no %q row", label)
+		}
+	}
+
+	// And nothing may reintroduce a stored series behind a graph.
+	for _, gone := range []string{"seriesGraph", "sparkline", "throughputGraphs"} {
+		if bytes.Contains(script, []byte(gone)) {
+			t.Errorf("%s is back; the history was reduced to fixed statistics on purpose", gone)
+		}
+	}
+}
+
+// The column is cumulative volume rather than a peak rate, because that is the figure that
+// means anything cumulatively - and the two must not be confused, since they differ only
+// in their unit.
+func TestTheCandidateColumnShowsTransferredVolume(t *testing.T) {
+	t.Parallel()
+
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The cell in the row template must be the volume one.
+	row := regexp.MustCompile(`(?s)return \x60<tr class=.*?</tr>\x60;`).Find(script)
+	if row == nil {
+		t.Fatal("could not find the candidate row template")
+	}
+	if !bytes.Contains(row, []byte("transferredCell(candidate.stats)")) {
+		t.Error("the candidate row does not render transferred volume")
+	}
+
+	// A volume must be formatted as a volume. "12 MB/s" for a total states a rate that was
+	// never measured.
+	transferred := regexp.MustCompile(`(?s)function transferredCell.*?\n\}`).Find(script)
+	if transferred == nil {
+		t.Fatal("could not find transferredCell")
+	}
+	if bytes.Contains(transferred, []byte("rate(")) {
+		t.Error("transferredCell formats a volume with the rate formatter")
+	}
+	if !bytes.Contains(transferred, []byte("bytes(")) {
+		t.Error("transferredCell does not use the byte formatter")
+	}
+	// "not used" rather than "0 B": a server that carried nothing and a server never tried
+	// are different claims.
+	if !bytes.Contains(transferred, []byte("not used")) {
+		t.Error("an unused server is not distinguished from one that moved nothing")
+	}
+
+	// And the panel keeps both volume and rate, under names that say which is which.
+	modal := regexp.MustCompile(`(?s)<dialog id="candidate-modal">.*?</dialog>`).Find(page)
+	for _, label := range []string{
+		"Downloaded", "Uploaded", "Fastest download", "Fastest upload",
+	} {
+		if !bytes.Contains(modal, []byte("<dt>"+label+"</dt>")) {
+			t.Errorf("the panel has no %q row", label)
+		}
+	}
+	// "not measured" is for a deployment with nothing measuring; "not used" is for a
+	// server that carried nothing. Collapsing the two would blame the server for our
+	// missing integration.
+	for _, phrase := range []string{"not measured", "not used"} {
+		if !bytes.Contains(transferred, []byte(phrase)) {
+			t.Errorf("transferredCell does not distinguish %q", phrase)
+		}
 	}
 }

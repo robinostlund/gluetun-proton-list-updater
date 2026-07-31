@@ -71,7 +71,6 @@
               <div><dt>On this server</dt><dd id="current-since">–</dd></div>
               <div><dt>Forwarded port</dt><dd id="current-port">–</dd></div>
               <div><dt>Measured throughput</dt><dd id="current-throughput">–</dd></div>
-              <div class="wide"><dt>Load over time</dt><dd id="current-trace" class="trace">–</dd></div>
             </dl>
           </div>
 
@@ -102,6 +101,7 @@
             </dl>
           </div>
         </div>
+
       </article>
 
       <!-- Everything about Gluetun, including what its own control server reports. Those
@@ -282,7 +282,7 @@
               <th class="num">Load</th>
               <th class="num">Latency</th>
               <th class="num">Score</th>
-              <th class="num">Throughput</th>
+              <th class="num">Transferred</th>
               <th>Features</th>
               <th class="right">Action</th>
             </tr>
@@ -375,13 +375,32 @@
       </dl>
     </div>
 
+    <!-- What has been observed over time, as extremes rather than a graph. Lowest is
+         best for both load and latency, which is why the labels say so. -->
     <div class="band">
-      <h3 class="card-section">History</h3>
+      <h3 class="card-section">Observed over time</h3>
       <dl class="kv">
-        <div class="wide"><dt>Load</dt><dd id="modal-load-graph" class="trace">–</dd></div>
-        <div class="wide"><dt>Latency</dt><dd id="modal-rtt-graph" class="trace">–</dd></div>
-        <div><dt>Readings</dt><dd id="modal-readings">–</dd></div>
-        <div><dt>Measured throughput</dt><dd id="modal-throughput">–</dd></div>
+        <div><dt>Load now</dt><dd id="modal-stat-load">–</dd></div>
+        <div><dt>Load best</dt><dd id="modal-stat-load-lowest">–</dd></div>
+        <div><dt>Load worst</dt><dd id="modal-stat-load-highest">–</dd></div>
+        <div><dt>Latency now</dt><dd id="modal-stat-rtt">–</dd></div>
+        <div><dt>Latency best</dt><dd id="modal-stat-rtt-lowest">–</dd></div>
+        <div><dt>Latency worst</dt><dd id="modal-stat-rtt-highest">–</dd></div>
+        <div><dt>Observations</dt><dd id="modal-stat-samples">–</dd></div>
+        <div><dt>Stays</dt><dd id="modal-stat-visits">–</dd></div>
+        <div><dt>First seen</dt><dd id="modal-stat-first">–</dd></div>
+      </dl>
+    </div>
+
+    <div class="band">
+      <h3 class="card-section">Transferred through this server</h3>
+      <dl class="kv">
+        <div><dt>Downloaded</dt><dd id="modal-stat-downloaded">–</dd></div>
+        <div><dt>Uploaded</dt><dd id="modal-stat-uploaded">–</dd></div>
+        <div><dt>Fastest download</dt><dd id="modal-stat-max-down">–</dd></div>
+        <div><dt>Fastest upload</dt><dd id="modal-stat-max-up">–</dd></div>
+        <div><dt>Transfer readings</dt><dd id="modal-stat-reads">–</dd></div>
+        <div><dt>Last carried traffic</dt><dd id="modal-stat-last-transfer">–</dd></div>
       </dl>
     </div>
   </dialog>

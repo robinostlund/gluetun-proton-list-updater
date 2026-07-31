@@ -312,13 +312,12 @@ The current column also answers the two questions a single load figure prompts:
   "is it flapping?". It reads `unknown` unless this tool made the switch: if Gluetun moved on its
   own, or the tunnel was already up when this container started, the arrival time is genuinely not
   known and a number would be a guess.
-- **Load over time** — a sparkline of the current server's utilisation, one point per loads refresh,
-  persisted so it survives a restart and bounded to 12 hours at the default interval. The y-axis is
-  pinned to 0–100 %, not to the data: a server that stayed between 40 % and 44 % should look flat,
-  and the point is judging load against the thresholds that act on it. It is drawn from that
-  server's own series, so it cannot splice two servers' figures into a trend that never happened.
-  The same history, with latency alongside it, is in the [candidate detail
-  panel](#clicking-a-candidate). The
+- **Measured throughput** — how much data has ever moved through this server. What has been
+  *observed* about it over time, as opposed to what Proton predicts, is in the [candidate detail
+  panel](#clicking-a-candidate): the best and worst load and latency ever seen, the fastest transfer
+  rates, and the running totals.
+
+The
 **Improvement** row states its own verdict — `0.021 too low, needs 0.100` in red, or `0.180 meets
 0.100` in green — because that single number decides whether the best candidate is used at all.
 Below it: the **Decision** in the engine's own words (`cooldown active for another 12m`), the
@@ -439,101 +438,81 @@ Proton's **own score** before this tool weights it, the **region**, and the **IP
 That last one distinguishes *not recorded* from *no IPv6* — the address is only kept when
 `GLUETUN_SERVERS_INCLUDE_IPV6` is on, so its absence says nothing about the server's capability.
 
-#### Load and latency history
+#### What has been observed about each server
 
-The panel graphs how a server has behaved over time. One reading per loads refresh, carrying
-Proton's load figure and whatever the prober last measured, so both series have exactly the
-resolution the underlying data does.
+The panel shows what has actually been measured about a server over time — but as **figures rather
+than graphs**, deliberately. A stored series buys graphs at the cost of a state file that grows with
+every server and every hour; a dozen fixed numbers answer what those graphs were being read for and
+cost the same whether a server has been used for a day or a year. It is also what makes this
+affordable for **every candidate** rather than a chosen few.
 
-The two are scaled differently, on purpose. **Load is pinned to 0–100 %** because a percentage has an
-absolute meaning and autoscaling would stretch a flat 10–12 % into a dramatic climb. **Latency
-autoscales**, because milliseconds have no natural ceiling — and the graph's label then states what
-it scaled to, so the shape is readable. A reading taken before latency was ever probed is drawn as a
-**gap, not a zero**: an unmeasured server is not a fast one.
-
-History is not kept for every candidate — there are hundreds, and most will never be chosen. It is
-kept for three kinds of server, for three reasons:
-
-| Kept for | Because |
+| Figure | Meaning |
 |---|---|
-| The current server | Its trend answers "is this getting worse?" |
-| The best ~10 candidates | Their trend answers "is that alternative *reliably* quieter, or quiet just now?" — which a single load figure cannot |
-| Anything measured for throughput | So one server's records do not outlive each other |
+| **Load** now / best / worst | Proton's utilisation, and the extremes ever seen. A server that is quiet now but has peaked at 95 % is a different proposition from one that never has |
+| **Latency** now / best / worst | Round trip, same idea. Absent for servers outside `LATENCY_TOP_N`, which reads *not probed* rather than as a zero |
+| **Downloaded / Uploaded** | Every byte ever moved through this server |
+| **Fastest download / upload** | The best single reading ever taken on it |
+| **Observations**, **Stays**, **First seen** | How much evidence is behind the extremes, and since when |
 
-**Bounded in both dimensions**, because the state file is rewritten in full several times an hour:
-at most **24 servers**, at most **48 readings** each (12 hours at the default refresh). The stored
-form is deliberately terse — single-letter keys and unix seconds — which is ugly to read and roughly
-halves a file nothing but this program parses. At absolute full capacity, with every bounded list
-full, `state.json` measures **124 KB**, and a test fails if a future change pushes it past 192 KB.
+Best means *lowest* for both load and latency. The stored field names say `lowest` and `highest`
+rather than best and worst, because reading those requires already knowing which direction is good.
 
-The series are fetched **per server on demand** rather than published in the snapshot. Attaching 48
-readings to each of several hundred candidate rows would put tens of thousands of points on the wire
-on every update, to show the one panel someone opened.
+Load and latency are recorded for every candidate on each loads refresh, so they accumulate whether
+or not a server is ever used. The four transfer figures need the qBittorrent integration; without it
+they read **needs qBittorrent** rather than `0 B`, because a zero would be a claim about the server
+rather than an admission about us.
 
-### What each server actually delivered
+#### Data transferred, kept for the life of the server
 
-Load and latency both describe a server *before* you use it, and neither predicts bandwidth: Proton's
-load figure says how busy a server is, not how much throughput it will give you, and two servers
-reporting the same load routinely differ several-fold. Since qBittorrent is already being polled for
-rates, those rates are also recorded **per server** — so the candidate list can show what each one
-was measured to deliver rather than only what it is predicted to be like.
+The **Transferred** column in the candidate list is how much data has ever moved through each server.
+That, rather than a peak rate, is the figure that means something cumulatively: a peak is one lucky
+moment, while "412 GB have gone through this server" says how much you have actually used it.
 
-It comes free with the qBittorrent integration; there is nothing extra to configure. Each record
-carries two figures per direction:
+These totals are **never reset** — not by a reconnect, not by returning after a month away. The only
+thing that removes one is Proton retiring the server, which takes the whole record with it: totals,
+rates, load and latency extremes, all at once, under the three guards described above. Each removal
+is logged **with the figures being discarded** rather than as a bare count.
 
-| Figure | What it is |
+They come from qBittorrent's session counters by **difference between polls**, which is the only way
+to attribute a global counter to a particular server. Four things make a difference meaningless, and
+each yields nothing rather than a wrong number:
+
+| Situation | Why the difference is meaningless |
 |---|---|
-| **Peak** | The highest single reading — the fastest this server was ever seen to go |
-| **Sustained** | The highest average over `SWITCHING_BUSY_WINDOW` — a rate it actually held |
+| The first poll | Nothing to subtract from — a session that had already moved 50 GB is not ours to claim |
+| The counter went **backwards** | qBittorrent restarted; its session totals began again from zero |
+| The baseline belongs to another server | Those bytes were carried by that server, which has already been credited |
+| The previous poll was not attributable | The gap is unaccounted for, so any skipped reading drops the baseline |
 
-The sustained figure is the fair comparison between servers, and the peak is the number you would
-recognise from qBittorrent's own display. Both are shown: the column in the candidate list gives the
-peak, and the tooltip gives everything else.
+An idle interval is *not* one of those: nothing moved, which is a real zero rather than a gap, so the
+baseline moves forward through quiet periods instead of restarting.
 
-**It describes the most recent stay, not all time.** "What did this server give me last time I used
-it" is the useful question; a server that was fast once, months ago, on a busy swarm, is not evidence
-about the server now. Returning to a server therefore starts a fresh measurement, and the tooltip
-says which stay you are looking at. A restart does *not* start a new stay — the tunnel is usually
-still where this tool left it, and throwing away the measurement because the process bounced would
-lose exactly the data being collected. A gap longer than ten minutes does, because too much happened
-unobserved to keep calling it one stay.
+Two honest limits. This counts what the tool **observed** — bytes that moved before it started
+watching, or during the interval a qBittorrent restart straddles, are not counted, so treat the
+totals as a floor. And it is qBittorrent's traffic, not the tunnel's: anything else using the VPN is
+invisible here.
 
-Every reading has to be earned by the server it is credited to, so a reading is skipped when:
+#### What this costs on disk
 
-- **nothing was flowing** — an idle poll is not a measurement, and counting it would build up a long
-  history with a peak of zero, which reads as "this server is slow" when it means "nothing was
-  downloading". A server with no active readings shows **not measured**, never `0 B/s`;
-- **the tunnel is not up** — whatever qBittorrent reports while it is down describes the moments
-  before it fell over;
-- **it spans a switch** — a reading covers the interval before it, so the first one after a move
-  belongs partly to the previous server;
-- **the averaging window is not yet entirely on this server** — until it is, the average still
-  contains the previous server's rates, and a slow server would inherit a fast one's figures. The
-  peak is recorded immediately; the sustained figure waits.
+One record per server, and it does not grow with time. Measured, not estimated:
 
-Two honest limitations. The rates are measured **through the tunnel by a torrent client**, so they
-reflect the swarm and your own peers as much as the server — a low figure may mean the server is
-slow, or simply that nothing fast was available while you were on it. And this is **not part of
-scoring**: selection still ranks on load and latency, and these figures are shown for you to judge,
-not fed back into the decision.
+| Scenario | `state.json` |
+|---|---|
+| 300 candidates, 20 of them used | **58 KB** |
+| The 600-server cap saturated, every field at its widest | **249 KB** |
 
-Records are kept in the state file and bounded at 200 servers, least recently measured dropped first.
-A server Proton **retires** has its record dropped on the next successful list refresh — it can never
-be a candidate again, so the record could never be displayed. Three rules stop that from deleting
-live data:
+A test fails if a change pushes the worst case past 320 KB. The cap is a backstop against a
+deployment left to wander across every server Proton offers, not a retention policy — least recently
+seen goes first, and it is logged, because a transferred total disappearing is exactly the kind of
+silent loss these figures must not suffer.
 
-- **only on a freshly fetched list.** A cached list is the fallback for when Proton is unreachable,
-  and treating "I could not ask" as "Proton retired it" would erase records during an outage;
-- **compared against every server Proton returned, before any filtering.** A server excluded by
-  `FILTER_MAX_LOAD`, outside `FILTER_COUNTRIES`, or sitting in maintenance still exists — and Proton
-  moves servers in and out of maintenance routinely. Comparing against the *candidate* list instead
-  would wipe the history of every server today's filters happen to exclude;
-- **never on an implausibly short list.** Every server holding a record was in Proton's list when it
-  was measured, so a list shorter than the number of records held is a truncated response rather
-  than a mass retirement. It is logged and skipped.
+The **write volume** matters more than the size. The statistics are updated on every qBittorrent
+poll, every 15 seconds by default, and the state file is rewritten in full — so a poll now mutates
+memory only, and the loads refresh flushes it. That is 4 writes an hour instead of 240, which on
+hardware that may well be an SD card is the difference between about 30 MB a day and a gigabyte. The
+cost is bounded and worth naming: an unclean shutdown loses whatever arrived since the last flush,
+which for a peak rate and a byte count is the right trade.
 
-When records are dropped, the hostnames are logged at info level — it is the disappearance of data
-you may have been comparing servers on, not a routine cleanup.
 
 ### What it does and does not hold back
 

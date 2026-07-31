@@ -169,7 +169,7 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 	updated := e.applyLoads(loads)
 	dropped := before - len(e.candidates)
 	e.rerank()
-	e.recordReadings()
+	e.recordSamples()
 
 	// Persisted separately from the server list: a few kilobytes rewritten every
 	// refresh, so a restart during a Proton outage resumes with recent

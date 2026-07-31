@@ -23,20 +23,19 @@ const (
 // that is needed to keep the state bounded.
 const maxHistory = 100
 
-// maxSeriesServers and maxSeriesReadings bound the per-server load and latency history.
+// maxServerStats bounds how many servers keep statistics.
 //
-// The state file is rewritten in full on every update, several times an hour, so this
-// budget is deliberately tight: 24 servers x 48 readings x roughly 30 bytes is about
-// 35 KB, which is the whole point of the compact encoding on Reading. Widening either
-// number multiplies both the file and the cost of every write.
+// One fixed-size record per server rather than a series of readings, which is what makes
+// this affordable for every candidate instead of a chosen few: a record is a couple of
+// hundred bytes and does not grow with time, so 600 of them is well under a megabyte and
+// covers a filtered candidate set several times over.
 //
-// 48 readings is 12 hours at the default PROTON_LOAD_REFRESH_INTERVAL of 15 minutes -
-// long enough to show whether a server is reliably quiet or merely quiet right now. 24
-// servers is far more than the handful a deployment actually rotates between.
-const (
-	maxSeriesServers  = 24
-	maxSeriesReadings = 48
-)
+// The transferred totals in a record are meant to last for the life of the server, so
+// this cap is a backstop against a deployment left to wander across every server Proton
+// offers - not a retention policy. The normal way a record goes away is Proton retiring
+// the server. Least recently seen goes first, and it is logged, because a total
+// disappearing is exactly the kind of silent loss these figures must not suffer.
+const maxServerStats = 600
 
 // SwitchRecord is one entry of the switch history shown on the dashboard.
 type SwitchRecord struct {
@@ -60,20 +59,111 @@ type SwitchRecord struct {
 	PublicIP string `json:"public_ip,omitempty"`
 }
 
-// Reading is one observation of a server: how utilised Proton said it was, and what it
-// last measured as latency.
+// ServerStats is what has been observed about one server, reduced to figures that do not
+// grow with time.
 //
-// The field names are single letters and the timestamp is unix seconds, which is ugly
-// and deliberate. This is the only structure in the state file that is stored in bulk,
-// and RFC 3339 timestamps with readable keys would roughly double a file that is
-// rewritten in full several times an hour. Nothing reads it but this program.
-type Reading struct {
-	At   int64 `json:"t"`
-	Load uint8 `json:"l"`
-	// RTTMS is the round trip in whole milliseconds, or 0 when latency was not known
-	// at the time. Whole milliseconds because this is drawn as a graph, where
-	// sub-millisecond precision is invisible.
-	RTTMS uint16 `json:"r,omitempty"`
+// Deliberately not a history. A series of readings per server buys graphs at the cost of a
+// state file that grows with every server and every hour; these dozen numbers answer the
+// questions the graphs were actually being read for - is this server reliably quiet, has
+// it ever been slow, how much have I pulled through it - in a fixed two hundred bytes.
+//
+// "Lowest" and "highest" rather than "best" and "worst", because reading those requires
+// knowing which direction is good. For load and latency lowest is best; the dashboard
+// says so, the field names do not have to imply it.
+type ServerStats struct {
+	// Load, as Proton reports it: 0-100.
+	LoadLast    uint8 `json:"load,omitempty"`
+	LoadLowest  uint8 `json:"load_lowest,omitempty"`
+	LoadHighest uint8 `json:"load_highest,omitempty"`
+	// Latency in whole milliseconds. Zero means never measured - the prober only covers
+	// LATENCY_TOP_N servers, so that is a normal state, not an error. Whole milliseconds
+	// because nothing here is decided on fractions of one.
+	RTTLastMS    uint16 `json:"rtt_ms,omitempty"`
+	RTTLowestMS  uint16 `json:"rtt_lowest_ms,omitempty"`
+	RTTHighestMS uint16 `json:"rtt_highest_ms,omitempty"`
+	// DownloadedBytes and UploadedBytes are every byte ever moved through this server.
+	//
+	// Never reset - not by a reconnect, not by returning after a month away. A rate is a
+	// snapshot, but a volume is a fact that only accumulates, and the only thing that
+	// removes one is Proton retiring the server. Requires the qBittorrent integration;
+	// zero without it.
+	DownloadedBytes uint64 `json:"downloaded,omitempty"`
+	UploadedBytes   uint64 `json:"uploaded,omitempty"`
+	// MaxDownloadRate and MaxUploadRate are the fastest this server was ever seen to go,
+	// in bytes per second. Also from qBittorrent, and also never reset.
+	MaxDownloadRate uint64 `json:"max_download,omitempty"`
+	MaxUploadRate   uint64 `json:"max_upload,omitempty"`
+	// Samples counts load and latency observations, TransferReadings counts qBittorrent
+	// polls attributed to this server. Two counters because the two are collected on
+	// different cycles from different sources, and a single number would misrepresent how
+	// much evidence is behind either set of figures.
+	Samples          int `json:"samples,omitempty"`
+	TransferReadings int `json:"transfer_readings,omitempty"`
+	// Visits counts the stays on this server, so "first time here" and "the tenth time"
+	// can be told apart.
+	Visits int `json:"visits,omitempty"`
+	// The three timestamps are unix seconds rather than time.Time, which serialises as
+	// RFC 3339.
+	//
+	// Not a micro-optimisation: three RFC 3339 timestamps and their key names are over
+	// half of a record, and there is one record per server. Second resolution is more than
+	// enough for figures whose fastest source is a fifteen-second poll, and nothing reads
+	// this file but the program that wrote it.
+	FirstSeenUnix int64 `json:"first_seen,omitempty"`
+	LastSeenUnix  int64 `json:"last_seen,omitempty"`
+	// LastTransferUnix is when the totals last increased, which is a different age from
+	// LastSeenUnix: a server can be sampled for load long after it last carried traffic.
+	LastTransferUnix int64 `json:"last_transfer,omitempty"`
+}
+
+// FirstSeen, LastSeen and LastTransferAt present the stored unix seconds as times. Zero
+// stays zero, so "never" survives the conversion rather than becoming 1970.
+func (s ServerStats) FirstSeen() time.Time      { return unixOrZero(s.FirstSeenUnix) }
+func (s ServerStats) LastSeen() time.Time       { return unixOrZero(s.LastSeenUnix) }
+func (s ServerStats) LastTransferAt() time.Time { return unixOrZero(s.LastTransferUnix) }
+
+func unixOrZero(seconds int64) time.Time {
+	if seconds == 0 {
+		return time.Time{}
+	}
+	return time.Unix(seconds, 0)
+}
+
+// observeLoad folds a load reading in, maintaining the extremes.
+func (s *ServerStats) observeLoad(load uint8, at time.Time) {
+	s.LoadLast = load
+	if s.LoadLowest == 0 || load < s.LoadLowest {
+		s.LoadLowest = load
+	}
+	if load > s.LoadHighest {
+		s.LoadHighest = load
+	}
+	s.Samples++
+	if s.FirstSeenUnix == 0 {
+		s.FirstSeenUnix = at.Unix()
+	}
+	s.LastSeenUnix = at.Unix()
+}
+
+// observeRTT folds a latency measurement in. A zero is "not measured" rather than "very
+// fast", so it is ignored entirely.
+func (s *ServerStats) observeRTT(milliseconds uint16) {
+	if milliseconds == 0 {
+		return
+	}
+	s.RTTLastMS = milliseconds
+	if s.RTTLowestMS == 0 || milliseconds < s.RTTLowestMS {
+		s.RTTLowestMS = milliseconds
+	}
+	if milliseconds > s.RTTHighestMS {
+		s.RTTHighestMS = milliseconds
+	}
+}
+
+// measured reports whether anything at all has been observed about this server.
+func (s ServerStats) measured() bool {
+	return s.Samples > 0 || s.TransferReadings > 0 ||
+		s.DownloadedBytes > 0 || s.UploadedBytes > 0
 }
 
 // persistedState is what survives a restart.
@@ -96,22 +186,13 @@ type persistedState struct {
 	// noise.
 	GluetunHadServerData bool           `json:"gluetun_had_server_data,omitempty"`
 	History              []SwitchRecord `json:"history,omitempty"`
-	// Series is the load and latency history of individual servers, keyed by hostname.
+	// Stats is what has been observed about each server, keyed by hostname.
 	//
-	// Keyed by hostname rather than kept as one list with a hostname on each sample,
-	// which is what this replaced. That earlier shape could only ever describe the
-	// server the tunnel was on, and drawing it meant carefully taking the contiguous
-	// tail so a switch did not splice two servers into one line that showed a trend
-	// that never happened. Keyed per server, that problem cannot arise.
-	Series map[string][]Reading `json:"series,omitempty"`
-	// Throughput is what each server was observed to deliver, keyed by hostname.
-	//
-	// Utilisation and latency describe a server before it is used; this is the only
-	// record of what actually came out of it. Proton's load figure says how busy a
-	// server is, not how much bandwidth it will give you, and two servers with the
-	// same load routinely differ several-fold - so this is measured rather than
-	// predicted.
-	Throughput map[string]ThroughputRecord `json:"throughput,omitempty"`
+	// One record per server, fixed size. Load, latency and Proton's own score describe a
+	// server before it is used and are replaced wholesale on every refresh; these figures
+	// accumulate from observation and survive restarts, which makes them the only record
+	// of how a server has actually behaved.
+	Stats map[string]ServerStats `json:"stats,omitempty"`
 }
 
 // stateStore persists engine state atomically.
@@ -149,17 +230,42 @@ func (s *stateStore) snapshot() persistedState {
 	return s.state
 }
 
+// mutate applies a change in memory without writing the file.
+//
+// For changes that arrive far more often than they matter. The statistics are updated on
+// every qBittorrent poll - every fifteen seconds by default - and the state file is
+// rewritten in full, so persisting each one meant hundreds of kilobytes of writes a
+// minute, indefinitely, on hardware that may well be an SD card. The next update() from
+// any other path flushes it, and the loads refresh guarantees one every
+// PROTON_LOAD_REFRESH_INTERVAL.
+//
+// The cost is bounded and worth naming: an unclean shutdown loses whatever arrived since
+// the last write. For a peak rate and a byte count, that is the right trade.
+func (s *stateStore) mutate(change func(state *persistedState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	change(&s.state)
+	s.trim()
+}
+
+// trim enforces every cap. Called from both mutation paths, so a change that only lives in
+// memory for a while cannot grow past its bound in the meantime.
+//
+// The caller holds the lock.
+func (s *stateStore) trim() {
+	if len(s.state.History) > maxHistory {
+		s.state.History = s.state.History[len(s.state.History)-maxHistory:]
+	}
+	pruneStats(s.state.Stats)
+}
+
 // update applies mutate to the state and writes it out. The write error is
 // returned but callers generally only log it: losing history is not a reason to
 // stop managing the tunnel.
 func (s *stateStore) update(mutate func(state *persistedState)) (err error) {
 	s.mu.Lock()
 	mutate(&s.state)
-	if len(s.state.History) > maxHistory {
-		s.state.History = s.state.History[len(s.state.History)-maxHistory:]
-	}
-	pruneSeries(s.state.Series)
-	pruneThroughput(s.state.Throughput)
+	s.trim()
 	state := s.state
 	s.mu.Unlock()
 

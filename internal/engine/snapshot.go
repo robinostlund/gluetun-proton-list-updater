@@ -215,11 +215,6 @@ type SelectionStatus struct {
 	// moved on its own, or the tunnel was already up when this container started, the
 	// arrival time is genuinely unknown and a number would be a guess.
 	OnCurrentSince time.Time `json:"on_current_since,omitempty"`
-	// LoadTrace is the utilisation history for the current server, oldest first.
-	//
-	// Only the contiguous tail belonging to the current server: splicing two servers'
-	// figures into one line would show a trend that never happened.
-	LoadTrace []LoadPoint `json:"load_trace,omitempty"`
 	// Explanation is why the last evaluation did *not* switch, in the same words the
 	// decision was made in - "cooldown active for another 4m", "best server only
 	// 0.021 better than current, need 0.050".
@@ -321,12 +316,6 @@ type TransferStatus struct {
 	Version string `json:"version,omitempty"`
 }
 
-// LoadPoint is one point of the current server's utilisation trace.
-type LoadPoint struct {
-	At   time.Time `json:"at"`
-	Load uint8     `json:"load"`
-}
-
 // CandidateView is one ranked server, flattened for the UI.
 type CandidateView struct {
 	Rank       int    `json:"rank"`
@@ -376,29 +365,55 @@ type CandidateView struct {
 	// selectable, and BlockedBy names the Gluetun settings responsible.
 	Blocked   bool     `json:"blocked,omitempty"`
 	BlockedBy []string `json:"blocked_by,omitempty"`
-	// Throughput is what this server was measured to deliver the last time the tunnel
-	// was on it, or nil if it has never been measured. Present only when qBittorrent
-	// is configured, since it is the only source of rates.
-	Throughput *ThroughputView `json:"throughput,omitempty"`
+	// Stats is what has been observed about this server over time, or nil if nothing has
+	// been. Nil rather than a zeroed record, because "never measured" and "measured as
+	// zero" are different facts.
+	Stats *ServerStatsView `json:"stats,omitempty"`
 }
 
-// ThroughputView is the dashboard's view of one server's measured throughput.
+// ServerStatsView is the dashboard's view of what has been measured about one server.
 //
-// Rates in bytes per second. Both a peak and a sustained figure are reported because
-// they answer different questions: the peak is the best this server was ever seen to
-// do, the sustained figure is what it held for a whole averaging window and is the one
-// worth comparing between servers.
-type ThroughputView struct {
-	PeakDownload      uint64    `json:"peak_download,omitempty"`
-	PeakUpload        uint64    `json:"peak_upload,omitempty"`
-	SustainedDownload uint64    `json:"sustained_download,omitempty"`
-	SustainedUpload   uint64    `json:"sustained_upload,omitempty"`
-	Readings          int       `json:"readings"`
-	Visits            int       `json:"visits"`
-	StartedAt         time.Time `json:"started_at"`
-	LastReading       time.Time `json:"last_reading"`
-	// Current marks the measurement still in progress, so a figure that is still
-	// rising is not read as a final verdict on the server.
+// Reduced to extremes, totals and counts rather than a series of readings. Those answer
+// the questions a graph was being read for - is this server reliably quiet, has it ever
+// been slow, how much have I pulled through it - without a state file that grows with
+// every server and every hour.
+//
+// "Lowest" and "highest" rather than "best" and "worst": reading those requires knowing
+// which direction is good. For load and latency lowest is best, and the dashboard labels
+// them accordingly.
+type ServerStatsView struct {
+	// Load as Proton last reported it, and the extremes ever seen. 0-100.
+	LoadLast    uint8 `json:"load,omitempty"`
+	LoadLowest  uint8 `json:"load_lowest,omitempty"`
+	LoadHighest uint8 `json:"load_highest,omitempty"`
+	// Latency in whole milliseconds, and its extremes. Zero means never measured: the
+	// prober only covers LATENCY_TOP_N servers, so that is a normal state.
+	RTTLastMS    uint16 `json:"rtt_ms,omitempty"`
+	RTTLowestMS  uint16 `json:"rtt_lowest_ms,omitempty"`
+	RTTHighestMS uint16 `json:"rtt_highest_ms,omitempty"`
+	// TransferKnown says whether the four transfer figures below mean anything. Without
+	// the qBittorrent integration nothing measures throughput at all, and a zero would
+	// otherwise read as "this server carried nothing".
+	TransferKnown bool `json:"transfer_known,omitempty"`
+	// DownloadedBytes and UploadedBytes are every byte ever moved through this server.
+	// Never reset by a reconnect or a return visit.
+	DownloadedBytes uint64 `json:"downloaded,omitempty"`
+	UploadedBytes   uint64 `json:"uploaded,omitempty"`
+	// MaxDownloadRate and MaxUploadRate are the fastest it was ever seen to go, in bytes
+	// per second.
+	MaxDownloadRate uint64    `json:"max_download,omitempty"`
+	MaxUploadRate   uint64    `json:"max_upload,omitempty"`
+	LastTransferAt  time.Time `json:"last_transfer_at,omitzero"`
+	// Samples counts load and latency observations; TransferReadings counts qBittorrent
+	// polls attributed to this server. Two counters, because they come from different
+	// sources on different cycles and one number would misrepresent both.
+	Samples          int       `json:"samples,omitempty"`
+	TransferReadings int       `json:"transfer_readings,omitempty"`
+	Visits           int       `json:"visits,omitempty"`
+	FirstSeen        time.Time `json:"first_seen,omitzero"`
+	LastSeen         time.Time `json:"last_seen,omitzero"`
+	// Current marks the server being measured right now, so a figure that is still
+	// moving is not read as a final verdict.
 	Current bool `json:"current,omitempty"`
 }
 

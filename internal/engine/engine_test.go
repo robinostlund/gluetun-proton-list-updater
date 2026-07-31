@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -23,6 +22,7 @@ import (
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/config"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/gluetunapi"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/proton"
+	"github.com/robinostlund/gluetun-proton-list-updater/internal/qbittorrent"
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/scoring"
 )
 
@@ -3161,103 +3161,6 @@ func TestTheUpdaterIsNotTriggeredByAWrite(t *testing.T) {
 	}
 }
 
-// A trace must never contain another server's figures. A switch from a busy server to a
-// quiet one drawn as one line would look like the busy server recovering - the opposite
-// of what happened, presented as a trend.
-//
-// The history used to be one list with a hostname on each sample, where this was avoided
-// by carefully taking the contiguous tail. Keyed per server it cannot arise, and this
-// test now pins that: a series populated for two servers yields each one's own readings.
-func TestTheLoadTraceOnlyContainsOneServersReadings(t *testing.T) {
-	harness := newHarness(t, false, nil)
-	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
-	engine := harness.engine
-
-	now := time.Now().Unix()
-	if err := engine.state.update(func(state *persistedState) {
-		state.Series = map[string][]Reading{
-			"old.protonvpn.net": {
-				{At: now - 3000, Load: 90}, {At: now - 2400, Load: 88},
-			},
-			"new.protonvpn.net": {
-				{At: now - 1800, Load: 10}, {At: now - 1200, Load: 12},
-				{At: now - 600, Load: 11},
-			},
-		}
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	trace := engine.loadTrace("new.protonvpn.net")
-	if len(trace) != 3 {
-		t.Fatalf("trace has %d points, want this server's 3", len(trace))
-	}
-	for _, point := range trace {
-		if point.Load > 20 {
-			t.Errorf("trace contains %d%%, which belongs to the other server", point.Load)
-		}
-	}
-
-	// A server with no samples of its own gets no trace rather than someone else's.
-	if got := engine.loadTrace("unrelated.protonvpn.net"); got != nil {
-		t.Errorf("trace for an unseen server = %v, want none", got)
-	}
-	if got := engine.loadTrace(""); got != nil {
-		t.Errorf("trace for an unknown hostname = %v, want none", got)
-	}
-}
-
-// The state file is rewritten in full several times an hour, so the history is bounded
-// in *both* dimensions: how long one server's series may get, and how many servers may
-// have one at all. Either left unbounded grows the file and the cost of every write.
-func TestTheHistoryIsBoundedInBothDimensions(t *testing.T) {
-	harness := newHarness(t, false, nil)
-	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
-	engine := harness.engine
-
-	hostname, _ := engine.currentHostname()
-	if hostname == "" {
-		t.Skip("no current server identified in this harness run")
-	}
-
-	now := time.Now().Unix()
-	// Well past both caps, to prove each trim.
-	if err := engine.state.update(func(state *persistedState) {
-		state.Series = make(map[string][]Reading)
-		for i := range maxSeriesReadings + 40 {
-			state.Series[hostname] = append(state.Series[hostname], Reading{
-				At: now - int64(maxSeriesReadings+40-i)*60, Load: uint8(i % 100),
-			})
-		}
-		for i := range maxSeriesServers + 12 {
-			host := fmt.Sprintf("filler-%03d.protonvpn.net", i)
-			// Later fillers are more recent, so the earliest are evicted first.
-			state.Series[host] = []Reading{{At: now - int64(1000-i), Load: 50}}
-		}
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	series := engine.state.snapshot().Series
-	if got := len(series); got != maxSeriesServers {
-		t.Errorf("kept series for %d servers, want the cap of %d", got, maxSeriesServers)
-	}
-	if got := len(series[hostname]); got > maxSeriesReadings {
-		t.Errorf("kept %d readings for one server, want at most %d", got, maxSeriesReadings)
-	}
-	// The most recently sampled filler must have survived, the earliest must not.
-	if _, found := series["filler-000.protonvpn.net"]; found {
-		t.Error("the least recently sampled server should have been evicted first")
-	}
-
-	// And a refresh appends rather than replacing.
-	before := len(engine.loadTrace(hostname))
-	engine.recordReadings()
-	if after := len(engine.loadTrace(hostname)); after < before {
-		t.Errorf("trace shrank from %d to %d on a new reading", before, after)
-	}
-}
-
 // "On this server" is only knowable when this tool made the switch. Reporting the last
 // switch time regardless would attribute someone else's reconnect to us.
 func TestOnCurrentSinceIsOnlyKnownWhenWePinnedTheServer(t *testing.T) {
@@ -3282,56 +3185,6 @@ func TestOnCurrentSinceIsOnlyKnownWhenWePinnedTheServer(t *testing.T) {
 	}
 	if got := engine.onCurrentSince(""); !got.IsZero() {
 		t.Errorf("onCurrentSince = %v for an unknown server, want zero", got)
-	}
-}
-
-// The trace is persisted, because its whole value is showing a trend and a trace that
-// restarted empty on every container restart would rarely be long enough to show one.
-func TestTheLoadTraceSurvivesARestart(t *testing.T) {
-	t.Parallel()
-
-	directory := t.TempDir()
-	hostname := "node-se-20.protonvpn.net"
-	now := time.Now()
-
-	// First run: record a few samples through the real store, which writes to disk.
-	first := newStateStore(directory)
-	if err := first.load(); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.update(func(state *persistedState) {
-		state.PinnedHostname = hostname
-		state.LastSwitchAt = now.Add(-2 * time.Hour)
-		state.Series = map[string][]Reading{}
-		for i := range 5 {
-			state.Series[hostname] = append(state.Series[hostname], Reading{
-				At:   now.Add(time.Duration(i-5) * time.Minute).Unix(),
-				Load: uint8(20 + i), RTTMS: uint16(30 + i),
-			})
-		}
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Second run: a fresh store over the same directory, as a restart would be.
-	second := newStateStore(directory)
-	if err := second.load(); err != nil {
-		t.Fatal(err)
-	}
-	restored := second.snapshot()
-	if got := len(restored.Series[hostname]); got != 5 {
-		t.Fatalf("restored %d readings, want 5", got)
-	}
-	if got := restored.Series[hostname][4].Load; got != 24 {
-		t.Errorf("last load = %d, want 24", got)
-	}
-	// Latency has to survive too, or the graph loses half its content on a restart.
-	if got := restored.Series[hostname][4].RTTMS; got != 34 {
-		t.Errorf("last rtt = %d ms, want 34", got)
-	}
-	if !restored.LastSwitchAt.Equal(now.Add(-2*time.Hour).Truncate(0)) &&
-		restored.LastSwitchAt.Sub(now.Add(-2*time.Hour)).Abs() > time.Second {
-		t.Errorf("LastSwitchAt = %v, want it preserved", restored.LastSwitchAt)
 	}
 }
 
@@ -3527,29 +3380,29 @@ func TestThroughputIsRecordedPerServer(t *testing.T) {
 	engine := harness.engine
 
 	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
-	engine.recordThroughput(5<<20, 1<<20)
-	engine.recordThroughput(9<<20, 512<<10) // a higher peak down, a lower peak up
-	engine.recordThroughput(2<<20, 3<<20)   // and a higher peak up
+	engine.recordTransfer(transferOf(5<<20, 1<<20))
+	engine.recordTransfer(transferOf(9<<20, 512<<10)) // a higher peak down, a lower peak up
+	engine.recordTransfer(transferOf(2<<20, 3<<20))   // and a higher peak up
 
 	pinCurrent(t, engine, "se-02.protonvpn.net", time.Hour)
-	engine.recordThroughput(1<<20, 1<<10)
+	engine.recordTransfer(transferOf(1<<20, 1<<10))
 
-	records := engine.state.snapshot().Throughput
+	records := engine.state.snapshot().Stats
 	first, second := records["se-01.protonvpn.net"], records["se-02.protonvpn.net"]
 
 	// The peak in each direction, tracked independently: a server can be fast one way
 	// and slow the other, which is the difference worth seeing.
-	if first.PeakDownload != 9<<20 {
-		t.Errorf("peak download = %d, want %d", first.PeakDownload, uint64(9<<20))
+	if first.MaxDownloadRate != 9<<20 {
+		t.Errorf("peak download = %d, want %d", first.MaxDownloadRate, uint64(9<<20))
 	}
-	if first.PeakUpload != 3<<20 {
-		t.Errorf("peak upload = %d, want %d", first.PeakUpload, uint64(3<<20))
+	if first.MaxUploadRate != 3<<20 {
+		t.Errorf("peak upload = %d, want %d", first.MaxUploadRate, uint64(3<<20))
 	}
-	if first.Readings != 3 {
-		t.Errorf("readings = %d, want 3", first.Readings)
+	if first.TransferReadings != 3 {
+		t.Errorf("readings = %d, want 3", first.TransferReadings)
 	}
 	// And the second server's slower reading must not have touched the first's figures.
-	if second.PeakDownload != 1<<20 || second.PeakUpload != 1<<10 {
+	if second.MaxDownloadRate != 1<<20 || second.MaxUploadRate != 1<<10 {
 		t.Errorf("the second server's record is wrong: %+v", second)
 	}
 }
@@ -3563,9 +3416,9 @@ func TestThroughputIsNotAttributedToTheWrongServer(t *testing.T) {
 		engine := harness.engine
 		pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
 
-		engine.recordThroughput(0, 0)
+		engine.recordTransfer(transferOf(0, 0))
 
-		if record, found := engine.state.snapshot().Throughput["se-01.protonvpn.net"]; found {
+		if record, found := engine.state.snapshot().Stats["se-01.protonvpn.net"]; found {
 			t.Errorf("an idle poll created a record: %+v", record)
 		}
 	})
@@ -3576,9 +3429,9 @@ func TestThroughputIsNotAttributedToTheWrongServer(t *testing.T) {
 		pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
 		engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Gluetun.Status = "crashed" })
 
-		engine.recordThroughput(8<<20, 0)
+		engine.recordTransfer(transferOf(8<<20, 0))
 
-		if _, found := engine.state.snapshot().Throughput["se-01.protonvpn.net"]; found {
+		if _, found := engine.state.snapshot().Stats["se-01.protonvpn.net"]; found {
 			t.Error("a reading was credited to a server while the tunnel was down")
 		}
 	})
@@ -3589,9 +3442,9 @@ func TestThroughputIsNotAttributedToTheWrongServer(t *testing.T) {
 		// Arrived just now: this reading covers the interval before the switch.
 		pinCurrent(t, engine, "se-02.protonvpn.net", 0)
 
-		engine.recordThroughput(8<<20, 0)
+		engine.recordTransfer(transferOf(8<<20, 0))
 
-		if _, found := engine.state.snapshot().Throughput["se-02.protonvpn.net"]; found {
+		if _, found := engine.state.snapshot().Stats["se-02.protonvpn.net"]; found {
 			t.Error("a reading spanning the switch was credited to the new server")
 		}
 	})
@@ -3600,120 +3453,13 @@ func TestThroughputIsNotAttributedToTheWrongServer(t *testing.T) {
 		harness, _ := throughputHarness(t, 0)
 		engine := harness.engine
 
-		engine.recordThroughput(8<<20, 1<<20)
+		engine.recordTransfer(transferOf(8<<20, 1<<20))
 
-		if len(engine.state.snapshot().Throughput) != 0 {
+		if len(engine.state.snapshot().Stats) != 0 {
 			t.Errorf("records were created with no current server: %+v",
-				engine.state.snapshot().Throughput)
+				engine.state.snapshot().Stats)
 		}
 	})
-}
-
-// The sustained figure is the one worth comparing between servers, so it must not be
-// contaminated by the previous server's rates still sitting in the averaging window.
-func TestTheSustainedFigureWaitsForAFullWindowOnOneServer(t *testing.T) {
-	harness, _ := throughputHarness(t, 5*time.Minute)
-	engine := harness.engine
-	pinCurrent(t, engine, "se-01.protonvpn.net", 2*time.Minute) // less than the window
-
-	// A sample older than the arrival: part of the average was earned elsewhere.
-	engine.transferSamples = []transferSample{
-		{at: time.Now().Add(-4 * time.Minute), download: 20 << 20},
-		{at: time.Now(), download: 4 << 20},
-	}
-	engine.recordThroughput(4<<20, 0)
-
-	record := engine.state.snapshot().Throughput["se-01.protonvpn.net"]
-	if record.PeakDownload != 4<<20 {
-		t.Errorf("the peak should still be recorded: %+v", record)
-	}
-	if record.SustainedDownload != 0 {
-		t.Errorf("sustained download = %d, want 0 until the window is entirely on this server",
-			record.SustainedDownload)
-	}
-
-	// Once every sample postdates the arrival, the average is this server's.
-	pinCurrent(t, engine, "se-01.protonvpn.net", 10*time.Minute)
-	engine.transferSamples = []transferSample{
-		{at: time.Now().Add(-time.Minute), download: 6 << 20},
-		{at: time.Now(), download: 4 << 20},
-	}
-	engine.recordThroughput(4<<20, 0)
-
-	record = engine.state.snapshot().Throughput["se-01.protonvpn.net"]
-	if record.SustainedDownload != 5<<20 {
-		t.Errorf("sustained download = %d, want the windowed average %d",
-			record.SustainedDownload, uint64(5<<20))
-	}
-}
-
-// "What did this server give me last time I used it" - so returning to a server starts
-// a fresh measurement rather than carrying a figure from an earlier, unrelated swarm.
-func TestReturningToAServerStartsAFreshMeasurement(t *testing.T) {
-	harness, _ := throughputHarness(t, 0)
-	engine := harness.engine
-
-	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
-	engine.recordThroughput(50<<20, 0) // a fast stay
-	pinCurrent(t, engine, "se-02.protonvpn.net", time.Hour)
-	engine.recordThroughput(1<<20, 0)
-	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
-	engine.recordThroughput(3<<20, 0) // back again, and slower this time
-
-	record := engine.state.snapshot().Throughput["se-01.protonvpn.net"]
-	if record.PeakDownload != 3<<20 {
-		t.Errorf("peak download = %d, want the current stay's %d, not the earlier stay's",
-			record.PeakDownload, uint64(3<<20))
-	}
-	if record.Visits != 2 {
-		t.Errorf("visits = %d, want 2", record.Visits)
-	}
-	if record.Readings != 1 {
-		t.Errorf("readings = %d, want the new stay's count", record.Readings)
-	}
-}
-
-// A restart is not a new stay. The tunnel is usually still on the server this tool left
-// it on, and discarding that server's figures because the process bounced would throw
-// away the measurement being taken.
-func TestARestartContinuesTheStayItWasMeasuring(t *testing.T) {
-	harness, _ := throughputHarness(t, 0)
-	engine := harness.engine
-	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
-	engine.recordThroughput(40<<20, 2<<20)
-
-	// A fresh engine over the same state directory, as after a container restart: the
-	// in-memory attribution host is empty but the record on disk is recent.
-	engine.throughputHost = ""
-	engine.recordThroughput(1<<20, 0)
-
-	record := engine.state.snapshot().Throughput["se-01.protonvpn.net"]
-	if record.PeakDownload != 40<<20 {
-		t.Errorf("peak download = %d, want the pre-restart %d kept",
-			record.PeakDownload, uint64(40<<20))
-	}
-	if record.Visits != 1 {
-		t.Errorf("visits = %d, want 1: a restart is not a new visit", record.Visits)
-	}
-
-	// But a long gap is: too much happened unobserved to keep calling it one stay.
-	engine.throughputHost = ""
-	if err := engine.state.update(func(state *persistedState) {
-		record := state.Throughput["se-01.protonvpn.net"]
-		record.LastReading = time.Now().Add(-stayGap - time.Minute)
-		state.Throughput["se-01.protonvpn.net"] = record
-	}); err != nil {
-		t.Fatal(err)
-	}
-	engine.recordThroughput(1<<20, 0)
-
-	record = engine.state.snapshot().Throughput["se-01.protonvpn.net"]
-	if record.PeakDownload != 1<<20 {
-		t.Errorf("peak download = %d, want a fresh stay after a long gap", record.PeakDownload)
-	}
-	if record.Visits != 2 {
-		t.Errorf("visits = %d, want 2 after a gap too long to bridge", record.Visits)
-	}
 }
 
 // An unmeasured server must read as unmeasured, not as a slow one. This is the
@@ -3725,19 +3471,19 @@ func TestAnUnmeasuredServerHasNoThroughputView(t *testing.T) {
 	// A real candidate from the fixture, so the published list can be checked too.
 	const hostname = "node-se-p2p.protonvpn.net"
 
-	if view := engine.throughputFor(hostname); view != nil {
+	if view := engine.statsFor(hostname); view != nil {
 		t.Errorf("an unused server has a view: %+v", view)
 	}
 
 	pinCurrent(t, engine, hostname, time.Hour)
-	engine.recordThroughput(7<<20, 1<<20)
+	engine.recordTransfer(transferOf(7<<20, 1<<20))
 	engine.publish()
 
-	view := engine.throughputFor(hostname)
+	view := engine.statsFor(hostname)
 	if view == nil {
 		t.Fatal("a measured server should have a view")
 	}
-	if view.PeakDownload != 7<<20 || !view.Current {
+	if view.MaxDownloadRate != 7<<20 || !view.Current {
 		t.Errorf("view = %+v, want the peak and Current set while it is being measured", view)
 	}
 
@@ -3745,7 +3491,7 @@ func TestAnUnmeasuredServerHasNoThroughputView(t *testing.T) {
 	var found bool
 	for _, candidate := range engine.Snapshot().Candidates {
 		if candidate.Hostname == hostname {
-			found = candidate.Throughput != nil && candidate.Throughput.PeakDownload == 7<<20
+			found = candidate.Stats != nil && candidate.Stats.MaxDownloadRate == 7<<20
 		}
 	}
 	if !found {
@@ -3753,49 +3499,69 @@ func TestAnUnmeasuredServerHasNoThroughputView(t *testing.T) {
 	}
 	// The current server's own column reads from the same place.
 	if current := engine.Snapshot().Selection.Current; current == nil ||
-		current.Throughput == nil || current.Throughput.PeakDownload != 7<<20 {
+		current.Stats == nil || current.Stats.MaxDownloadRate != 7<<20 {
 		t.Errorf("the current server's throughput is missing: %+v", current)
 	}
 }
 
-// Without qBittorrent there are no rates at all, so no view may be invented.
-func TestThroughputIsAbsentWithoutQBittorrent(t *testing.T) {
+// Without qBittorrent nothing measures throughput, so those figures must be marked
+// unknown rather than reported as zero - a zero says this server carried nothing, which is
+// a claim about the server rather than an admission about us.
+//
+// Load and latency are unaffected: they come from Proton and the prober, and are worth
+// having whether or not a torrent client is involved.
+func TestTransferFiguresAreUnknownWithoutQBittorrent(t *testing.T) {
 	harness := newHarness(t, false, nil)
 	engine := harness.engine
 	if err := engine.state.update(func(state *persistedState) {
-		state.Throughput = map[string]ThroughputRecord{
-			"se-01.protonvpn.net": {PeakDownload: 1 << 20, Readings: 4},
+		state.Stats = map[string]ServerStats{
+			"se-01.protonvpn.net": {
+				// Figures a previous run with qBittorrent configured could have left
+				// behind, which must not be presented as current.
+				MaxDownloadRate: 1 << 20, DownloadedBytes: 9 << 30, TransferReadings: 4,
+				LoadLast: 30, LoadLowest: 8, LoadHighest: 74, Samples: 12,
+			},
 		}
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if view := engine.throughputFor("se-01.protonvpn.net"); view != nil {
-		t.Errorf("a view was built with no qBittorrent configured: %+v", view)
+	view := engine.statsFor("se-01.protonvpn.net")
+	if view == nil {
+		t.Fatal("load and latency statistics should be reported without qBittorrent")
+	}
+	if view.TransferKnown {
+		t.Error("TransferKnown is set with no qBittorrent configured")
+	}
+	if view.DownloadedBytes != 0 || view.MaxDownloadRate != 0 {
+		t.Errorf("stale transfer figures were published: %+v", view)
+	}
+	if view.LoadLowest != 8 || view.LoadHighest != 74 {
+		t.Errorf("load statistics were lost: %+v", view)
 	}
 }
 
 // The state file is rewritten in full on every update, so an unbounded map would grow
 // the write with every server the tunnel ever touches.
 func TestThroughputRecordsAreBounded(t *testing.T) {
-	records := make(map[string]ThroughputRecord, maxThroughputRecords+50)
-	for i := range maxThroughputRecords + 50 {
-		records[fmt.Sprintf("host-%03d", i)] = ThroughputRecord{
+	records := make(map[string]ServerStats, maxServerStats+50)
+	for i := range maxServerStats + 50 {
+		records[fmt.Sprintf("host-%03d", i)] = ServerStats{
 			// Later hosts are more recent, so the early ones are the ones dropped.
-			LastReading:  time.Now().Add(time.Duration(i) * time.Second),
-			PeakDownload: 1 << 20, Readings: 1,
+			LastSeenUnix:    time.Now().Add(time.Duration(i) * time.Second).Unix(),
+			MaxDownloadRate: 1 << 20, TransferReadings: 1,
 		}
 	}
 
-	pruneThroughput(records)
+	pruneStats(records)
 
-	if len(records) != maxThroughputRecords {
-		t.Errorf("kept %d records, want %d", len(records), maxThroughputRecords)
+	if len(records) != maxServerStats {
+		t.Errorf("kept %d records, want %d", len(records), maxServerStats)
 	}
 	if _, found := records["host-000"]; found {
 		t.Error("the least recently measured record should have been dropped first")
 	}
-	if _, found := records[fmt.Sprintf("host-%03d", maxThroughputRecords+49)]; !found {
+	if _, found := records[fmt.Sprintf("host-%03d", maxServerStats+49)]; !found {
 		t.Error("the most recent record must be kept")
 	}
 }
@@ -3804,13 +3570,13 @@ func TestThroughputRecordsAreBounded(t *testing.T) {
 func seedThroughput(t *testing.T, engine *Engine, hostnames ...string) {
 	t.Helper()
 	if err := engine.state.update(func(state *persistedState) {
-		if state.Throughput == nil {
-			state.Throughput = make(map[string]ThroughputRecord)
+		if state.Stats == nil {
+			state.Stats = make(map[string]ServerStats)
 		}
 		for _, hostname := range hostnames {
-			state.Throughput[hostname] = ThroughputRecord{
-				PeakDownload: 8 << 20, Readings: 12, Visits: 1,
-				StartedAt: time.Now().Add(-time.Hour), LastReading: time.Now(),
+			state.Stats[hostname] = ServerStats{
+				MaxDownloadRate: 8 << 20, TransferReadings: 12, Visits: 1,
+				FirstSeenUnix: time.Now().Add(-time.Hour).Unix(), LastSeenUnix: time.Now().Unix(),
 			}
 		}
 	}); err != nil {
@@ -3820,7 +3586,7 @@ func seedThroughput(t *testing.T, engine *Engine, hostnames ...string) {
 
 func throughputHosts(engine *Engine) []string {
 	var hosts []string
-	for hostname := range engine.state.snapshot().Throughput {
+	for hostname := range engine.state.snapshot().Stats {
 		hosts = append(hosts, hostname)
 	}
 	slices.Sort(hosts)
@@ -3913,140 +3679,30 @@ func TestThroughputIsKeptWhenProtonsListIsNotEvidenceOfRetirement(t *testing.T) 
 	})
 }
 
-// History is kept for the servers worth spending state-file space on, and pointedly not
-// for the hundreds that will never be chosen.
-func TestHistoryIsSampledForTheServersWorthKeeping(t *testing.T) {
-	harness, _ := throughputHarness(t, 0)
-	engine := harness.engine
-	engine.applyLogicals(manyLogicals(t, 30), false)
-
-	// A server that has been measured for throughput but is nowhere near the top, so it
-	// can only be in the target set because its records are kept together.
-	const used = "node-se-29.protonvpn.net"
-	seedThroughput(t, engine, used)
-
-	targets := engine.seriesTargets()
-	if len(targets) == 0 {
-		t.Fatal("no targets at all")
-	}
-	if !slices.Contains(targets, engine.ranked[0].Candidate.Hostname) {
-		t.Error("the best candidate is not sampled, so its trend cannot be compared")
-	}
-	if !slices.Contains(targets, used) {
-		t.Error("a server measured for throughput is not sampled, so its records would diverge")
-	}
-	// And not everything: the whole point of a target set is that it is small.
-	if len(targets) > 24 {
-		t.Errorf("sampling %d servers; the cap exists to keep the state file small", len(targets))
-	}
-
-	engine.recordReadings()
-
-	series := engine.state.snapshot().Series
-	if len(series) == 0 {
-		t.Fatal("nothing was recorded")
-	}
-	for hostname := range series {
-		if !slices.Contains(targets, hostname) {
-			t.Errorf("recorded a series for %q, which is not a target", hostname)
-		}
-	}
-}
-
-// A reading with no latency is a gap in the graph, not a fast server. The two have to be
-// distinguishable in the stored form as well as in the view.
-func TestAReadingWithoutLatencyIsMarkedUnknown(t *testing.T) {
-	harness, _ := throughputHarness(t, 0)
-	engine := harness.engine
-	engine.applyLogicals(mixedP2PLogicals(), false)
-	engine.recordReadings()
-
-	hostname := engine.ranked[0].Candidate.Hostname
-	history := engine.ServerHistory(hostname)
-	if len(history.Readings) == 0 {
-		t.Fatal("no readings recorded")
-	}
-	// The harness never probes, so nothing should claim a measurement.
-	for _, reading := range history.Readings {
-		if reading.RTTKnown || reading.RTTMS != 0 {
-			t.Errorf("reading claims latency %d ms that was never measured", reading.RTTMS)
-		}
-	}
-
-	// With a measurement recorded, the same reading reports it.
-	engine.prober.Record(engine.ranked[0].Candidate.EntryIP, 42*time.Millisecond)
-	if err := engine.state.update(func(state *persistedState) {
-		state.Series = nil // force a fresh reading rather than replacing the last one
-	}); err != nil {
-		t.Fatal(err)
-	}
-	engine.recordReadings()
-
-	history = engine.ServerHistory(hostname)
-	last := history.Readings[len(history.Readings)-1]
-	if !last.RTTKnown || last.RTTMS != 42 {
-		t.Errorf("reading = %+v, want 42 ms marked known", last)
-	}
-	// And the graph has to be able to label itself.
-	if history.Capacity != maxSeriesReadings || history.Interval == "" {
-		t.Errorf("history cannot label its own axes: %+v", history)
-	}
-}
-
-// A round trip that does not fit in the compact stored form must saturate rather than
-// wrap: a 70-second RTT wrapped into a uint16 would look like a fast server.
-func TestAnEnormousRoundTripSaturatesRatherThanWrapping(t *testing.T) {
-	harness, _ := throughputHarness(t, 0)
-	engine := harness.engine
-	engine.applyLogicals(mixedP2PLogicals(), false)
-
-	candidate := engine.ranked[0].Candidate
-	engine.prober.Record(candidate.EntryIP, 70*time.Second)
-	engine.recordReadings()
-
-	readings := engine.state.snapshot().Series[candidate.Hostname]
-	if len(readings) == 0 {
-		t.Fatal("nothing recorded")
-	}
-	if got := readings[len(readings)-1].RTTMS; got != math.MaxUint16 {
-		t.Errorf("rtt = %d ms, want it saturated at %d rather than wrapped to a small number",
-			got, math.MaxUint16)
-	}
-}
-
 // The state file is rewritten in full on every update, several times an hour, so its size
 // at full capacity is a budget rather than an afterthought. This measures it instead of
 // trusting the arithmetic in the comments.
 //
 // The limit is generous against the measured figure on purpose: it is here to catch a
-// change that multiplies the cost - a wider cap, a readable timestamp on Reading, a new
-// per-reading field - not to police a few hundred bytes.
+// change that multiplies the cost - a wider cap, a per-server series, a new field on every
+// record - not to police a few hundred bytes.
 func TestTheStateFileStaysSmallAtFullCapacity(t *testing.T) {
 	t.Parallel()
 
-	state := persistedState{
-		Series:     map[string][]Reading{},
-		Throughput: map[string]ThroughputRecord{},
-	}
-	now := time.Now().Unix()
-	for server := range maxSeriesServers {
-		hostname := fmt.Sprintf("node-country-%03d.protonvpn.net", server)
-		for reading := range maxSeriesReadings {
-			// Worst-case values: every field at its widest.
-			state.Series[hostname] = append(state.Series[hostname], Reading{
-				At: now + int64(reading)*900, Load: 100, RTTMS: 65535,
-			})
+	state := persistedState{Stats: map[string]ServerStats{}}
+	for server := range maxServerStats {
+		// Worst-case values: every field at its widest.
+		state.Stats[fmt.Sprintf("node-country-%03d.protonvpn.net", server)] = ServerStats{
+			FirstSeenUnix: time.Now().Unix(), LastSeenUnix: time.Now().Unix(),
+			LastTransferUnix: time.Now().Unix(),
+			MaxDownloadRate:  1234567890, MaxUploadRate: 123456789,
+			DownloadedBytes: 123456789012345, UploadedBytes: 12345678901234,
+			LoadLast: 100, LoadLowest: 1, LoadHighest: 100,
+			RTTLastMS: 65535, RTTLowestMS: 1, RTTHighestMS: 65535,
+			Samples: 999999, TransferReadings: 999999, Visits: 999,
 		}
 	}
-	for server := range maxThroughputRecords {
-		state.Throughput[fmt.Sprintf("throughput-%03d.protonvpn.net", server)] = ThroughputRecord{
-			StartedAt: time.Now(), LastReading: time.Now(),
-			PeakDownload: 1234567890, PeakUpload: 123456789,
-			SustainedDownload: 1234567890, SustainedUpload: 123456789,
-			Readings: 999999, Visits: 999,
-		}
-	}
-	// Plus the other bounded lists, so this is the whole file and not just the new part.
+	// Plus every other bounded list, so this is the whole file and not just the new part.
 	for i := range maxHistory {
 		state.History = append(state.History, SwitchRecord{
 			At: time.Now(), From: "node-country-001.protonvpn.net",
@@ -4061,10 +3717,304 @@ func TestTheStateFileStaysSmallAtFullCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const limit = 192 << 10
+	// 320 KB, which at four writes an hour is about 1.25 MB an hour, or 30 MB a day. That
+	// is the figure that matters rather than the file size alone: before a qBittorrent poll
+	// stopped writing the file, a fraction of this data cost roughly a gigabyte a day.
+	//
+	// This is the absolute worst case - the cap saturated with 600 servers, every field at
+	// its widest, and every other bounded list full. The realistic figure is measured
+	// below.
+	const limit = 320 << 10
 	t.Logf("state.json at full capacity: %d bytes (%.1f KB)", len(encoded), float64(len(encoded))/1024)
 	if len(encoded) > limit {
 		t.Errorf("state.json would be %d bytes at capacity, over the %d byte budget; "+
 			"it is rewritten in full several times an hour", len(encoded), limit)
+	}
+
+	// And the size a real deployment sees: a filtered candidate set of a few hundred
+	// servers with ordinary values, where omitempty drops most of the zero fields. This is
+	// the number worth quoting, and it is measured rather than estimated.
+	realistic := persistedState{Stats: map[string]ServerStats{}}
+	for server := range 300 {
+		stats := ServerStats{
+			LoadLast: 34, LoadLowest: 11, LoadHighest: 78,
+			RTTLastMS: 31, RTTLowestMS: 24, RTTHighestMS: 96,
+			Samples: 1440, FirstSeenUnix: 1785000000, LastSeenUnix: 1785900000,
+		}
+		// Only a handful of servers have ever carried traffic.
+		if server < 20 {
+			stats.DownloadedBytes = 412 << 30
+			stats.UploadedBytes = 38 << 30
+			stats.MaxDownloadRate = 11 << 20
+			stats.MaxUploadRate = 2 << 20
+			stats.TransferReadings = 5100
+			stats.Visits = 6
+			stats.LastTransferUnix = 1785899000
+		}
+		realistic.Stats[fmt.Sprintf("node-se-%03d.protonvpn.net", server)] = stats
+	}
+	realisticEncoded, err := json.Marshal(realistic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("state.json for 300 candidates, 20 of them used: %d bytes (%.1f KB)",
+		len(realisticEncoded), float64(len(realisticEncoded))/1024)
+}
+
+// A qBittorrent poll must not rewrite the state file. It runs every fifteen seconds, the
+// file is written in full, and the peak it updates rarely changes - so persisting each
+// one was a few hundred kilobytes a minute of writes for nothing, indefinitely, on
+// hardware that may be an SD card.
+func TestAThroughputPollDoesNotRewriteTheStateFile(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+
+	// Settle any writes the startup path had queued.
+	if err := engine.state.update(func(*persistedState) {}); err != nil {
+		t.Fatal(err)
+	}
+	path := engine.state.path
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 20 {
+		engine.recordTransfer(transferOf(uint64(i+1)<<20, 1<<20))
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+		t.Error("a throughput poll wrote the state file; it should only mutate memory")
+	}
+
+	// But the reading is not lost: it is in memory, and the next real update flushes it.
+	if got := engine.state.snapshot().Stats["se-01.protonvpn.net"].MaxDownloadRate; got != 20<<20 {
+		t.Errorf("in-memory peak = %d, want %d", got, uint64(20<<20))
+	}
+	if err := engine.state.update(func(*persistedState) {}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := newStateStore(filepath.Dir(path))
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.snapshot().Stats["se-01.protonvpn.net"].MaxDownloadRate; got != 20<<20 {
+		t.Errorf("peak after the flush = %d, want it persisted", got)
+	}
+}
+
+// transferOf builds a reading with the given rates. Session counters advance with the
+// rates so a test that does not care about volumes still produces coherent deltas.
+func transferOf(download, upload uint64) qbittorrent.Transfer {
+	transferCounter.down += download
+	transferCounter.up += upload
+	return qbittorrent.Transfer{
+		DownloadSpeed: download, UploadSpeed: upload,
+		DownloadTotal: transferCounter.down, UploadTotal: transferCounter.up,
+		ConnectionStatus: "connected",
+	}
+}
+
+// transferCounter is the monotonic session total transferOf hands out. Package level
+// because qBittorrent's counters are per instance, not per test, and every test in this
+// package shares one fake.
+var transferCounter struct{ down, up uint64 }
+
+// transferAt builds a reading with explicit session counters, for the delta rules where
+// the counter values are the whole point.
+func transferAt(speedDown, speedUp, totalDown, totalUp uint64) qbittorrent.Transfer {
+	return qbittorrent.Transfer{
+		DownloadSpeed: speedDown, UploadSpeed: speedUp,
+		DownloadTotal: totalDown, UploadTotal: totalUp,
+		ConnectionStatus: "connected",
+	}
+}
+
+// Volume is what accumulates into "how much have I pulled through this server", and it is
+// derived by difference from qBittorrent's session counters. Every way that difference can
+// be meaningless has to yield nothing rather than a wrong number, because these totals are
+// kept indefinitely - a bad one never washes out.
+func TestTransferredBytesAreAttributedByDifference(t *testing.T) {
+	t.Run("the first reading establishes a baseline and credits nothing", func(t *testing.T) {
+		harness, _ := throughputHarness(t, 0)
+		engine := harness.engine
+		pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+
+		// A session that has already moved 50 GB before this tool ever looked. None of it
+		// is ours to attribute.
+		engine.recordTransfer(transferAt(1<<20, 0, 50<<30, 5<<30))
+
+		if got := engine.state.snapshot().Stats["se-01.protonvpn.net"].DownloadedBytes; got != 0 {
+			t.Errorf("credited %d bytes from the first reading, want 0", got)
+		}
+
+		// The second reading credits only the difference.
+		engine.recordTransfer(transferAt(1<<20, 0, 51<<30, 5<<30))
+
+		if got := engine.state.snapshot().Stats["se-01.protonvpn.net"].DownloadedBytes; got != 1<<30 {
+			t.Errorf("credited %d bytes, want the 1 GiB difference", got)
+		}
+	})
+
+	t.Run("a qbittorrent restart is not a negative transfer", func(t *testing.T) {
+		harness, _ := throughputHarness(t, 0)
+		engine := harness.engine
+		pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+
+		engine.recordTransfer(transferAt(1<<20, 0, 40<<30, 4<<30))
+		engine.recordTransfer(transferAt(1<<20, 0, 41<<30, 4<<30)) // +1 GiB
+		// qBittorrent restarts: session counters begin again.
+		engine.recordTransfer(transferAt(1<<20, 0, 2<<30, 0))
+		engine.recordTransfer(transferAt(1<<20, 0, 3<<30, 0)) // +1 GiB again
+
+		record := engine.state.snapshot().Stats["se-01.protonvpn.net"]
+		if record.DownloadedBytes != 2<<30 {
+			t.Errorf("total = %d, want exactly the two 1 GiB differences (%d)",
+				record.DownloadedBytes, uint64(2<<30))
+		}
+	})
+
+	t.Run("bytes are never credited across a server change", func(t *testing.T) {
+		harness, _ := throughputHarness(t, 0)
+		engine := harness.engine
+
+		pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+		engine.recordTransfer(transferAt(1<<20, 0, 10<<30, 0))
+		engine.recordTransfer(transferAt(1<<20, 0, 11<<30, 0)) // 1 GiB on the first server
+
+		// Move, then a reading whose counter grew by 5 GiB. That growth happened partly
+		// on the previous server, so the new one must not be credited with it.
+		pinCurrent(t, engine, "se-02.protonvpn.net", time.Hour)
+		engine.recordTransfer(transferAt(1<<20, 0, 16<<30, 0))
+
+		records := engine.state.snapshot().Stats
+		if got := records["se-01.protonvpn.net"].DownloadedBytes; got != 1<<30 {
+			t.Errorf("first server = %d bytes, want 1 GiB", got)
+		}
+		if got := records["se-02.protonvpn.net"].DownloadedBytes; got != 0 {
+			t.Errorf("second server credited %d bytes it did not carry", got)
+		}
+
+		// From here on it accumulates normally.
+		engine.recordTransfer(transferAt(1<<20, 0, 18<<30, 0))
+		if got := engine.state.snapshot().Stats["se-02.protonvpn.net"].DownloadedBytes; got != 2<<30 {
+			t.Errorf("second server = %d bytes, want the 2 GiB it did carry", got)
+		}
+	})
+
+	t.Run("a skipped reading drops the baseline", func(t *testing.T) {
+		harness, _ := throughputHarness(t, 0)
+		engine := harness.engine
+		pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+
+		engine.recordTransfer(transferAt(1<<20, 0, 10<<30, 0))
+		// The tunnel goes down: this reading is not attributable at all.
+		engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Gluetun.Status = "crashed" })
+		engine.recordTransfer(transferAt(1<<20, 0, 20<<30, 0))
+		engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Gluetun.Status = "running" })
+		// The counter has moved 15 GiB since the last attributable reading, but 10 of that
+		// straddles a window nothing was accounting for.
+		engine.recordTransfer(transferAt(1<<20, 0, 25<<30, 0))
+
+		if got := engine.state.snapshot().Stats["se-01.protonvpn.net"].DownloadedBytes; got != 0 {
+			t.Errorf("credited %d bytes across an unaccounted gap, want 0", got)
+		}
+	})
+
+	t.Run("an idle interval still moves the baseline forward", func(t *testing.T) {
+		harness, _ := throughputHarness(t, 0)
+		engine := harness.engine
+		pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+
+		engine.recordTransfer(transferAt(0, 0, 10<<30, 0)) // idle: baseline only
+		engine.recordTransfer(transferAt(0, 0, 10<<30, 0)) // still idle, nothing moved
+		engine.recordTransfer(transferAt(1<<20, 0, 11<<30, 0))
+
+		// The idle polls must not have dropped the baseline: if they had, this would be 0.
+		if got := engine.state.snapshot().Stats["se-01.protonvpn.net"].DownloadedBytes; got != 1<<30 {
+			t.Errorf("total = %d, want 1 GiB: an idle interval is a real zero, not a gap", got)
+		}
+	})
+}
+
+// The peaks describe the current stay; the totals describe all time. Returning to a
+// server must reset the first and never the second.
+func TestTransferredTotalsSurviveANewStay(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+	engine.recordTransfer(transferAt(50<<20, 0, 10<<30, 0))
+	engine.recordTransfer(transferAt(50<<20, 0, 14<<30, 0)) // 4 GiB, peak 50 MB/s
+
+	pinCurrent(t, engine, "se-02.protonvpn.net", time.Hour)
+	engine.recordTransfer(transferAt(1<<20, 0, 15<<30, 0))
+
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+	engine.recordTransfer(transferAt(3<<20, 0, 16<<30, 0))
+	engine.recordTransfer(transferAt(3<<20, 0, 17<<30, 0)) // 1 GiB more, peak 3 MB/s
+
+	record := engine.state.snapshot().Stats["se-01.protonvpn.net"]
+	if record.DownloadedBytes != 5<<30 {
+		t.Errorf("total = %d, want 5 GiB across both stays", record.DownloadedBytes)
+	}
+	// The maximum is all-time, like the totals: "the fastest this server has ever gone"
+	// is the question, and an earlier stay is still evidence for it.
+	if record.MaxDownloadRate != 50<<20 {
+		t.Errorf("max rate = %d, want the all-time 50 MB/s", record.MaxDownloadRate)
+	}
+	if record.Visits != 2 {
+		t.Errorf("visits = %d, want 2", record.Visits)
+	}
+}
+
+// Retirement is the only route by which a transferred total is deleted, so everything about
+// the server has to go at once - the totals, the rates, the load and latency extremes.
+func TestRetiringAServerForgetsEverythingAboutIt(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+
+	const gone = "node-se-gone.protonvpn.net"
+	seedThroughput(t, engine, gone, "node-se-p2p.protonvpn.net")
+	if err := engine.state.update(func(state *persistedState) {
+		record := state.Stats[gone]
+		record.DownloadedBytes = 900 << 30
+		record.LoadLowest, record.LoadHighest = 4, 91
+		record.RTTLowestMS, record.RTTHighestMS = 22, 180
+		state.Stats[gone] = record
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	engine.applyLogicals(manyLogicals(t, 8), false)
+
+	persisted := engine.state.snapshot()
+	if record, found := persisted.Stats[gone]; found {
+		t.Errorf("the retired server's statistics survived: %+v", record)
+	}
+	// And the server Proton still lists keeps all of its.
+	if _, found := persisted.Stats["node-se-p2p.protonvpn.net"]; !found {
+		t.Error("a listed server lost statistics it should have kept")
+	}
+}
+
+// A volume logged as a rate states a measurement that was never taken, and the two differ
+// by three characters.
+func TestVolumesAndRatesAreFormattedDifferently(t *testing.T) {
+	t.Parallel()
+
+	if got := formatBytes(9663676416); got != "9.7 GB" {
+		t.Errorf("formatBytes = %q, want 9.7 GB", got)
+	}
+	if got := formatRate(9663676416); got != "9.7 GB/s" {
+		t.Errorf("formatRate = %q, want 9.7 GB/s", got)
+	}
+	if got := formatBytes(512); got != "512 B" {
+		t.Errorf("formatBytes = %q, want 512 B", got)
 	}
 }

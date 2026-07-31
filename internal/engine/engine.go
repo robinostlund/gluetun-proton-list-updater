@@ -107,6 +107,21 @@ type Engine struct {
 	// throughputHost is the server the last throughput reading was attributed to. A
 	// change of hostname is what ends one stay's measurement and begins the next.
 	throughputHost string
+	// throughputPeakDownload and throughputPeakUpload are the highest rates seen since
+	// the last graph point was written, held in memory and cleared when it is.
+	throughputPeakDownload uint64
+	throughputPeakUpload   uint64
+	// throughputBytesDown and throughputBytesUp are the volume moved since then, the
+	// same way.
+	throughputBytesDown uint64
+	throughputBytesUp   uint64
+	// transferBaseline* is qBittorrent's session counter at the previous poll, and the
+	// server it was attributed to. Bytes are attributed by difference, so a baseline
+	// from a different server - or from before a qBittorrent restart - must never be
+	// subtracted from the current reading.
+	transferBaselineHost string
+	transferBaselineDown uint64
+	transferBaselineUp   uint64
 	// qbPreferencesErr is why the port settings could not be read. Kept rather than
 	// discarded: without them the listen port is simply unknown, and an unexplained
 	// "unknown" on the dashboard is not something an operator can act on.
@@ -553,7 +568,7 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 	// A fresh list is the only authority on which servers still exist, so it is also
 	// the only moment a retired server's measurements may be discarded.
 	if !fromCache {
-		e.forgetRetiredThroughput(logicals)
+		e.forgetRetiredServers(logicals)
 	}
 }
 
@@ -716,11 +731,11 @@ func (e *Engine) publish() {
 		views = append(views, toCandidateView(i+1, entry, entry.Candidate.Hostname == currentHostname))
 	}
 	views = append(views, e.blockedViews(currentHostname)...)
-	// What each server actually delivered, for the ones that have been used. Attached
-	// here rather than inside toCandidateView because it comes from persisted state
-	// rather than from the scored candidate.
+	// What has actually been observed about each server. Attached here rather than inside
+	// toCandidateView because it comes from persisted state rather than from the scored
+	// candidate.
 	for i := range views {
-		views[i].Throughput = e.throughputFor(views[i].Hostname)
+		views[i].Stats = e.statsFor(views[i].Hostname)
 	}
 
 	var current, best *CandidateView
@@ -743,10 +758,10 @@ func (e *Engine) publish() {
 		best = &view
 	}
 	if current != nil {
-		current.Throughput = e.throughputFor(current.Hostname)
+		current.Stats = e.statsFor(current.Hostname)
 	}
 	if best != nil {
-		best.Throughput = e.throughputFor(best.Hostname)
+		best.Stats = e.statsFor(best.Hostname)
 	}
 
 	improvement := 0.0
@@ -758,7 +773,6 @@ func (e *Engine) publish() {
 	// taking the write lock: sync.RWMutex is not reentrant.
 	nextRuns := e.nextRuns()
 	onCurrentSince := e.onCurrentSince(currentHostname)
-	loadTrace := e.loadTrace(currentHostname)
 
 	// Same reason, and the same rule: transferView reads Gluetun's forwarded ports
 	// out of the snapshot. Recomputing it here is what keeps the port-forwarding
@@ -801,7 +815,7 @@ func (e *Engine) publish() {
 		snapshot.Selection.LastSwitchAt = persisted.LastSwitchAt
 		snapshot.Selection.CooldownRemaining = formatDuration(e.cooldownRemaining())
 		snapshot.Selection.OnCurrentSince = onCurrentSince
-		snapshot.Selection.LoadTrace = loadTrace
+
 		snapshot.NextRuns = nextRuns
 	})
 }

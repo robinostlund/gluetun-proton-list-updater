@@ -125,49 +125,33 @@ function bytes(total) {
 
 // A rate shown against the threshold that would defer a switch, with a bar so the
 // margin is visible at a glance rather than needing two numbers compared by eye.
-// throughputCell renders what a server was measured to deliver, and says how much
-// evidence is behind it.
+// transferredCell renders how much data has ever moved through a server.
 //
-// Two figures, because they answer different questions: the peak is the fastest this
-// server was ever seen to go, the sustained figure is what it held for a whole
-// averaging window. Comparing servers on the sustained one is the fair comparison; the
-// peak is what an operator actually recognises from their torrent client.
+// This is the column rather than the peak rate, because it is the figure that means
+// something cumulatively: a peak is one lucky moment, while "42 GB have gone through this
+// server" is a fact about how much you have actually used it. The rates are still in the
+// detail panel, where there is room for both.
 //
-// Nothing is shown for a server that has never been used with traffic flowing. An
-// unmeasured server is not a slow one, and printing "0 B/s" would say it was.
-function throughputCell(measured, { compact = false } = {}) {
-  if (!measured) {
+// Never zero for a server that has carried nothing - "not used" and "used, moved nothing"
+// are different claims, and a bare 0 B would make the first look like the second.
+function transferredCell(measured) {
+  if (!measured || !measured.transfer_known) {
     return '<span class="muted">not measured</span>';
   }
-
-  const down = rate(measured.peak_download);
-  const up = rate(measured.peak_upload);
-  const sustained = measured.sustained_download || measured.sustained_upload
-    ? `Highest sustained: ${rate(measured.sustained_download)} down, `
-      + `${rate(measured.sustained_upload)} up.`
-    : 'No sustained figure yet: it needs a full averaging window on this server.';
-
-  const readings = `${measured.readings} reading${measured.readings === 1 ? '' : 's'} `
-    + 'with traffic in them';
-  const when = measured.current
-    ? 'Being measured now, so it may still rise.'
-    : `Last measured ${timeAgo(measured.last_reading)}.`;
-  const visits = measured.visits > 1
-    ? ` This is stay ${measured.visits} on this server; earlier stays are not kept.`
-    : '';
-
-  const title = `Peak: ${down} down, ${up} up. ${sustained} From ${readings}. ${when}`
-    + visits
-    + ' Measured through this tunnel by qBittorrent, so it reflects the swarm as well '
-    + 'as the server.';
-
-  const marker = measured.current ? '<span class="muted" title="still being measured">·</span> ' : '';
-  if (compact) {
-    return `<div title="${escapeHTML(title)}">${marker}${escapeHTML(down)}</div>`
-      + `<div class="muted" title="${escapeHTML(title)}">${escapeHTML(up)} up</div>`;
+  if (!measured.downloaded && !measured.uploaded) {
+    return '<span class="muted">not used</span>';
   }
-  return `<span title="${escapeHTML(title)}">${marker}${escapeHTML(down)} down · `
-    + `${escapeHTML(up)} up</span>`;
+
+  const down = bytes(measured.downloaded || 0);
+  const up = bytes(measured.uploaded || 0);
+  const visits = measured.visits > 1 ? ` across ${measured.visits} stays` : '';
+  const title = `${down} down, ${up} up through this server in total${visits}. `
+    + 'Counted from qBittorrent\'s own session counters by difference, so it covers what '
+    + 'this tool observed - not traffic from before it was watching. Kept until Proton '
+    + 'retires the server.';
+
+  return `<div title="${escapeHTML(title)}">${escapeHTML(down)}</div>`
+    + `<div class="muted" title="${escapeHTML(title)}">${escapeHTML(up)} up</div>`;
 }
 
 function rateAgainst(speed, threshold) {
@@ -215,45 +199,6 @@ function parseCoordinates(location) {
   return [lat, lon];
 }
 
-// sparkline draws a utilisation trace as inline SVG.
-//
-// Inline because the page is self-contained - no charting library, no CDN - and because
-// a trace this small needs nothing more. The y-axis is pinned to 0-100 rather than to the
-// data: a server that stayed between 40% and 44% should look flat, not volatile, and the
-// whole point is judging load against the thresholds that act on it.
-function sparkline(trace) {
-  if (trace.length < 2) {
-    return '<span class="muted">not enough history yet</span>';
-  }
-
-  const width = 240;
-  const height = 34;
-  const first = new Date(trace[0].at).getTime();
-  const last = new Date(trace[trace.length - 1].at).getTime();
-  const span = Math.max(1, last - first);
-
-  const points = trace.map((point) => {
-    const x = ((new Date(point.at).getTime() - first) / span) * width;
-    const y = height - (Math.min(100, Math.max(0, point.load)) / 100) * height;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-
-  const latest = trace[trace.length - 1].load;
-  const stroke = latest >= 80 ? 'var(--bad)' : latest >= 60 ? 'var(--warn)' : 'var(--good)';
-  const hours = ((last - first) / 3600000).toFixed(1);
-  const loads = trace.map((point) => point.load);
-  const label = `${trace.length} readings over ${hours}h — `
-    + `low ${Math.min(...loads)}%, high ${Math.max(...loads)}%, now ${latest}%`;
-
-  return `<svg class="spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"`
-    + ` role="img" aria-label="${escapeHTML(label)}"><title>${escapeHTML(label)}</title>`
-    // A 50% guide, so the height of the line means something without axis labels.
-    + `<line x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"`
-    + ` stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>`
-    + `<polyline fill="none" stroke="${stroke}" stroke-width="1.5"`
-    + ` stroke-linejoin="round" points="${points.join(' ')}"/></svg>`;
-}
-
 // stateSpan colours a lifecycle word: running is good, crashed is bad, anything else is
 // neither. Shared so every such row reads the same - the DNS row used to be plain text
 // beside a coloured VPN row, which made the two look like different kinds of fact.
@@ -263,54 +208,6 @@ function stateSpan(state) {
     : value === 'crashed' || value === 'failed' ? 'no'
       : 'muted';
   return `<span class="${level}">${escapeHTML(value)}</span>`;
-}
-
-// seriesGraph draws one measured series.
-//
-// Two scaling rules, because the two quantities are not alike. Load is a percentage with
-// an absolute meaning, so it is always drawn against a fixed 0-100: autoscaling would
-// stretch a flat 10-12% into a dramatic climb. Latency has no natural ceiling, so it is
-// scaled to its own maximum - and the label says what that maximum is, since the shape
-// alone would otherwise be unreadable.
-//
-// Missing values are gaps rather than zeroes. A reading taken before latency was ever
-// probed is not a fast server.
-function seriesGraph(points, options) {
-  const { value, known, max, format, colour } = options;
-  const usable = points.filter((point) => !known || known(point));
-  if (usable.length < 2) {
-    return `<span class="muted">${escapeHTML(points.length
-      ? 'not enough history yet' : 'no readings yet')}</span>`;
-  }
-
-  const width = 240;
-  const height = 34;
-  const first = new Date(usable[0].at).getTime();
-  const last = new Date(usable[usable.length - 1].at).getTime();
-  const span = Math.max(1, last - first);
-  const values = usable.map(value);
-  const ceiling = max || Math.max(1, ...values);
-
-  const points2d = usable.map((point) => {
-    const x = ((new Date(point.at).getTime() - first) / span) * width;
-    const y = height - (Math.min(ceiling, Math.max(0, value(point))) / ceiling) * height;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-
-  const latest = values[values.length - 1];
-  const hours = ((last - first) / 3600000).toFixed(1);
-  const label = `${usable.length} readings over ${hours}h — low ${format(Math.min(...values))}, `
-    + `high ${format(Math.max(...values))}, now ${format(latest)}`
-    + (max ? '' : `. Scaled to ${format(ceiling)}, not to a fixed ceiling`)
-    + (known && usable.length < points.length
-      ? `. ${points.length - usable.length} reading(s) had no measurement and are omitted` : '');
-
-  return `<svg class="spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"`
-    + ` role="img" aria-label="${escapeHTML(label)}"><title>${escapeHTML(label)}</title>`
-    + `<line x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"`
-    + ` stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>`
-    + `<polyline fill="none" stroke="${colour(latest)}" stroke-width="1.5"`
-    + ` stroke-linejoin="round" points="${points2d.join(' ')}"/></svg>`;
 }
 
 function escapeHTML(value) {
@@ -534,11 +431,10 @@ function renderCurrent() {
       + 'the tunnel was already up when this container started.';
   }
 
-  // What this server actually delivered. Load and latency describe a server before it
-  // is used; this is the only row that says what came out of it.
-  el('current-throughput').innerHTML = throughputCell(current && current.throughput);
-
-  el('current-trace').innerHTML = sparkline(snapshot.selection.load_trace || []);
+  // What this server has actually carried. Load and latency describe a server before it
+  // is used; this is the only row that says what came out of it. Click the row in the
+  // candidate list for the rest.
+  el('current-throughput').innerHTML = transferredCell(current && current.stats);
   // Whether Gluetun even asks for a port distinguishes "not yet" from "never".
   const ports = gluetun.forwarded_ports || [];
   const requested = gluetun.port_forwarding_enabled;
@@ -561,7 +457,7 @@ function renderBest() {
   text('best-score', best ? best.score.toFixed(3) : '–');
   // The same row as on the current server, so the two read across: a candidate that
   // scores better on load and latency may still be one that was measurably slower.
-  el('best-throughput').innerHTML = throughputCell(best && best.throughput);
+  el('best-throughput').innerHTML = transferredCell(best && best.stats);
   // The improvement is the number that decides whether the best candidate is used at
   // all, so it says so rather than leaving the reader to compare it against the
   // threshold two rows below.
@@ -967,7 +863,7 @@ function renderCandidates() {
       <td class="num" title="${escapeHTML(scoreTitle)}">${candidate.rtt_known
         ? candidate.score.toFixed(3)
         : '~' + candidate.score.toFixed(3)}</td>
-      <td class="num">${throughputCell(candidate.throughput, { compact: true })}</td>
+      <td class="num">${transferredCell(candidate.stats)}</td>
       <td><div class="tags">${featureTags(candidate, { current: candidate.is_current })}</div></td>
       <td class="right">
         <button class="small" data-switch="${escapeHTML(candidate.hostname)}"
@@ -1256,61 +1152,86 @@ async function openCandidateModal(hostname) {
   el('modal-load').innerHTML = loadCell(candidate.load);
   text('modal-rtt', candidate.rtt_known ? `${candidate.rtt_ms} ms` : 'not probed');
 
-  // Placeholders while the fetch is in flight, so a slow answer never shows the
-  // previous server's graphs.
-  text('modal-load-graph', 'loading…');
-  text('modal-rtt-graph', 'loading…');
-  text('modal-readings', '…');
-  el('modal-throughput').innerHTML = throughputCell(candidate.throughput);
+  // Everything here is already in the snapshot: the statistics are a dozen fixed numbers
+  // per server rather than a series, small enough to travel with it. There is no fetch,
+  // so no loading state and no chance of a slow answer painting the previous server's
+  // figures into this panel.
+  renderCandidateStats(candidate.stats);
 
   if (!modal.open) modal.showModal();
-
-  try {
-    const response = await fetch(`/api/history?host=${encodeURIComponent(hostname)}`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const history = await response.json();
-    // The panel may have been closed or moved on while this was in flight.
-    if (!modal.open || el('modal-host').textContent !== hostname) return;
-    renderCandidateHistory(history);
-  } catch (error) {
-    text('modal-load-graph', `could not load history: ${error.message}`);
-    text('modal-rtt-graph', '–');
-    text('modal-readings', 'unknown');
-  }
 }
 
-function renderCandidateHistory(history) {
-  const readings = history.readings || [];
+// renderCandidateStats fills the two observed-over-time bands.
+//
+// Absent figures read as absent. A server that has never been probed for latency, or a
+// deployment with no qBittorrent, must not show a zero - "never measured" and "measured as
+// zero" are different claims, and only one of them is ours to make.
+function renderCandidateStats(stats) {
+  const measured = stats || {};
 
-  el('modal-load-graph').innerHTML = seriesGraph(readings, {
-    value: (point) => point.load,
-    max: 100, // absolute: a percentage must not be autoscaled
-    format: (value) => `${Math.round(value)}%`,
-    colour: (latest) => latest >= 80 ? 'var(--bad)' : latest >= 60 ? 'var(--warn)' : 'var(--good)',
-  });
-  el('modal-rtt-graph').innerHTML = seriesGraph(readings, {
-    value: (point) => point.rtt_ms,
-    known: (point) => point.rtt_known,
-    format: (value) => `${Math.round(value)} ms`,
-    colour: () => 'var(--accent)',
-  });
+  const percent = (value) => value ? `${value}%` : 'unknown';
+  text('modal-stat-load', percent(measured.load));
+  text('modal-stat-load-lowest', percent(measured.load_lowest));
+  text('modal-stat-load-highest', percent(measured.load_highest));
+  el('modal-stat-load-lowest').title = 'The quietest this server has been seen. Lowest is '
+    + 'best for load.';
+  el('modal-stat-load-highest').title = 'The busiest it has been seen. A server that is '
+    + 'quiet now but has peaked at 95% is a different proposition from one that never has.';
 
-  const withLatency = readings.filter((point) => point.rtt_known).length;
-  text('modal-readings', readings.length
-    ? `${readings.length} of at most ${history.capacity}, every ${history.interval}`
-      + `, ${withLatency} with latency`
+  // Latency is only probed for LATENCY_TOP_N servers, so never having a figure is normal
+  // rather than a fault, and the row says which.
+  const milliseconds = (value) => value ? `${value} ms` : 'not probed';
+  text('modal-stat-rtt', milliseconds(measured.rtt_ms));
+  text('modal-stat-rtt-lowest', milliseconds(measured.rtt_lowest_ms));
+  text('modal-stat-rtt-highest', milliseconds(measured.rtt_highest_ms));
+  el('modal-stat-rtt-lowest').title = 'The best round trip ever measured. Lowest is best.';
+  el('modal-stat-rtt-highest').title = 'The worst ever measured, which is what a stable '
+    + 'connection is judged against.';
+
+  text('modal-stat-samples', measured.samples
+    ? `${measured.samples} load reading${measured.samples === 1 ? '' : 's'}`
     : 'none yet');
-  el('modal-readings').title = readings.length
-    ? 'Recorded on each load refresh, for the current server, the best few candidates '
-      + 'and any server whose throughput has been measured. Bounded so the state file '
-      + 'stays small.'
-    : 'This server has not been sampled: history is kept for the current server, the '
-      + 'best few candidates and any server measured for throughput.';
+  el('modal-stat-samples').title = 'How much evidence is behind the extremes above. One '
+    + 'reading per loads refresh, for every candidate.';
+  text('modal-stat-visits', measured.visits
+    ? `${measured.visits} time${measured.visits === 1 ? '' : 's'}`
+    : 'never used');
+  text('modal-stat-first', measured.first_seen ? timeAgo(measured.first_seen) : 'unknown');
 
-  if (history.throughput) {
-    el('modal-throughput').innerHTML = throughputCell(history.throughput);
+  // Without qBittorrent nothing measures throughput at all. Saying "0 B" would claim this
+  // server carried nothing, which is a claim about the server rather than about us.
+  if (!measured.transfer_known) {
+    for (const id of ['modal-stat-downloaded', 'modal-stat-uploaded',
+      'modal-stat-max-down', 'modal-stat-max-up', 'modal-stat-reads',
+      'modal-stat-last-transfer']) {
+      text(id, 'needs qBittorrent');
+      el(id).title = 'Set QBITTORRENT_URL and QBITTORRENT_API_KEY to measure transfers. '
+        + 'Gluetun exposes no throughput information of its own.';
+    }
+    return;
   }
+
+  const volume = (value) => value ? bytes(value) : 'nothing yet';
+  text('modal-stat-downloaded', volume(measured.downloaded));
+  text('modal-stat-uploaded', volume(measured.uploaded));
+  el('modal-stat-downloaded').title = el('modal-stat-uploaded').title =
+    'Every byte counted through this server, across every stay. Never reset by a '
+    + 'reconnect; removed only when Proton retires the server. Counted from qBittorrent\'s '
+    + 'session counters by difference, so it covers what this tool observed.';
+
+  const speed = (value) => value ? rate(value) : 'not measured';
+  text('modal-stat-max-down', speed(measured.max_download));
+  text('modal-stat-max-up', speed(measured.max_upload));
+  el('modal-stat-max-down').title = el('modal-stat-max-up').title =
+    'The fastest single reading ever taken on this server. A rate reflects the swarm as '
+    + 'much as the server, so treat it as the best it has managed, not a guarantee.';
+
+  text('modal-stat-reads', measured.transfer_readings
+    ? `${measured.transfer_readings}` : 'none');
+  text('modal-stat-last-transfer', measured.last_transfer_at
+    ? timeAgo(measured.last_transfer_at) : 'never');
 }
+
 
 // tierName maps Proton's plan level to its name. Reported as unknown rather than guessed
 // when Proton did not say, and the raw number is kept alongside so an unfamiliar tier is

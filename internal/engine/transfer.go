@@ -66,10 +66,9 @@ func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
 	e.transfer = transfer
 	e.transferCheckedAt = time.Now()
 	e.recordTransferSample(transfer)
-	// Credit the reading to whichever server carried it, so there is a record of what
-	// each one actually delivered. Deliberately after recordTransferSample: the
-	// sustained figure is the windowed average, which has to include this reading.
-	e.recordThroughput(transfer.DownloadSpeed, transfer.UploadSpeed)
+	// Credit the reading to whichever server carried it, so there is a record of what each
+	// one actually delivered.
+	e.recordTransfer(transfer)
 
 	// Track when the tunnel became busy, so the wait can be bounded and shown.
 	busy := e.transferIsBusy()
@@ -443,6 +442,24 @@ func formatRate(bytesPerSecond uint64) string {
 		}
 	}
 	return fmt.Sprintf("%.1f PB/s", value/unit)
+}
+
+// formatBytes renders a volume. Distinct from formatRate on purpose: logging a total as
+// "12.4 MB/s" states a rate that was never measured, and the two are easy to confuse
+// because they differ by three characters.
+func formatBytes(total uint64) string {
+	const unit = 1000
+	if total < unit {
+		return fmt.Sprintf("%d B", total)
+	}
+	value := float64(total)
+	for _, suffix := range []string{"kB", "MB", "GB", "TB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PB", value/unit)
 }
 
 // transferInterval is how often to read the rates, zero when the feature is off so
