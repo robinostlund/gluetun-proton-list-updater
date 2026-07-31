@@ -19,6 +19,8 @@ const (
 	commandSetAuto      = "set-auto-switch"
 	commandClearHistory = "clear-history"
 	commandRunUpdater   = "run-updater"
+	commandCheckGluetun = "check-gluetun"
+	commandReadTransfer = "read-transfer"
 	commandSetVPN       = "set-vpn"
 	commandSetDNS       = "set-dns"
 )
@@ -93,6 +95,17 @@ func (e *Engine) handleCommand(ctx context.Context, cmd command) {
 	case commandWriteServers:
 		e.writeServersFile()
 		e.publish()
+	case commandCheckGluetun:
+		// Everything the health tick does, on demand: status, settings, exit address, and
+		// the verification that Gluetun is still on the server this tool selected.
+		e.checkGluetun(ctx)
+		e.publish()
+
+	case commandReadTransfer:
+		// One poll of qBittorrent, on demand. Nothing to report if the integration is off:
+		// the button only exists on a card that hides itself in that case.
+		e.refreshTransfer(ctx, "manual")
+
 	case commandRunUpdater:
 		// Reuses the reject-path helper, which also rewrites the servers file
 		// afterwards - Gluetun's updater flushes its own fetch over it.
@@ -209,6 +222,16 @@ func (e *Engine) Healthy() (healthy bool, reason string) {
 // an operator who has just restarted Gluetun or added servers may want it now.
 func (e *Engine) RunUpdater(ctx context.Context) error {
 	return e.submit(ctx, command{kind: commandRunUpdater}, true)
+}
+
+// CheckGluetun re-reads everything Gluetun reports about itself.
+func (e *Engine) CheckGluetun(ctx context.Context) error {
+	return e.submit(ctx, command{kind: commandCheckGluetun}, true)
+}
+
+// ReadTransfer polls qBittorrent once, now.
+func (e *Engine) ReadTransfer(ctx context.Context) error {
+	return e.submit(ctx, command{kind: commandReadTransfer}, true)
 }
 
 // SetVPN starts or stops Gluetun's VPN loop.

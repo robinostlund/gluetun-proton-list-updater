@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/robinostlund/gluetun-proton-list-updater/internal/catalog"
@@ -438,6 +439,9 @@ func (e *Engine) checkGluetun(ctx context.Context) {
 		}
 	})
 
+	// Before anything else reads the current server: if Gluetun has restarted, what this
+	// tool remembers selecting is no longer where the tunnel is.
+	e.verifyGluetunPin()
 	e.checkServerDataIsRead()
 
 	if e.Snapshot().Gluetun.ProviderMismatch {
@@ -654,12 +658,67 @@ func (e *Engine) currentHostname() (hostname, source string) {
 		}
 	}
 
-	// Last resort: what this tool last asked for. Used when Gluetun's settings
-	// cannot be read at all.
+	// Last resort: what this tool last asked for - but only when Gluetun could not be
+	// asked.
+	//
+	// The comment used to say that and the code did not check it, which is a real bug with
+	// a specific trigger: restarting Gluetun discards the runtime selection, because it is
+	// applied through the control server and not part of Gluetun's configuration. Gluetun
+	// then picks a server from its own filters, reports no hostname selection - and this
+	// went on claiming the server it had asked for before the restart. Everything
+	// downstream inherited that: the dashboard named the wrong server, transfer figures
+	// were credited to it, and selection saw nothing to fix because its own choice looked
+	// current.
+	//
+	// So a readable Gluetun with no hostname selection *disproves* the remembered value
+	// rather than merely failing to confirm it. Returning nothing is what makes the next
+	// evaluation treat the current server as unknown and re-select, which restores the pin.
 	if remembered := e.state.snapshot().PinnedHostname; remembered != "" {
-		return remembered, "remembered"
+		disproven := snapshot.Gluetun.SettingsReadable &&
+			e.cfg.Switch.Mode == config.ReconnectSettings
+		if !disproven {
+			return remembered, "remembered"
+		}
 	}
 	return "", "unknown"
+}
+
+// verifyGluetunPin notices when Gluetun is no longer on the server this tool selected.
+//
+// Only meaningful in the mode that pins a hostname: the others never ask Gluetun for a
+// specific server, so there is nothing to verify against.
+func (e *Engine) verifyGluetunPin() {
+	if e.cfg.Switch.Mode != config.ReconnectSettings {
+		return
+	}
+	remembered := e.state.snapshot().PinnedHostname
+	if remembered == "" {
+		return
+	}
+	snapshot := e.Snapshot()
+	// Unreadable settings prove nothing either way, and treating silence as disagreement
+	// would discard a perfectly good pin every time the control server hiccuped.
+	if !snapshot.Gluetun.SettingsReadable {
+		return
+	}
+	if slices.Contains(snapshot.Gluetun.Selection["hostnames"], remembered) {
+		return
+	}
+
+	e.logger.Warn("gluetun is no longer using the server this tool selected",
+		"selected", remembered,
+		"gluetun_selection", snapshot.Gluetun.Selection["hostnames"],
+		"cause", "gluetun has most likely restarted: the hostname is applied through its "+
+			"control server at runtime, so a restart discards it and gluetun picks a server "+
+			"from the filters it was started with",
+		"consequence", "the remembered selection is being forgotten, and the next evaluation "+
+			"will choose and pin a server again")
+
+	if err := e.state.update(func(state *persistedState) {
+		state.PinnedHostname = ""
+	}); err != nil {
+		e.logger.Warn("could not forget the stale selection", "error", err)
+	}
 }
 
 // lookupCandidate finds a candidate by hostname in either set.

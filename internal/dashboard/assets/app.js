@@ -123,6 +123,32 @@ function bytes(total) {
   return `${(scaled / 1000).toFixed(1)} PB`;
 }
 
+// fastestRateCell renders the highest rate ever measured on a server.
+//
+// Separate from the volume, because they answer different questions and share a unit
+// family: "412 GB" and "11 MB/s" describe the same server and mean nothing alike. A rate
+// reflects the swarm as much as the server, so it is labelled as the best it has managed
+// rather than as a capability.
+function fastestRateCell(measured) {
+  if (!measured || !measured.transfer_known) {
+    return '<span class="muted">not measured</span>';
+  }
+  if (!measured.max_download && !measured.max_upload) {
+    return '<span class="muted">nothing measured yet</span>';
+  }
+
+  const down = rate(measured.max_download || 0);
+  const up = rate(measured.max_upload || 0);
+  const readings = measured.transfer_readings
+    ? ` from ${measured.transfer_readings} readings` : '';
+  const title = `The fastest single readings ever taken on this server${readings}: `
+    + `${down} down, ${up} up. A rate reflects the swarm and your peers as much as the `
+    + 'server, so treat it as the best it has managed rather than what it will do.';
+
+  return `<div title="${escapeHTML(title)}">${escapeHTML(down)} down</div>`
+    + `<div class="muted" title="${escapeHTML(title)}">${escapeHTML(up)} up</div>`;
+}
+
 // transferredCell renders how much data has ever moved through one server.
 //
 // Not comparable with the qBittorrent card's session totals, which cover every server and
@@ -431,10 +457,11 @@ function renderCurrent() {
       + 'the tunnel was already up when this container started.';
   }
 
-  // What this server has actually carried. Load and latency describe a server before it
-  // is used; this is the only row that says what came out of it. Click the row in the
-  // candidate list for the rest.
-  el('current-throughput').innerHTML = transferredCell(current && current.stats);
+  // Two different facts about the same server, which were briefly one row and read as
+  // whichever the reader assumed. Volume is how much has gone through it; rate is how fast
+  // it ever went. Click the row in the candidate list for the rest.
+  el('current-transferred').innerHTML = transferredCell(current && current.stats);
+  el('current-throughput').innerHTML = fastestRateCell(current && current.stats);
   // Whether Gluetun even asks for a port distinguishes "not yet" from "never".
   const ports = gluetun.forwarded_ports || [];
   const requested = gluetun.port_forwarding_enabled;
@@ -457,7 +484,9 @@ function renderBest() {
   text('best-score', best ? best.score.toFixed(3) : '–');
   // The same row as on the current server, so the two read across: a candidate that
   // scores better on load and latency may still be one that was measurably slower.
-  el('best-throughput').innerHTML = transferredCell(best && best.stats);
+  // Volume only. A rate on a server the tunnel is not using would read as a rate it is
+  // achieving now, which is exactly what it is not.
+  el('best-transferred').innerHTML = transferredCell(best && best.stats);
   // The improvement is the number that decides whether the best candidate is used at
   // all, so it says so rather than leaving the reader to compare it against the
   // threshold two rows below.

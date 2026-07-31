@@ -45,6 +45,8 @@ type Controller interface {
 	SetAutoSwitch(ctx context.Context, enabled bool) error
 	ClearHistory(ctx context.Context) error
 	RunUpdater(ctx context.Context) error
+	CheckGluetun(ctx context.Context) error
+	ReadTransfer(ctx context.Context) error
 	SetVPN(ctx context.Context, status string) error
 	SetDNS(ctx context.Context, status string) error
 	SubmitTOTP(code string) bool
@@ -137,6 +139,10 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("POST /api/history/clear", s.command("clear history", s.controller.ClearHistory))
 	protected.HandleFunc("POST /api/logs/clear", s.handleClearLogs)
 	protected.HandleFunc("POST /api/gluetun/updater", s.command("run updater", s.controller.RunUpdater))
+	// One refresh per integration, so it is obvious which external service a button talks
+	// to. Proton keeps two, because its two calls cost very different amounts.
+	protected.HandleFunc("POST /api/gluetun/refresh", s.command("refresh gluetun", s.controller.CheckGluetun))
+	protected.HandleFunc("POST /api/qbittorrent/refresh", s.command("refresh qbittorrent", s.controller.ReadTransfer))
 	protected.HandleFunc("POST /api/gluetun/vpn", s.lifecycle("vpn", s.controller.SetVPN))
 	protected.HandleFunc("POST /api/gluetun/dns", s.lifecycle("dns", s.controller.SetDNS))
 	protected.HandleFunc("POST /api/totp", s.handleTOTP)

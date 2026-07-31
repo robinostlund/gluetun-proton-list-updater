@@ -296,7 +296,23 @@ button {
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: 0.5; cursor: progress; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+
+/* One appearance for every control that acts on an integration, whichever card it sits in.
+   They used to differ - one accent-filled "primary" among plain ones - which read as a
+   ranking of importance that did not exist: reconnecting is not more significant than
+   stopping the VPN. Uniform, so a control is recognisable as a control and the card it sits
+   in says what it acts on. */
+button.control {
+  background: var(--bg-inset);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 550;
+}
+button.control:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 button.small { padding: 3px 9px; font-size: 12px; }
 
 .toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }

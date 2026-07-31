@@ -30,25 +30,6 @@
          reading four cards. Each pill carries the detail as a tooltip. -->
     <section id="status-strip" class="strip" aria-label="Overall status"></section>
 
-    <!-- Above the cards: the things you came to do, before the things you came to read. -->
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Controls</h2>
-        <label class="toggle">
-          <input type="checkbox" id="auto-switch">
-          <span>Automatic switching</span>
-        </label>
-      </div>
-      <div class="toolbar">
-        <button data-action="/api/reconnect" class="primary">Reconnect to best</button>
-        <button data-action="/api/refresh">Refresh server list</button>
-        <button data-action="/api/loads">Refresh loads</button>
-        <button data-action="/api/probe">Probe latency</button>
-        <button data-action="/api/evaluate">Re-evaluate</button>
-        <button data-action="/api/servers/write">Rewrite servers.json</button>
-      </div>
-    </section>
-
     <section class="cards">
       <!-- Three columns: the current server, the candidate that would replace it, and
            the decision between them. Current and best carry identical row labels so the
@@ -70,7 +51,8 @@
               <div><dt>Rank</dt><dd id="current-rank">–</dd></div>
               <div><dt>On this server</dt><dd id="current-since">–</dd></div>
               <div><dt>Forwarded port</dt><dd id="current-port">–</dd></div>
-              <div><dt>Transferred via this server</dt><dd id="current-throughput">–</dd></div>
+              <div><dt>Transferred via this server</dt><dd id="current-transferred">–</dd></div>
+              <div><dt>Fastest measured rate</dt><dd id="current-throughput">–</dd></div>
             </dl>
           </div>
 
@@ -85,7 +67,7 @@
               <div><dt>Latency</dt><dd id="best-rtt">–</dd></div>
               <div><dt>Score</dt><dd id="best-score">–</dd></div>
               <div><dt>Rank</dt><dd id="best-rank">–</dd></div>
-              <div><dt>Transferred via this server</dt><dd id="best-throughput">–</dd></div>
+              <div><dt>Transferred via this server</dt><dd id="best-transferred">–</dd></div>
             </dl>
           </div>
 
@@ -102,6 +84,22 @@
           </div>
         </div>
 
+        <!-- The controls that act on this decision, in the card that shows it. A shared
+             Controls panel meant every button sat away from the state it changed, and gave
+             no clue which integration each one talked to. -->
+        <div class="band">
+          <h3 class="card-section">Controls</h3>
+          <div class="toolbar inline">
+            <button data-action="/api/reconnect" class="control"
+                    title="Switch to the best candidate now, ignoring the cooldown and the improvement threshold. An explicit instruction is never deferred by a transfer.">Reconnect to best</button>
+            <button data-action="/api/evaluate" class="control"
+                    title="Re-run the decision with the data already in hand. Fetches nothing.">Re-evaluate</button>
+            <label class="toggle">
+              <input type="checkbox" id="auto-switch">
+              <span>Automatic switching</span>
+            </label>
+          </div>
+        </div>
       </article>
 
       <!-- Everything about Gluetun, including what its own control server reports. Those
@@ -158,13 +156,17 @@
         <div class="band">
           <h3 class="card-section">Controls</h3>
           <div class="toolbar inline">
-            <button data-lifecycle="/api/gluetun/vpn" data-status="running">Start VPN</button>
-            <button data-lifecycle="/api/gluetun/vpn" data-status="stopped"
+            <button data-action="/api/gluetun/refresh" class="control"
+                    title="Re-read Gluetun's status, settings and exit address now, instead of waiting for the next health check. Talks only to Gluetun.">Refresh</button>
+            <button data-action="/api/servers/write" class="control"
+                    title="Rewrite the server list this tool maintains for Gluetun. Gluetun only reads it at startup.">Rewrite servers.json</button>
+            <button data-lifecycle="/api/gluetun/vpn" data-status="running" class="control">Start VPN</button>
+            <button data-lifecycle="/api/gluetun/vpn" data-status="stopped" class="control"
                     data-confirm="Stop the VPN? Every connection through the tunnel drops, and it stays stopped until you start it again.">Stop VPN</button>
-            <button data-lifecycle="/api/gluetun/dns" data-status="running">Start DNS</button>
-            <button data-lifecycle="/api/gluetun/dns" data-status="stopped"
+            <button data-lifecycle="/api/gluetun/dns" data-status="running" class="control">Start DNS</button>
+            <button data-lifecycle="/api/gluetun/dns" data-status="stopped" class="control"
                     data-confirm="Stop Gluetun's DNS-over-TLS resolver?">Stop DNS</button>
-            <button data-action="/api/gluetun/updater"
+            <button data-action="/api/gluetun/updater" class="control"
                     title="Makes Gluetun fetch its own server list from Proton. It does not read the list written here, and it overwrites that file - which is rewritten immediately afterwards.">Run updater</button>
           </div>
         </div>
@@ -215,6 +217,21 @@
           </form>
           <div id="explain-result"></div>
         </div>
+        <!-- Two refreshes rather than one, deliberately: the list is several megabytes and
+             changes twice a day, the loads are a few kilobytes and change every few minutes.
+             Collapsing them into a single "Refresh" would make the expensive call every time
+             someone wanted the cheap one. -->
+        <div class="band">
+          <h3 class="card-section">Controls</h3>
+          <div class="toolbar inline">
+            <button data-action="/api/refresh" class="control"
+                    title="Fetch the full logical server list from Proton. Several megabytes; Proton changes it about twice a day.">Refresh server list</button>
+            <button data-action="/api/loads" class="control"
+                    title="Fetch only the utilisation figures. A few kilobytes, and the values the ranking actually turns on.">Refresh loads</button>
+            <button data-action="/api/probe" class="control"
+                    title="Measure latency to Proton entry nodes now. Local measurement, not a Proton API call.">Probe latency</button>
+          </div>
+        </div>
         <p id="proton-error" class="card-note error"></p>
       </article>
 
@@ -257,6 +274,13 @@
             <div><dt>Upload threshold</dt><dd id="transfer-up-limit">–</dd></div>
             <div class="wide"><dt>Switching</dt><dd id="transfer-switching" class="prose">–</dd></div>
           </dl>
+        </div>
+        <div class="band">
+          <h3 class="card-section">Controls</h3>
+          <div class="toolbar inline">
+            <button data-action="/api/qbittorrent/refresh" class="control"
+                    title="Read the current rates and port settings from qBittorrent now, instead of waiting for the next poll.">Refresh</button>
+          </div>
         </div>
         <p id="transfer-error" class="card-note error"></p>
       </article>

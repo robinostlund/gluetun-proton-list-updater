@@ -2244,9 +2244,13 @@ func TestWhyNoSwitchHappenedIsPublished(t *testing.T) {
 	engine.applyLogicals(mixedP2PLogicals(), false)
 	// Put the tunnel on the busier server so a better one exists but is not better
 	// enough - the case the improvement threshold is for.
-	engine.state.update(func(state *persistedState) {
-		state.PinnedHostname = "node-se-p2p.protonvpn.net"
-	})
+	//
+	// Gluetun has to agree that it is there, not just this tool's own memory of asking:
+	// a readable Gluetun reporting no hostname selection disproves the remembered value,
+	// which would make this "current server unknown" and switch regardless of any
+	// threshold. That is the point of TestARestartedGluetunDoesNotLeaveAStaleCurrentServer.
+	pinCurrent(t, engine, "node-se-p2p.protonvpn.net", time.Hour)
+	engine.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Gluetun.SettingsReadable = true })
 	engine.evaluate(context.Background(), "manual", false)
 
 	explanation := engine.Snapshot().Selection.Explanation
@@ -4335,5 +4339,176 @@ func TestTheFirstReadingWaitDoesNotDelayTheInitialConnection(t *testing.T) {
 				t.Errorf("blocked = %v, want %v (reason: %q)", blocked, testCase.wantBlocked, reason)
 			}
 		})
+	}
+}
+
+// Restarting Gluetun discards the hostname this tool selected: the selection is applied
+// through the control server at runtime, not configured, so Gluetun comes back having
+// chosen a server from its own filters.
+//
+// This shipped wrong. currentHostname's own comment said the remembered value was for when
+// Gluetun could not be asked, but nothing checked that - so a readable Gluetun reporting no
+// hostname selection still yielded the stale value. Everything downstream inherited it: the
+// dashboard named the wrong server, transfer figures were credited to it, and selection saw
+// nothing to fix because its own choice looked current.
+func TestARestartedGluetunDoesNotLeaveAStaleCurrentServer(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	const selected = "se-01.protonvpn.net"
+	if err := engine.state.update(func(state *persistedState) {
+		state.PinnedHostname = selected
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// While Gluetun agrees, the pin is the answer and nothing is disturbed.
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = map[string][]string{"hostnames": {selected}}
+	})
+	if hostname, source := engine.currentHostname(); hostname != selected {
+		t.Errorf("hostname = %q (%s), want the pinned %q", hostname, source, selected)
+	}
+	engine.verifyGluetunPin()
+	if got := engine.state.snapshot().PinnedHostname; got != selected {
+		t.Errorf("the pin was forgotten while Gluetun still agreed: %q", got)
+	}
+
+	// Now Gluetun has restarted: readable settings, no hostname selection, and an exit
+	// address that matches no Proton server so identification cannot fall back to it.
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = map[string][]string{"countries": {"Sweden"}}
+		snapshot.Gluetun.Exit.IP = "203.0.113.7"
+	})
+
+	hostname, source := engine.currentHostname()
+	if hostname == selected {
+		t.Errorf("still reporting %q as current after Gluetun reported no selection", selected)
+	}
+	if hostname != "" || source != "unknown" {
+		t.Errorf("hostname = %q (%s), want unknown so the next evaluation re-selects",
+			hostname, source)
+	}
+
+	// And the stale value is forgotten rather than left to mislead the next reader.
+	engine.verifyGluetunPin()
+	if got := engine.state.snapshot().PinnedHostname; got != "" {
+		t.Errorf("PinnedHostname = %q, want it cleared after Gluetun disproved it", got)
+	}
+}
+
+// Unreadable settings prove nothing either way. Treating silence as disagreement would
+// discard a good pin every time the control server hiccuped.
+func TestAnUnreadableGluetunDoesNotDiscardThePin(t *testing.T) {
+	harness := newHarness(t, false, nil)
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	const selected = "se-01.protonvpn.net"
+	if err := engine.state.update(func(state *persistedState) {
+		state.PinnedHostname = selected
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = false
+		snapshot.Gluetun.Selection = nil
+		snapshot.Gluetun.Exit.IP = "203.0.113.7"
+	})
+
+	if hostname, source := engine.currentHostname(); hostname != selected || source != "remembered" {
+		t.Errorf("hostname = %q (%s), want the remembered %q while Gluetun cannot be asked",
+			hostname, source, selected)
+	}
+	engine.verifyGluetunPin()
+	if got := engine.state.snapshot().PinnedHostname; got != selected {
+		t.Errorf("the pin was discarded on unreadable settings: %q", got)
+	}
+}
+
+// In the modes that never pin a hostname, Gluetun reporting no hostname is normal rather
+// than evidence of anything, so the remembered value stays the best answer available.
+func TestTheRememberedPinSurvivesInModesThatDoNotPin(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Switch.Mode = config.ReconnectStatus
+	})
+	harness.run(t, func() bool { return harness.engine.Snapshot().Gluetun.Reachable })
+	engine := harness.engine
+
+	const selected = "se-01.protonvpn.net"
+	if err := engine.state.update(func(state *persistedState) {
+		state.PinnedHostname = selected
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine.mutateSnapshot(func(snapshot *Snapshot) {
+		snapshot.Gluetun.SettingsReadable = true
+		snapshot.Gluetun.Selection = map[string][]string{"countries": {"Sweden"}}
+		snapshot.Gluetun.Exit.IP = "203.0.113.7"
+	})
+
+	if hostname, _ := engine.currentHostname(); hostname != selected {
+		t.Errorf("hostname = %q, want the remembered %q in status mode", hostname, selected)
+	}
+	engine.verifyGluetunPin()
+	if got := engine.state.snapshot().PinnedHostname; got != selected {
+		t.Errorf("PinnedHostname = %q, want it kept in a mode that never pins", got)
+	}
+}
+
+// Load and latency go through the immediate write path, not the deferred one, so they are
+// on disk as soon as they are sampled. Asserted rather than assumed: the two paths look
+// identical at the call site and the difference is one method name.
+func TestLoadAndLatencyStatisticsAreOnDiskImmediately(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+	})
+	_ = fake
+	engine := harness.engine
+	engine.applyLogicals(mixedP2PLogicals(), false)
+
+	hostname := engine.ranked[0].Candidate.Hostname
+	engine.prober.Record(engine.ranked[0].Candidate.EntryIP, 37*time.Millisecond)
+	engine.recordSamples()
+
+	// A fresh store over the same directory, without any flush: whatever is there is what
+	// a restart would find.
+	reloaded := newStateStore(filepath.Dir(engine.state.path))
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	record, found := reloaded.snapshot().Stats[hostname]
+	if !found {
+		t.Fatal("no statistics on disk after a sample")
+	}
+	if record.LoadLast == 0 || record.LoadLowest == 0 || record.LoadHighest == 0 {
+		t.Errorf("load statistics did not reach the disk: %+v", record)
+	}
+	if record.RTTLastMS != 37 || record.RTTLowestMS != 37 || record.RTTHighestMS != 37 {
+		t.Errorf("latency statistics did not reach the disk: %+v", record)
+	}
+	if record.Samples != 1 {
+		t.Errorf("samples = %d, want 1", record.Samples)
+	}
+
+	// A second, worse reading widens the range rather than replacing it - the point of
+	// keeping extremes at all.
+	engine.prober.Record(engine.ranked[0].Candidate.EntryIP, 210*time.Millisecond)
+	engine.recordSamples()
+
+	reloaded = newStateStore(filepath.Dir(engine.state.path))
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	record = reloaded.snapshot().Stats[hostname]
+	if record.RTTLowestMS != 37 {
+		t.Errorf("lowest = %d ms, want the earlier 37 kept", record.RTTLowestMS)
+	}
+	if record.RTTHighestMS < 100 {
+		t.Errorf("highest = %d ms, want the slower reading recorded", record.RTTHighestMS)
 	}
 }

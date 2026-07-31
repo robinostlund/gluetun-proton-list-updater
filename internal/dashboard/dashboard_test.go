@@ -99,6 +99,14 @@ func (s *stubController) RunUpdater(_ context.Context) error {
 	return s.record("run-updater")
 }
 
+func (s *stubController) CheckGluetun(_ context.Context) error {
+	return s.record("check-gluetun")
+}
+
+func (s *stubController) ReadTransfer(_ context.Context) error {
+	return s.record("read-transfer")
+}
+
 func (s *stubController) SetVPN(_ context.Context, status string) error {
 	return s.record("set-vpn:" + status)
 }
@@ -1405,7 +1413,8 @@ func TestTheQBittorrentCardIsBandedLikeTheOthers(t *testing.T) {
 	for _, match := range regexp.MustCompile(`<h3 class="card-section">([^<]*)</h3>`).FindAllSubmatch(card, -1) {
 		bands = append(bands, string(match[1]))
 	}
-	want := []string{"Connection", "Incoming connections", "Throughput", "Effect on switching"}
+	want := []string{"Connection", "Incoming connections", "Throughput", "Effect on switching",
+		"Controls"}
 	if strings.Join(bands, "|") != strings.Join(want, "|") {
 		t.Errorf("bands = %v, want %v", bands, want)
 	}
@@ -1665,8 +1674,13 @@ func TestQBittorrentsOwnCapsAreShown(t *testing.T) {
 
 // Reading order: what you came to do, then what you came to read, then reference.
 //
-// The controls used to sit below the cards, so acting on what a card told you meant
-// scrolling back past it.
+// The page order, and the rule that replaced a shared Controls panel: every control lives
+// in the card for the thing it acts on.
+//
+// The panel was itself a fix for controls sitting *below* the cards, so acting on what a
+// card told you meant scrolling back past it. Putting them in the cards goes further - it
+// also makes it obvious which integration each button talks to, which a single row of eight
+// buttons never did.
 func TestThePageIsOrderedDoThenRead(t *testing.T) {
 	t.Parallel()
 
@@ -1678,7 +1692,6 @@ func TestThePageIsOrderedDoThenRead(t *testing.T) {
 	order := []string{
 		`id="alerts"`,
 		`id="status-strip"`,
-		`<h2>Controls</h2>`,
 		`<h2>Server selection</h2>`,
 		`<h2>Gluetun</h2>`,
 		`<h2>ProtonVPN</h2>`,
@@ -1708,6 +1721,33 @@ func TestThePageIsOrderedDoThenRead(t *testing.T) {
 	// The reference settings are shown, not folded away, and named for what they are.
 	if bytes.Contains(page, []byte("Effective settings")) {
 		t.Error(`"Effective settings" did not say whose settings they are`)
+	}
+
+	// No shared Controls panel: a control belongs to the card for what it acts on.
+	if bytes.Contains(page, []byte(`<h2>Controls</h2>`)) {
+		t.Error("the shared Controls panel is back; controls belong in their own cards")
+	}
+
+	// Every control that acts on something is inside a card, and every card that has any
+	// puts them in a band called Controls.
+	for _, card := range []struct{ name, action string }{
+		{"Server selection", "/api/reconnect"},
+		{"Gluetun", "/api/gluetun/refresh"},
+		{"ProtonVPN", "/api/refresh"},
+		{"qBittorrent", "/api/qbittorrent/refresh"},
+	} {
+		pattern := regexp.MustCompile(`(?s)<h2>` + card.name + `</h2>.*?</article>`)
+		body := pattern.Find(page)
+		if body == nil {
+			t.Errorf("could not find the %s card", card.name)
+			continue
+		}
+		if !bytes.Contains(body, []byte(card.action)) {
+			t.Errorf("the %s card does not own %s", card.name, card.action)
+		}
+		if !bytes.Contains(body, []byte(`<h3 class="card-section">Controls</h3>`)) {
+			t.Errorf("the %s card has controls but no Controls band", card.name)
+		}
 	}
 }
 
@@ -2279,5 +2319,89 @@ func TestAMissingTransferFigureBlamesTheRightThing(t *testing.T) {
 	if count := bytes.Count(stats, []byte("'needs qBittorrent'")); count != 1 {
 		t.Errorf(`"needs qBittorrent" is rendered in %d places; it belongs only where `+
 			`nothing is measuring at all`, count)
+	}
+}
+
+// One appearance for every control, and one refresh per integration.
+//
+// The buttons used to differ - a single accent-filled "primary" among plain ones - which
+// read as a ranking of importance that does not exist: reconnecting is not more significant
+// than stopping the VPN. And a shared row of eight buttons gave no clue which external
+// service each one talked to.
+func TestControlsLookAlikeAndSayWhichIntegrationTheyDrive(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every control button carries the shared class, so none of them can drift.
+	actions := regexp.MustCompile(`<button [^>]*data-(?:action|lifecycle)="[^"]+"[^>]*>`).
+		FindAll(page, -1)
+	if len(actions) < 10 {
+		t.Fatalf("found only %d control buttons; the page has more than that", len(actions))
+	}
+	for _, button := range actions {
+		if !bytes.Contains(button, []byte(`class="control"`)) {
+			t.Errorf("a control has no shared class: %s", button)
+		}
+	}
+	if !bytes.Contains(styles, []byte("button.control {")) {
+		t.Error("the shared control appearance is not defined")
+	}
+	// And the old ranked look is gone from the controls.
+	if bytes.Contains(page, []byte(`class="primary"`)) {
+		t.Error(`a control still uses "primary", which ranked buttons that are not ranked`)
+	}
+
+	// One refresh per integration, so a refresh is always attributable to one service.
+	for _, refresh := range []string{
+		"/api/gluetun/refresh", "/api/qbittorrent/refresh", "/api/refresh", "/api/loads",
+	} {
+		if !bytes.Contains(page, []byte(`data-action="`+refresh+`"`)) {
+			t.Errorf("no control for %s", refresh)
+		}
+	}
+	// Proton keeps two, because the two calls cost very different amounts and collapsing
+	// them would make the expensive one happen every time the cheap one was wanted.
+	proton := regexp.MustCompile(`(?s)<h2>ProtonVPN</h2>.*?</article>`).Find(page)
+	for _, action := range []string{"/api/refresh", "/api/loads"} {
+		if !bytes.Contains(proton, []byte(action)) {
+			t.Errorf("the ProtonVPN card is missing %s", action)
+		}
+	}
+}
+
+// The per-integration refresh endpoints.
+func TestTheRefreshEndpoints(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct{ path, want string }{
+		{"/api/gluetun/refresh", "check-gluetun"},
+		{"/api/qbittorrent/refresh", "read-transfer"},
+	} {
+		t.Run(testCase.path, func(t *testing.T) {
+			stub := newStub()
+			server := newTestServer(t, stub, Options{})
+
+			response, err := server.Client().Post(server.URL+testCase.path, "application/json",
+				strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+
+			if response.StatusCode != http.StatusAccepted {
+				t.Errorf("status = %d, want 202", response.StatusCode)
+			}
+			if !containsString(stub.recorded(), testCase.want) {
+				t.Errorf("calls = %v, want %q", stub.recorded(), testCase.want)
+			}
+		})
 	}
 }

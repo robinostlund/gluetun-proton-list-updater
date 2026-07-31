@@ -312,6 +312,9 @@ The current column also answers the two questions a single load figure prompts:
   "is it flapping?". It reads `unknown` unless this tool made the switch: if Gluetun moved on its
   own, or the tunnel was already up when this container started, the arrival time is genuinely not
   known and a number would be a guess.
+- **Transferred via this server** and **Fastest measured rate** — two different facts, which were
+  briefly one row and read as whichever the reader assumed. The *Best candidate* column shows only
+  the volume: a rate on a server the tunnel is not using would read as a rate it is achieving now.
 - **Measured throughput** — how much data has ever moved through this server. What has been
   *observed* about it over time, as opposed to what Proton predicts, is in the [candidate detail
   panel](#clicking-a-candidate): the best and worst load and latency ever seen, the fastest transfer
@@ -324,12 +327,51 @@ Below it: the **Decision** in the engine's own words (`cooldown active for anoth
 thresholds behind it, what the selection is **restricted to** (P2P only, and which Gluetun setting
 caused it), and how the current server was **identified**.
 
+That last one matters more than it looks, because **restarting Gluetun discards the selection**. The
+hostname is applied through Gluetun's control server at runtime, not written into its configuration,
+so a restarted Gluetun comes back having chosen a server from the filters it was *started* with. It is
+identified in three ways, in descending order of confidence:
+
+| Source | What it means |
+|---|---|
+| `pinned` | Gluetun's own settings name exactly this hostname. Exact — Gluetun validated it |
+| `public-ip` | Gluetun's exit address matches this server's published `ExitIP`. Reliable when it hits, meaningless when it misses: Proton's published address is often not the one the internet sees |
+| `remembered` | What this tool last asked for, used **only** when Gluetun could not be asked |
+
+The third is deliberately narrow. A readable Gluetun reporting *no* hostname selection **disproves**
+the remembered value rather than merely failing to confirm it — so the current server reads as unknown
+and the next evaluation re-selects and re-pins. This shipped wrong once: the remembered value was
+returned whenever nothing else matched, so after a Gluetun restart the dashboard named the wrong
+server, transfer figures were credited to it, and selection saw nothing to fix because its own choice
+looked current. A warning names the server it has forgotten and why.
+
 **Gluetun** — the tunnel, its exit address, the server data written for it, and what Gluetun's own
 control server reports, in one place. It also carries **controls for Gluetun's own loops** — start
-and stop the VPN, start and stop its DNS-over-TLS resolver, and run its updater — placed next to the
-state they change. Stopping either leaves it stopped: the engine treats a stopped tunnel as a
-deliberate decision and never starts it behind you. Stopping the VPN asks first, since every
-connection through it drops. Tunnel
+and stop the VPN, start and stop its DNS-over-TLS resolver, run its updater, refresh what it reports,
+and rewrite the servers file — placed next to the state they change. Stopping either loop leaves it
+stopped: the engine treats a stopped tunnel as a deliberate decision and never starts it behind you.
+Stopping the VPN asks first, since every connection through it drops.
+
+### Controls live in the card for what they act on
+
+There is no shared controls panel. Every button sits in the card for the integration it talks to, and
+each card that has any puts them in a **Controls** band:
+
+| Card | Controls |
+|---|---|
+| **Server selection** | Reconnect to best, Re-evaluate, and the automatic-switching toggle |
+| **Gluetun** | Refresh, Rewrite servers.json, start/stop VPN, start/stop DNS, Run updater |
+| **ProtonVPN** | Refresh server list, Refresh loads, Probe latency |
+| **qBittorrent** | Refresh |
+
+Every control has the same appearance. They used to differ — one accent-filled button among plain
+ones — which read as a ranking of importance that does not exist: reconnecting is not more
+significant than stopping the VPN.
+
+**ProtonVPN keeps two refreshes rather than one**, because the two calls cost very different amounts:
+the server list is several megabytes and Proton changes it about twice a day, while the loads are a
+few kilobytes and change every few minutes. A single "Refresh" would make the expensive call every
+time someone wanted the cheap one. *Probe latency* is local measurement, not a Proton API call. Tunnel
 status, version, protocol, provider, DNS; the public IP with its location, organisation and reverse
 DNS; then the layout, paths, schema version and write outcome of the data written for Gluetun.
 
