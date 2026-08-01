@@ -3013,3 +3013,48 @@ func TestTheEventStreamEndsWhenTheClientDisconnects(t *testing.T) {
 		t.Fatal("the event stream outlived its client")
 	}
 }
+
+// The hidden attribute must beat any author rule that sets display.
+//
+// Browsers hide [hidden] through their own stylesheet, which any author `display` overrides -
+// so `.activity { display: inline-flex }` silently cancelled it, and the spinner in the top bar
+// span permanently on an idle tool. The element was correctly marked hidden the whole time.
+func TestTheHiddenAttributeActuallyHides(t *testing.T) {
+	t.Parallel()
+
+	page, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One rule covers every element that uses the attribute, including ones added later.
+	if !regexp.MustCompile(`\[hidden\]\s*\{[^}]*display:\s*none\s*!important`).Match(styles) {
+		t.Error("nothing forces [hidden] to win over an author display rule")
+	}
+
+	// And the attribute is still how these are controlled, rather than a class that would need
+	// its own rule.
+	for _, id := range []string{"activity", "transfer-card", "toast", "modal-blocked"} {
+		element := regexp.MustCompile(`<[a-z]+ id="` + id + `"[^>]*>`).Find(page)
+		if element == nil {
+			t.Errorf("could not find #%s", id)
+			continue
+		}
+		if !bytes.Contains(element, []byte("hidden")) {
+			t.Errorf("#%s no longer starts hidden", id)
+		}
+	}
+
+	// The spinner is only shown when the engine reports doing something.
+	script, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(script, []byte("activity.hidden = !snapshot.activity")) {
+		t.Error("the activity indicator is not tied to there being an activity")
+	}
+}

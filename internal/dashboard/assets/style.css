@@ -35,6 +35,15 @@
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute has to win.
+   
+   A browser hides [hidden] through its own stylesheet, and any author rule setting display
+   beats it - so `.activity { display: inline-flex }` quietly cancelled `hidden` on the
+   activity indicator, and the spinner span in the top bar span for ever, on an idle tool that
+   was doing nothing. Only that one element had the problem, but the others are one display
+   property away from it, and the rule that prevents the whole class costs a line. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
