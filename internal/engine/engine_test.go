@@ -5359,3 +5359,59 @@ func TestNoRateSourceIsHandledEverywhere(t *testing.T) {
 		t.Error("the transfer block reports itself configured with no source")
 	}
 }
+
+// The conversion from what qBittorrent reports to what the dashboard shows, pinned against
+// figures anyone can check by hand.
+//
+// It is applied exactly once - in the source adapter - and this is the test that would fail if
+// a second one crept in anywhere between there and the snapshot. A double conversion would put
+// every rate out by a factor of eight while still looking plausible.
+func TestWhatQBittorrentReportsBecomesWhatIsDisplayed(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		bytes      uint64
+		wantBits   uint64
+		wantString string
+	}{
+		// qBittorrent's own UI displays binary units, so these are the numbers an operator
+		// reads there. One mebibyte per second is 8.4 megabits, not 8: the difference is the
+		// 1024-versus-1000 in the unit qBittorrent chose, and it is 4.9%.
+		{"1 MiB/s as qBittorrent shows it", 1 << 20, 8_388_608, "8.4 Mbit/s"},
+		{"10 MiB/s", 10 << 20, 83_886_080, "83.9 Mbit/s"},
+		// Decimal, for comparison.
+		{"1 MB/s", 1_000_000, 8_000_000, "8 Mbit/s"},
+		// A saturated 100 Mbit line, which is the figure worth recognising.
+		{"12.5 MB/s", 12_500_000, 100_000_000, "100 Mbit/s"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			bits := bitsFromBytes(testCase.bytes)
+			if bits != testCase.wantBits {
+				t.Errorf("%d B/s converted to %d bit/s, want %d",
+					testCase.bytes, bits, testCase.wantBits)
+			}
+			if got := formatRate(bits); got != testCase.wantString {
+				t.Errorf("displayed as %q, want %q", got, testCase.wantString)
+			}
+		})
+	}
+
+	// And through the whole path, with a real qBittorrent response rather than a call to the
+	// conversion itself: a second multiplication downstream would show up here and nowhere
+	// else.
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 12_268_339, 1_258_291) // 11.7 and 1.2 MiB/s
+	})
+	_ = fake
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.HasReading })
+
+	transfer := harness.engine.Snapshot().Transfer
+	if transfer.DownloadSpeed != 98_146_712 {
+		t.Errorf("download = %d bit/s (%s), want 98146712 - the reported bytes times eight, once",
+			transfer.DownloadSpeed, formatRate(transfer.DownloadSpeed))
+	}
+	if transfer.UploadSpeed != 10_066_328 {
+		t.Errorf("upload = %d bit/s (%s), want 10066328",
+			transfer.UploadSpeed, formatRate(transfer.UploadSpeed))
+	}
+}

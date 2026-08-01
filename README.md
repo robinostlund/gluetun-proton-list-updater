@@ -332,11 +332,15 @@ hostname is applied through Gluetun's control server at runtime, not written int
 so a restarted Gluetun comes back having chosen a server from the filters it was *started* with. It is
 identified in three ways, in descending order of confidence:
 
-| Source | What it means |
+| Shown as | What it means |
 |---|---|
-| `pinned` | Gluetun's own settings name exactly this hostname. Exact — Gluetun validated it |
-| `public-ip` | Gluetun's exit address matches this server's published `ExitIP`. Reliable when it hits, meaningless when it misses: Proton's published address is often not the one the internet sees |
-| `remembered` | What this tool last asked for, used **only** when Gluetun could not be asked |
+| **confirmed by Gluetun** | Exact. Gluetun's settings name this hostname, so that is certainly where the tunnel is |
+| **matched by exit address** | Inferred. Gluetun's exit address matches this server's published `ExitIP` — reliable when it matches, meaningless when it does not, since Proton publishes the server address rather than the one the internet sees |
+| **unconfirmed, from this tool's last request** | Gluetun could not be asked, so this is only what was last requested of it |
+
+The row answers **how we know**, not **who decided**. This tool chooses the server and pins it;
+Gluetun validating and applying that hostname is what turns the choice into a confirmation. Why a
+particular server was chosen is in the *Decision* column and the switch history.
 
 The third is deliberately narrow. A readable Gluetun reporting *no* hostname selection **disproves**
 the remembered value rather than merely failing to confirm it — so the current server reads as unknown

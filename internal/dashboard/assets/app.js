@@ -520,16 +520,24 @@ function renderCurrent() {
   // last asked for.
   //
   // Published all along and shown nowhere, while the README described it as being on the page.
+  // The wording matters here, and the first attempt got it wrong: "Gluetun's own selection"
+  // reads as "Gluetun picked this server", which is the opposite of what happened. This tool
+  // chooses the server and pins it; Gluetun's settings then name it, which is how the choice
+  // is *confirmed*. The row answers "how do we know?", not "who decided?" - the Decision
+  // column and the switch history answer that.
   const sources = {
-    pinned: ['Gluetun\'s own selection',
-      'Exact: Gluetun\'s settings name this hostname, and it validated the name itself.'],
-    'public-ip': ['matching exit address',
-      'Gluetun\'s exit address matches this server\'s published one. Reliable when it '
-      + 'matches and meaningless when it does not, because Proton publishes the server '
-      + 'address rather than the one the internet sees.'],
-    remembered: ['what this tool last asked for',
-      'Unverified: Gluetun could not be asked. Used only while its settings are unreadable - '
-      + 'a readable Gluetun reporting no hostname disproves this rather than confirming it.'],
+    pinned: ['confirmed by Gluetun',
+      'Exact. Gluetun\'s settings name this hostname, so this is certainly where the tunnel '
+      + 'is. It says nothing about who chose it: this tool selects the server and pins it, '
+      + 'and Gluetun validating and applying the name is what confirms it.'],
+    'public-ip': ['matched by exit address',
+      'Inferred, not confirmed. Gluetun\'s exit address matches this server\'s published '
+      + 'one, which is reliable when it matches and meaningless when it does not - Proton '
+      + 'publishes the server address rather than the one the internet sees.'],
+    remembered: ['unconfirmed, from this tool\'s last request',
+      'Gluetun could not be asked, so this is only what was last requested of it. Used solely '
+      + 'while its settings are unreadable: a readable Gluetun naming no hostname disproves '
+      + 'this rather than confirming it.'],
   };
   const [label, why] = sources[snapshot.selection.current_source]
     || ['unknown', 'The tunnel is on a server this tool cannot identify.'];

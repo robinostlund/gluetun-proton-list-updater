@@ -2921,10 +2921,31 @@ func TestHowTheCurrentServerWasIdentifiedIsShown(t *testing.T) {
 			t.Errorf("the %q source is not explained", source)
 		}
 	}
+	// The row answers how the server was identified, not who chose it. The old wording said the
+	// second while meaning the first, which reads as Gluetun having picked the server - the
+	// opposite of what happens.
+	if bytes.Contains(withoutComments(script), []byte("own selection")) {
+		t.Error(`"Gluetun's own selection" reads as Gluetun having chosen the server`)
+	}
+	if !bytes.Contains(script, []byte("confirmed by Gluetun")) {
+		t.Error("the exact case does not describe itself as a confirmation")
+	}
+	if !bytes.Contains(script, []byte("who chose it")) {
+		t.Error("nothing distinguishes how the server was identified from who selected it")
+	}
 	// And an unidentifiable server says so rather than falling back to a blank.
 	if !bytes.Contains(script, []byte("cannot identify")) {
 		t.Error("an unidentifiable current server has no explanation")
 	}
+}
+
+// withoutComments strips // comments from a script before it is searched.
+//
+// Three separate assertions have now failed against a comment that quoted the very wording it
+// was explaining the removal of. Prose about the code is not the code, and a check that cannot
+// tell them apart reports the opposite of the truth.
+func withoutComments(script []byte) []byte {
+	return regexp.MustCompile(`(?m)//.*$`).ReplaceAll(script, nil)
 }
 
 // discardLogger keeps test output to failures.
