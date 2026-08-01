@@ -2325,16 +2325,24 @@ type fakeQBittorrent struct {
 	// while the rates keep arriving - so the fake has to be able to do that too.
 	prefsFailing bool
 	prefsCalls   int
-	requests     int
-	listenPort   uint16
-	randomPort   bool
-	connection   string
+	// version is what /api/v2/app/version answers, so an upgrade can be simulated.
+	version    string
+	requests   int
+	listenPort uint16
+	randomPort bool
+	connection string
 }
 
 func (f *fakeQBittorrent) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "v5.2.2")
+		f.mu.Lock()
+		version := f.version
+		f.mu.Unlock()
+		if version == "" {
+			version = "v5.2.2"
+		}
+		_, _ = io.WriteString(w, version)
 	})
 	mux.HandleFunc("GET /api/v2/app/preferences", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -3360,7 +3368,7 @@ func TestTheListenPortIsRetriedQuicklyAfterAFailure(t *testing.T) {
 	fake.listenPort = 46566
 	fake.mu.Unlock()
 
-	engine.refreshQBittorrentPreferences(context.Background())
+	engine.refreshQBittorrentPreferences(context.Background(), false)
 
 	if fake.preferenceCalls() == before {
 		t.Fatal("the settings were not retried after the short interval")
@@ -3376,7 +3384,7 @@ func TestTheListenPortIsRetriedQuicklyAfterAFailure(t *testing.T) {
 	// qBittorrent every twenty seconds forever.
 	settled := fake.preferenceCalls()
 	engine.qbPreferencesAt = time.Now().Add(-preferencesRetryInterval - time.Second)
-	engine.refreshQBittorrentPreferences(context.Background())
+	engine.refreshQBittorrentPreferences(context.Background(), false)
 	if fake.preferenceCalls() != settled {
 		t.Error("a successful read should go back to the slow interval")
 	}
@@ -5348,7 +5356,7 @@ func TestNoRateSourceIsHandledEverywhere(t *testing.T) {
 	}
 	// None of these may panic.
 	engine.refreshTransfer(context.Background(), "test")
-	engine.refreshQBittorrentPreferences(context.Background())
+	engine.refreshQBittorrentPreferences(context.Background(), false)
 	verdict, _ := engine.portForwardingVerdict(engine.Snapshot().Gluetun)
 	if verdict == "" {
 		t.Error("the port-forwarding verdict should still answer something")
@@ -5413,5 +5421,49 @@ func TestWhatQBittorrentReportsBecomesWhatIsDisplayed(t *testing.T) {
 	if transfer.UploadSpeed != 10_066_328 {
 		t.Errorf("upload = %d bit/s (%s), want 10066328",
 			transfer.UploadSpeed, formatRate(transfer.UploadSpeed))
+	}
+}
+
+// Pressing Refresh on the qBittorrent card must actually re-read its settings.
+//
+// The settings read is paced - they change only when an operator changes them, so polling them
+// as often as the rates would be waste. That pacing applied to the button too, so someone who
+// had just changed the listening port pressed Refresh, saw the rates update, and went on being
+// shown a port qBittorrent had already stopped using for up to five minutes.
+func TestRefreshingQBittorrentRereadsItsSettings(t *testing.T) {
+	var fake *fakeQBittorrent
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		fake = withQBittorrent(t, cfg, 0, 0)
+	})
+	fake.mu.Lock()
+	fake.listenPort = 6881
+	fake.mu.Unlock()
+	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.ListenPort == 6881 })
+	engine := harness.engine
+
+	// The operator changes the port in qBittorrent, moments after the last scheduled read.
+	fake.mu.Lock()
+	fake.listenPort = 46566
+	fake.mu.Unlock()
+
+	// A scheduled read leaves it alone, which is the behaviour worth keeping.
+	engine.refreshTransfer(context.Background(), "scheduled")
+	if got := engine.Snapshot().Transfer.ListenPort; got != 6881 {
+		t.Errorf("scheduled read returned %d; the pacing should have skipped the settings", got)
+	}
+
+	// The button does not.
+	engine.refreshTransferWith(context.Background(), "manual", true)
+	if got := engine.Snapshot().Transfer.ListenPort; got != 46566 {
+		t.Errorf("listen port = %d after pressing Refresh, want the new 46566", got)
+	}
+
+	// And the version is re-read too, so a qBittorrent upgrade shows up on the same press.
+	fake.mu.Lock()
+	fake.version = "v5.3.0"
+	fake.mu.Unlock()
+	engine.refreshTransferWith(context.Background(), "manual", true)
+	if got := engine.Snapshot().Transfer.Version; got != "v5.3.0" {
+		t.Errorf("version = %q after pressing Refresh, want v5.3.0", got)
 	}
 }

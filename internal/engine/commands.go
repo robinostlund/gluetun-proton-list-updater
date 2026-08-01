@@ -102,9 +102,13 @@ func (e *Engine) handleCommand(ctx context.Context, cmd command) {
 		e.publish()
 
 	case commandReadTransfer:
-		// One poll of qBittorrent, on demand. Nothing to report if the integration is off:
-		// the button only exists on a card that hides itself in that case.
-		e.refreshTransfer(ctx, "manual")
+		// One poll of qBittorrent, on demand, forcing the settings read too. Somebody pressing
+		// Refresh has usually just changed the listening port and wants to see it; the pacing
+		// that keeps the scheduled reads cheap would otherwise hide it for five minutes.
+		//
+		// Nothing to report if the integration is off: the button only exists on a card that
+		// hides itself in that case.
+		e.refreshTransferWith(ctx, "manual", true)
 
 	case commandRunUpdater:
 		// Reuses the reject-path helper, which also rewrites the servers file

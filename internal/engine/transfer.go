@@ -21,6 +21,16 @@ import (
 // known rates are kept, marked as not current, and they keep deferring switches until
 // qBittorrent answers again.
 func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
+	// The scheduled read, which honours the pacing on qBittorrent's settings.
+	e.refreshTransferWith(ctx, trigger, false)
+}
+
+// refreshTransferWith reads the rates, optionally forcing the paced settings read as well.
+//
+// force is not derived from the trigger string: a caller spelling the trigger differently would
+// silently lose the forcing, and this is the difference between a Refresh button that works and
+// one that quietly does half its job.
+func (e *Engine) refreshTransferWith(ctx context.Context, trigger string, force bool) {
 	// The source list, not qBittorrent specifically: guarding on the one implementation that
 	// exists today would mean a second source could be configured and never read, which is
 	// the whole point of having a list.
@@ -78,7 +88,7 @@ func (e *Engine) refreshTransfer(ctx context.Context, trigger string) {
 	}
 	e.rateSourceName = source
 	e.transferReachable = true
-	e.refreshQBittorrentPreferences(ctx)
+	e.refreshQBittorrentPreferences(ctx, force)
 	e.transferErr = ""
 	e.reading = reading
 	e.transferCheckedAt = time.Now()
@@ -296,7 +306,14 @@ const (
 // port is unknown and the mismatch check cannot run, which is exactly the failure
 // this tool exists to catch, so the reason is kept and reported rather than dropped
 // at debug level where nobody would ever see it.
-func (e *Engine) refreshQBittorrentPreferences(ctx context.Context) {
+// force is passed by the dashboard's Refresh button, which must not be rate-limited.
+//
+// The pacing below is right for a scheduled read: these settings change when an operator
+// changes them, so polling them as often as the rates would be waste. It is wrong for someone
+// pressing a button - they have just changed the listening port and want to see it. Without
+// this the button re-read the rates and silently skipped the settings for up to five minutes,
+// showing a port that qBittorrent had already stopped using.
+func (e *Engine) refreshQBittorrentPreferences(ctx context.Context, force bool) {
 	// Genuinely qBittorrent's own: the listening port and the random-port setting are its
 	// settings, not something a rate source in general would have.
 	if e.qbittorrent == nil {
@@ -306,7 +323,7 @@ func (e *Engine) refreshQBittorrentPreferences(ctx context.Context) {
 	if e.qbPreferencesErr != "" || e.qbPreferences.ListenPort == 0 || e.qbittorrentVersion == "" {
 		interval = preferencesRetryInterval
 	}
-	if !e.qbPreferencesAt.IsZero() && time.Since(e.qbPreferencesAt) < interval {
+	if !force && !e.qbPreferencesAt.IsZero() && time.Since(e.qbPreferencesAt) < interval {
 		return
 	}
 
@@ -341,7 +358,7 @@ func (e *Engine) refreshQBittorrentPreferences(ctx context.Context) {
 	// Only at startup was wrong in two ways. If qBittorrent was not running then - the
 	// common case when both containers come up together - it stayed blank for ever; and
 	// after a qBittorrent upgrade the dashboard reported the old version indefinitely.
-	if e.qbittorrentVersion == "" {
+	if e.qbittorrentVersion == "" || force {
 		if version, err := e.qbittorrent.Version(ctx); err == nil {
 			e.qbittorrentVersion = version
 			e.logger.Info("identified qbittorrent", "version", version)
