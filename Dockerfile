@@ -55,9 +55,16 @@ RUN mkdir -p /data /gluetun && chown -R updater:updater /data
 # a startup pre-flight check reports precisely which paths are not writable.
 WORKDIR /data
 
-ENV STATE_DIR=/data \
-    SERVERS_FILE=/gluetun/servers.json \
-    DASHBOARD_ADDRESS=:8080
+# No ENV defaults here, deliberately.
+#
+# The three that used to be set repeated defaults the code already has, so they were two places
+# to change one value. They also made the dashboard's settings panel report them as configured,
+# which was true (the image did set them) and misleading (the operator had not).
+#
+# One of them had gone stale as well: the servers-file variable was renamed during the move to
+# GLUETUN_-prefixed names, so the image went on setting something the program no longer read.
+# Nothing failed, because nothing was checking - a test now scans this file for variable names
+# the program does not define, which is why the old name is not spelled out here.
 
 EXPOSE 8080
 

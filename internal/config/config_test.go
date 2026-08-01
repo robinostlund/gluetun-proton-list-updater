@@ -699,10 +699,21 @@ func TestNoDocumentedVariableNameIsUnknown(t *testing.T) {
 			}
 			return nil
 		}
-		switch filepath.Ext(entry.Name()) {
-		case ".go", ".md", ".js", ".html", ".yml", ".yaml":
+		// The Dockerfile is scanned too. It sets environment variables like any other
+		// configuration, and being excluded from this scan is how it came to keep setting a
+		// servers-file variable long after that name was replaced - the image configuring
+		// something the program no longer read, with nothing to notice.
+		//
+		// Note the wording: naming the dead variable here would make this test fail on its own
+		// comment, which is exactly the point of scanning comments in the first place.
+		switch {
+		case entry.Name() == "Dockerfile":
 		default:
-			return nil
+			switch filepath.Ext(entry.Name()) {
+			case ".go", ".md", ".js", ".html", ".yml", ".yaml":
+			default:
+				return nil
+			}
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {
