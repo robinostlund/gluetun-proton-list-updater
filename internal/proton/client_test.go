@@ -44,7 +44,7 @@ func newTestClient(t *testing.T, store SessionStore, handler http.HandlerFunc) (
 
 	client, err := New(Options{
 		BaseURL:      server.URL,
-		AppVersion:   "linux-vpn-cli@4.15.2",
+		AppVersion:   "linux-vpn-gui@4.19.0",
 		UserAgent:    "test",
 		Username:     "user@example.com",
 		Password:     "secret",

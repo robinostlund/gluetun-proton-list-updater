@@ -201,8 +201,10 @@ func HasGluetunData(paths Paths) bool {
 // match - a version hardcoded here would rot with every Gluetun release.
 func DetectSchemaVersion(paths Paths) (version uint16, source string, err error) {
 	// The per-provider file is checked first: on a Gluetun that has migrated, the
-	// legacy file may still exist but be stale.
-	if paths.Directory != "" {
+	// legacy file may still exist but be stale. It only counts once Gluetun's
+	// manifest exists, though: in "both" layout this tool writes that file
+	// itself, and reading back our own guess would mask the real version.
+	if paths.Directory != "" && fileExists(paths.ManifestPath()) {
 		version, found, err := providerFileVersion(paths.ProviderPath())
 		if err != nil {
 			return 0, "", err
@@ -371,8 +373,10 @@ func writeLegacy(path string, section providerServers, preserveOthers bool) (pre
 	if preserveOthers {
 		existing, err := readRawFile(path)
 		if err != nil {
-			// A corrupt existing file must not stop us writing a good one; we
-			// simply cannot preserve its contents.
+			// Refuse rather than overwrite: an unreadable file may be one
+			// Gluetun is half-way through writing, and replacing it would
+			// silently drop every other provider's servers. The next write
+			// retries; GLUETUN_SERVERS_WRITE_MODE=replace forces through.
 			return nil, fmt.Errorf("reading existing %s: %w", path, err)
 		}
 		for key, value := range existing {

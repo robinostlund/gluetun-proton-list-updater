@@ -250,3 +250,19 @@ func TestSummaryReportsWhenItLastRan(t *testing.T) {
 		t.Errorf("LastRun = %v, want the newest measurement %v", got, newer)
 	}
 }
+
+// A server whose latest probe failed but whose previous RTT was kept is used by
+// scoring, so it is Measured - and must not also be counted as Failed.
+func TestSummarizeCountsAKeptResultOnce(t *testing.T) {
+	t.Parallel()
+
+	prober := New(Options{})
+	prober.record("10.0.0.1", Result{RTT: 10 * time.Millisecond})
+	prober.record("10.0.0.1", Result{Err: ErrUnreachable}) // keeps 10ms
+	prober.record("10.0.0.2", Result{Err: ErrUnreachable})
+
+	summary := prober.Summarize()
+	if summary.Measured != 1 || summary.Failed != 1 {
+		t.Errorf("measured/failed = %d/%d, want 1/1", summary.Measured, summary.Failed)
+	}
+}

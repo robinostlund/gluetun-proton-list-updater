@@ -930,3 +930,18 @@ func TestTheDocumentedDefaultsMatchTheCode(t *testing.T) {
 	}
 	t.Logf("compared %d documented defaults against the code", checked)
 }
+
+// Values outside uint16 must be rejected, not wrapped: 65536 would otherwise
+// become 0 (auto-detect) and 65540 would become 4, both silently.
+func TestSchemaVersionDoesNotWrap(t *testing.T) {
+	for _, value := range []string{"65536", "65540", "-1", "1001"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("PROTON_USERNAME", "user")
+			t.Setenv("PROTON_PASSWORD", "pass")
+			t.Setenv("GLUETUN_SERVERS_SCHEMA_VERSION", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "GLUETUN_SERVERS_SCHEMA_VERSION") {
+				t.Errorf("Load() error = %v, want a GLUETUN_SERVERS_SCHEMA_VERSION error", err)
+			}
+		})
+	}
+}

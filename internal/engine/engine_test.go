@@ -762,10 +762,10 @@ func TestDecideLoadTriggerRequiresABetterCandidate(t *testing.T) {
 	betterButStillOverloaded := scoredWithLoad("busy-b", 80, 0.8)
 	genuinelyBetter := scoredWithLoad("quiet", 10, 0.1)
 
-	if verdict := engine.decide(current, true, betterButStillOverloaded, false); verdict.shouldSwitch {
+	if verdict := engine.decide(current, true, betterButStillOverloaded, false, false); verdict.shouldSwitch {
 		t.Errorf("should not switch when the best candidate is also overloaded: %+v", verdict)
 	}
-	if verdict := engine.decide(current, true, genuinelyBetter, false); !verdict.shouldSwitch {
+	if verdict := engine.decide(current, true, genuinelyBetter, false, false); !verdict.shouldSwitch {
 		t.Errorf("should switch when a candidate is below the trigger: %+v", verdict)
 	}
 }
@@ -786,10 +786,10 @@ func TestDecideRespectsCooldownAndImprovement(t *testing.T) {
 	clear := scoredWithLoad("clear", 5, 0.05)
 
 	// No switch yet, so no cooldown: the improvement rule decides.
-	if verdict := engine.decide(current, true, marginal, false); verdict.shouldSwitch {
+	if verdict := engine.decide(current, true, marginal, false, false); verdict.shouldSwitch {
 		t.Errorf("a 0.05 gain must not trigger a switch when 0.2 is required: %+v", verdict)
 	}
-	if verdict := engine.decide(current, true, clear, false); !verdict.shouldSwitch {
+	if verdict := engine.decide(current, true, clear, false, false); !verdict.shouldSwitch {
 		t.Errorf("a 0.35 gain should trigger a switch: %+v", verdict)
 	}
 
@@ -799,13 +799,13 @@ func TestDecideRespectsCooldownAndImprovement(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	verdict := engine.decide(current, true, clear, false)
+	verdict := engine.decide(current, true, clear, false, false)
 	if verdict.shouldSwitch {
 		t.Errorf("the cooldown should block the switch: %+v", verdict)
 	}
 
 	// A manual request ignores both.
-	if verdict := engine.decide(current, true, clear, true); !verdict.shouldSwitch {
+	if verdict := engine.decide(current, true, clear, true, false); !verdict.shouldSwitch {
 		t.Errorf("a forced switch must always proceed: %+v", verdict)
 	}
 }
@@ -1673,7 +1673,7 @@ func TestForcedReconnectStillRespectsThePortForwardRequirement(t *testing.T) {
 	}
 
 	// And the forced decision picks exactly that.
-	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], true)
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], true, false)
 	if !verdict.shouldSwitch || verdict.reason != "manual" {
 		t.Errorf("a forced reconnect should proceed: %+v", verdict)
 	}
@@ -2449,7 +2449,7 @@ func TestAForcedSwitchIsNotDeferredByATransfer(t *testing.T) {
 	harness.run(t, func() bool { return harness.engine.Snapshot().Transfer.Busy })
 	engine := harness.engine
 
-	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], true)
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], true, false)
 	if !verdict.shouldSwitch || verdict.reason != "manual" {
 		t.Errorf("a forced switch should proceed despite a transfer: %+v", verdict)
 	}
@@ -2649,7 +2649,7 @@ func TestAnUnknownCurrentServerDoesNotBypassTheTransferGate(t *testing.T) {
 	engine := harness.engine
 
 	// haveCurrent=false is the path that used to win outright.
-	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false)
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false, false)
 	if verdict.shouldSwitch {
 		t.Errorf("switched with a transfer running: %+v", verdict)
 	}
@@ -2674,7 +2674,7 @@ func TestTheLoadTriggerDoesNotBypassTheTransferGate(t *testing.T) {
 	}, Score: 0.9}
 	quiet := engine.ranked[0]
 
-	verdict := engine.decide(busy, true, quiet, false)
+	verdict := engine.decide(busy, true, quiet, false, false)
 	if verdict.shouldSwitch {
 		t.Errorf("the load trigger bypassed the transfer gate: %+v", verdict)
 	}
@@ -4594,7 +4594,7 @@ func TestTheMinimumIntervalAlsoBoundsAnUnidentifiedServer(t *testing.T) {
 		snapshot.Gluetun.Exit.IP = ""
 	})
 
-	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false)
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false, false)
 	if verdict.shouldSwitch {
 		t.Errorf("switched with the floor armed: %+v", verdict)
 	}
@@ -4603,7 +4603,7 @@ func TestTheMinimumIntervalAlsoBoundsAnUnidentifiedServer(t *testing.T) {
 	}
 
 	// An explicit instruction is still the operator's to give.
-	if forced := engine.decide(scoring.Scored{}, false, engine.ranked[0], true); !forced.shouldSwitch {
+	if forced := engine.decide(scoring.Scored{}, false, engine.ranked[0], true, false); !forced.shouldSwitch {
 		t.Error("a forced switch should bypass the floor")
 	}
 }
@@ -4625,7 +4625,7 @@ func TestAlreadyOnTheBestServerIsStillTheAnswerUnderTheFloor(t *testing.T) {
 	}
 
 	best := engine.ranked[0]
-	verdict := engine.decide(best, true, best, false)
+	verdict := engine.decide(best, true, best, false, false)
 	if verdict.explanation != "already on the best server" {
 		t.Errorf("explanation = %q, want the friendlier truth", verdict.explanation)
 	}
@@ -4833,7 +4833,7 @@ func TestARestartDuringATransferDoesNotSwitch(t *testing.T) {
 	}
 
 	// And the whole decision agrees, rather than only the gate.
-	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false)
+	verdict := engine.decide(scoring.Scored{}, false, engine.ranked[0], false, false)
 	if verdict.shouldSwitch {
 		t.Errorf("decided to switch mid-transfer: %+v", verdict)
 	}
@@ -4869,7 +4869,7 @@ func TestAnAcceptedPinIsImmediatelyTheCurrentServer(t *testing.T) {
 	}
 
 	// So a second evaluation immediately afterwards has nothing to fix.
-	verdict := engine.decide(target, true, target, false)
+	verdict := engine.decide(target, true, target, false, false)
 	if verdict.shouldSwitch {
 		t.Errorf("switched again straight after a successful switch: %+v", verdict)
 	}
@@ -5465,5 +5465,160 @@ func TestRefreshingQBittorrentRereadsItsSettings(t *testing.T) {
 	engine.refreshTransferWith(context.Background(), "manual", true)
 	if got := engine.Snapshot().Transfer.Version; got != "v5.3.0" {
 		t.Errorf("version = %q after pressing Refresh, want v5.3.0", got)
+	}
+}
+
+// A crashed tunnel pinned to the best server must still be moved: staying put
+// keeps it down. Only the hard minimum-interval floor may hold it back.
+func TestDecideMovesCrashedTunnelOffTheBestServer(t *testing.T) {
+	t.Parallel()
+
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Switch.Cooldown = time.Hour
+		cfg.Switch.MinInterval = 0
+		cfg.Switch.MinImprovement = 0.2
+	})
+	engine := harness.engine
+	best := scoredWithLoad("best", 10, 0.10)
+
+	if verdict := engine.decide(best, true, best, false, false); verdict.shouldSwitch {
+		t.Errorf("a healthy tunnel on the best server must stay: %+v", verdict)
+	}
+	if verdict := engine.decide(best, true, best, false, true); !verdict.shouldSwitch {
+		t.Errorf("a crashed tunnel on the best server must move: %+v", verdict)
+	}
+}
+
+func TestObserveLoadKeepsAGenuineZero(t *testing.T) {
+	t.Parallel()
+	var stats ServerStats
+	stats.observeLoad(0, time.Now())
+	stats.observeLoad(30, time.Now())
+	if stats.LoadLowest != 0 || stats.LoadHighest != 30 {
+		t.Errorf("lowest/highest = %d/%d, want 0/30", stats.LoadLowest, stats.LoadHighest)
+	}
+}
+
+// A manual switch Gluetun is merely slow to confirm must be verified, not
+// reported as failed - and the pin must be remembered, or the next health
+// check would see Gluetun's selection differ from the old pin and wrongly
+// conclude Gluetun had restarted.
+func TestManualSwitchVerifiesAfterASlowStateChange(t *testing.T) {
+	harness := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Gluetun.MutationTimeout = 200 * time.Millisecond
+	})
+	harness.run(t, func() bool {
+		history := harness.engine.Snapshot().History
+		return len(history) > 0 && history[0].Succeeded
+	})
+	harness.gluetun.mu.Lock()
+	harness.gluetun.settingsDelay = 600 * time.Millisecond
+	harness.gluetun.mu.Unlock()
+
+	target := harness.engine.ranked[len(harness.engine.ranked)-1].Candidate.Hostname
+	if err := harness.engine.switchTo(context.Background(), target); err != nil {
+		t.Fatalf("switchTo reported a failure for a switch that applied: %v", err)
+	}
+	if got := harness.engine.state.snapshot().PinnedHostname; got != target {
+		t.Errorf("pinned hostname = %q, want %q", got, target)
+	}
+	history := harness.engine.Snapshot().History
+	if last := history[0]; !last.Succeeded || last.To != target {
+		t.Errorf("latest history entry = %+v, want a successful switch to %s", last, target)
+	}
+}
+
+// "Reconnect to best" must not move a healthy tunnel off the best server: the
+// candidate loop skips the current host, so it used to land on the second-best.
+func TestForcedSwitchStaysWhenAlreadyOnTheBest(t *testing.T) {
+	t.Parallel()
+
+	engine := newHarness(t, false, nil).engine
+	best := scoredWithLoad("best", 10, 0.10)
+	other := scoredWithLoad("other", 50, 0.50)
+
+	if verdict := engine.decide(best, true, best, true, false); verdict.shouldSwitch {
+		t.Errorf("forced switch on the best server should stay: %+v", verdict)
+	}
+	if verdict := engine.decide(other, true, best, true, false); !verdict.shouldSwitch {
+		t.Errorf("forced switch from another server must proceed: %+v", verdict)
+	}
+	if verdict := engine.decide(best, true, best, true, true); !verdict.shouldSwitch {
+		t.Errorf("forced switch on a crashed best server must proceed: %+v", verdict)
+	}
+}
+
+// FILTER_MAX_LOAD and Proton's disabled flag must follow every loads refresh in
+// both directions, not just the twelve-hourly full fetch: a server excluded at
+// 92% has to come back once it quietens down, and one that fills up has to go.
+func TestLoadsRefreshReadmitsAndDropsByMaxLoad(t *testing.T) {
+	t.Parallel()
+
+	engine := newHarness(t, false, func(cfg *config.Config) {
+		cfg.Filter.MaxLoad = 50
+	}).engine
+	engine.applyLogicals(mixedP2PLogicals(), false) // p2p 40%, plain 2%
+
+	hostnames := func() []string {
+		var names []string
+		for _, candidate := range engine.candidates {
+			names = append(names, candidate.Hostname)
+		}
+		slices.Sort(names)
+		return names
+	}
+	if got := hostnames(); len(got) != 2 {
+		t.Fatalf("candidates = %v, want both servers", got)
+	}
+
+	// plain fills up past MAX_LOAD, p2p is taken out of service.
+	engine.setLatestLoads([]proton.ServerLoad{
+		{ID: "p2p", Load: 10, Status: 0},
+		{ID: "plain", Load: 95, Status: 1},
+	})
+	engine.applyLogicals(engine.logicalsInUse, true)
+	if got := hostnames(); len(got) != 0 {
+		t.Errorf("candidates = %v, want none: one disabled, one over MAX_LOAD", got)
+	}
+
+	// Both recover.
+	engine.setLatestLoads([]proton.ServerLoad{
+		{ID: "p2p", Load: 10, Status: 1},
+		{ID: "plain", Load: 20, Status: 1},
+	})
+	engine.applyLogicals(engine.logicalsInUse, true)
+	if got := hostnames(); len(got) != 2 {
+		t.Errorf("candidates = %v, want both servers back", got)
+	}
+	for _, candidate := range engine.candidates {
+		if candidate.Hostname == "node-se-plain.protonvpn.net" && candidate.Load != 20 {
+			t.Errorf("plain load = %d, want the refreshed 20", candidate.Load)
+		}
+	}
+
+	// A fresh full fetch is newer than any earlier loads refresh, so those
+	// figures must not be laid over it.
+	engine.applyLogicals(mixedP2PLogicals(), false)
+	for _, candidate := range engine.candidates {
+		if candidate.Hostname == "node-se-plain.protonvpn.net" && candidate.Load != 2 {
+			t.Errorf("plain load = %d after a fresh fetch, want the list's own 2", candidate.Load)
+		}
+	}
+}
+
+// Bursty traffic reads a zero instantaneous rate between pieces while the byte
+// counters still advance. Those polls must not each count as a new visit.
+func TestBytesOnlyPollsDoNotCountExtraVisits(t *testing.T) {
+	harness, _ := throughputHarness(t, 0)
+	engine := harness.engine
+
+	pinCurrent(t, engine, "se-01.protonvpn.net", time.Hour)
+	engine.recordTransfer(transferAt(0, 0, 10<<30, 0)) // baseline
+	engine.recordTransfer(transferAt(0, 0, 11<<30, 0)) // bytes moved, rate reads 0
+	engine.recordTransfer(transferAt(0, 0, 12<<30, 0)) // and again
+	engine.recordTransfer(transferAt(2<<20, 0, 13<<30, 0))
+
+	if got := engine.state.snapshot().Stats["se-01.protonvpn.net"].Visits; got != 1 {
+		t.Errorf("visits = %d, want 1 for a single stay", got)
 	}
 }

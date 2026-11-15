@@ -3058,3 +3058,78 @@ func TestTheHiddenAttributeActuallyHides(t *testing.T) {
 		t.Error("the activity indicator is not tied to there being an activity")
 	}
 }
+
+// Command endpoints must not be reachable from another site: a plain HTML
+// form can POST without CORS, and the browser replays cached basic auth.
+func TestCommandsRejectCrossSiteRequests(t *testing.T) {
+	t.Parallel()
+	stub := newStub()
+	server := newTestServer(t, stub, Options{})
+
+	post := func(contentType string, headers map[string]string, body string) int {
+		request, err := http.NewRequest(http.MethodPost, server.URL+"/api/reconnect", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if contentType != "" {
+			request.Header.Set("Content-Type", contentType)
+		}
+		for key, value := range headers {
+			request.Header.Set(key, value)
+		}
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		return response.StatusCode
+	}
+
+	if got := post("application/x-www-form-urlencoded", nil, ""); got != http.StatusUnsupportedMediaType {
+		t.Errorf("form POST status = %d, want 415", got)
+	}
+	if got := post("text/plain", nil, `{"x":1}=`); got != http.StatusUnsupportedMediaType {
+		t.Errorf("text/plain POST status = %d, want 415", got)
+	}
+	if got := post("application/json", map[string]string{"Origin": "https://evil.example"}, "{}"); got != http.StatusForbidden {
+		t.Errorf("foreign Origin status = %d, want 403", got)
+	}
+	if got := post("application/json", map[string]string{"Sec-Fetch-Site": "cross-site"}, "{}"); got != http.StatusForbidden {
+		t.Errorf("cross-site status = %d, want 403", got)
+	}
+	if containsString(stub.recorded(), "switch-best") {
+		t.Error("a rejected request still reached the controller")
+	}
+	if got := post("application/json", map[string]string{"Origin": server.URL, "Sec-Fetch-Site": "same-origin"}, "{}"); got != http.StatusAccepted {
+		t.Errorf("same-origin status = %d, want 202", got)
+	}
+}
+
+func TestJSONBodyRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+	server := newTestServer(t, newStub(), Options{})
+	response, err := server.Client().Post(server.URL+"/api/switch", "application/json",
+		strings.NewReader(`{"hostname":"se-1.protonvpn.net"}garbage`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.StatusCode)
+	}
+}
+
+func TestDashboardSetsSecurityHeaders(t *testing.T) {
+	t.Parallel()
+	server := newTestServer(t, newStub(), Options{})
+	response, err := server.Client().Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	for _, header := range []string{"Content-Security-Policy", "X-Frame-Options", "X-Content-Type-Options"} {
+		if response.Header.Get(header) == "" {
+			t.Errorf("%s not set", header)
+		}
+	}
+}

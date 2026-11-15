@@ -421,6 +421,31 @@ func ApplyLoads(candidates []Candidate, loads []proton.ServerLoad) (updated int,
 	return updated, disabled
 }
 
+// OverlayLoads returns a copy of logicals with the load, score and status from
+// loads applied. Building candidates from the overlaid list, rather than
+// patching loads onto candidates afterwards, is what lets FILTER_MAX_LOAD and
+// Proton's disabled flag follow every loads refresh in both directions: a
+// server that quietens down is re-admitted, one that fills up is dropped.
+func OverlayLoads(logicals []proton.LogicalServer, loads []proton.ServerLoad) []proton.LogicalServer {
+	if len(loads) == 0 {
+		return logicals
+	}
+	byID := make(map[string]proton.ServerLoad, len(loads))
+	for _, load := range loads {
+		byID[load.ID] = load
+	}
+	overlaid := make([]proton.LogicalServer, len(logicals))
+	for i, logical := range logicals {
+		if load, ok := byID[logical.ID]; ok {
+			logical.Load = load.Load
+			logical.Score = load.Score
+			logical.Status = load.Status
+		}
+		overlaid[i] = logical
+	}
+	return overlaid
+}
+
 // resolveCountry determines the exit country of a logical server.
 //
 // ExitCountry is authoritative, but Secure Core names encode entry and exit as

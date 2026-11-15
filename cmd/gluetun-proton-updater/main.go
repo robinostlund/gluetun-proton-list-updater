@@ -100,6 +100,10 @@ func run() (err error) {
 		CodeProvider: codeProvider,
 		SessionStore: proton.NewFileSessionStore(engine.SessionPath(cfg.StateDir)),
 		Logger:       logger.With("component", "proton"),
+		// Proton periodically retires old app versions (code 5003); look up
+		// the current official Linux release instead of failing until the
+		// next image update.
+		ResolveAppVersion: proton.GitHubAppVersionResolver(nil),
 	})
 	if err != nil {
 		return err

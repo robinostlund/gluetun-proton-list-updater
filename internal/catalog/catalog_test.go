@@ -620,3 +620,21 @@ func TestExplainNamesTheIPv6Filter(t *testing.T) {
 		t.Errorf("reasons = %q, want IPV6 named", joined)
 	}
 }
+
+func TestOverlayLoadsDoesNotMutateItsInput(t *testing.T) {
+	t.Parallel()
+
+	logicals := []proton.LogicalServer{logical("SE#1", "SE", 80, 0), logical("SE#2", "SE", 10, 0)}
+	logicals[1].ID = "id-other"
+	overlaid := OverlayLoads(logicals, []proton.ServerLoad{{ID: "id-SE#1", Load: 5, Score: 3, Status: 0}})
+
+	if overlaid[0].Load != 5 || overlaid[0].Score != 3 || overlaid[0].Status != 0 {
+		t.Errorf("overlay not applied: %+v", overlaid[0])
+	}
+	if overlaid[1].Load != 10 {
+		t.Errorf("a server without a load entry changed: %+v", overlaid[1])
+	}
+	if logicals[0].Load != 80 || logicals[0].Status != 1 {
+		t.Errorf("input was mutated: %+v", logicals[0])
+	}
+}
