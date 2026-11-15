@@ -994,7 +994,8 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `PROTON_REFRESH_INTERVAL` | `12h` | Full server-list refresh (min `15m`) |
 | `PROTON_LOAD_REFRESH_INTERVAL` | `15m` | Utilisation-only refresh (min `1m`) |
 | `PROTON_API_URL` | `https://vpn-api.proton.me` | API base URL |
-| `PROTON_APP_VERSION` | `linux-vpn-cli@4.15.2` | `x-pm-appversion` header; Proton rejects versions it deems too old |
+| `PROTON_APP_VERSION` | `linux-vpn-gui@4.19.0` | `x-pm-appversion` header. Proton rejects old versions (and all `linux-vpn-cli@` ones) with code 5003; when that happens the tool looks up the newest [Proton VPN Linux app](https://github.com/ProtonVPN/proton-vpn-gtk-app) release and switches to it automatically |
+| `PROTON_USER_AGENT` | `ProtonVPN/4.19.0 (Linux)` | `User-Agent` sent to Proton |
 | `PROTON_REQUEST_TIMEOUT` | `30s` | Per-request timeout |
 | `PROTON_CACHE_MAX_AGE` | `72h` | How old the cached list may be before it is reported as stale. It is still used past this — a stale list beats none. `0` disables the warning |
 
@@ -1043,7 +1044,7 @@ secrets. Configuration is validated at startup and **all** problems are reported
 | `FILTER_COUNTRIES` | *all* | Allow-list; accepts codes or names (`SE`, `Sweden`, `netherlands`) |
 | `FILTER_EXCLUDE_COUNTRIES` | – | Applied after `FILTER_COUNTRIES` |
 | `FILTER_CITIES` | *all* | City allow-list |
-| `FILTER_MAX_LOAD` | `90` | Drop servers above this utilisation |
+| `FILTER_MAX_LOAD` | `90` | Drop servers above this utilisation. Re-applied on every loads refresh, so a server that quietens down comes back |
 | `FILTER_VPN_TYPE` | `auto` | `auto` follows Gluetun's protocol; or `wireguard` / `openvpn` |
 | `FILTER_SECURE_CORE` | `exclude` | `include` / `exclude` / `only` |
 | `FILTER_TOR` | `exclude` | `include` / `exclude` / `only` |

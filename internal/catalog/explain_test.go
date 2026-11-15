@@ -241,3 +241,24 @@ func TestExplainReportsTierEntitlement(t *testing.T) {
 		t.Errorf("reasons = %v, want the tier requirement named", explanations[0].Reasons)
 	}
 }
+
+// Secure Core logicals are never deduplicated, so several can share one entry
+// node. Each must be reported as included, not as "deduplicated".
+func TestExplainSecureCoreSharingAnEntryIP(t *testing.T) {
+	t.Parallel()
+
+	logicals := []proton.LogicalServer{
+		logical("CH-SE#1", "SE", 10, proton.FeatureSecureCore),
+		logical("CH-NO#1", "NO", 20, proton.FeatureSecureCore),
+	}
+	for _, name := range []string{"CH-SE#1", "CH-NO#1"} {
+		explanations := Explain(logicals, Options{}, name)
+		if len(explanations) != 1 {
+			t.Fatalf("%s: got %d explanations, want 1", name, len(explanations))
+		}
+		got := explanations[0]
+		if !got.Included || len(got.Physical) != 1 || !got.Physical[0].Included {
+			t.Errorf("%s should be included: %+v", name, got)
+		}
+	}
+}

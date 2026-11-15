@@ -271,7 +271,11 @@ func (p *Prober) Summarize() (summary Summary) {
 
 	rtts := make([]time.Duration, 0, len(p.history))
 	for _, result := range p.history {
-		if result.Err != nil {
+		// Measured and Failed are disjoint. A result that failed its latest
+		// probe but kept the previous RTT is Measured, because scoring uses
+		// that figure; Failed means no usable figure at all. Counting it in
+		// both made Measured + Failed exceed the number of servers probed.
+		if result.Err != nil && result.RTT <= 0 {
 			summary.Failed++
 		}
 		if result.MeasuredAt.After(summary.LastRun) {

@@ -178,6 +178,9 @@ type Engine struct {
 	// every load to whatever the last full fetch saw, silently undoing up to a
 	// refresh interval of updates.
 	latestLoads []proton.ServerLoad
+	// logicalsInUse is the raw Proton list the candidates were last built from,
+	// kept so every loads refresh can rebuild them with current figures.
+	logicalsInUse []proton.LogicalServer
 	// gluetunWroteServerData records whether Gluetun had written any server data
 	// of its own before this process wrote anything.
 	//
@@ -190,7 +193,11 @@ type Engine struct {
 	gluetunWroteServerData bool
 
 	snapshotMu sync.RWMutex
-	snapshot   Snapshot
+	// filterMu guards requirements, vpnType and accountTier. Only the run loop
+	// writes them, so its own reads need no lock; Explain reads them from an
+	// HTTP goroutine through catalogOptions, which does.
+	filterMu sync.RWMutex
+	snapshot Snapshot
 }
 
 // Options configures a new Engine.
@@ -281,7 +288,20 @@ func (e *Engine) Explain(query string) (explanations []catalog.Explanation, err 
 	if !found {
 		return nil, errors.New("no cached Proton server list yet: wait for the first fetch to succeed")
 	}
-	return catalog.Explain(cached.Servers, e.catalogOptions(), query), nil
+	e.filterMu.RLock()
+	loads := e.latestLoads
+	e.filterMu.RUnlock()
+	// The same overlay the candidates were built with, so the explanation
+	// agrees with the list on screen about load and disabled status.
+	return catalog.Explain(catalog.OverlayLoads(cached.Servers, loads), e.catalogOptions(), query), nil
+}
+
+// setLatestLoads replaces latestLoads under filterMu, because Explain reads
+// it from an HTTP goroutine.
+func (e *Engine) setLatestLoads(loads []proton.ServerLoad) {
+	e.filterMu.Lock()
+	e.latestLoads = loads
+	e.filterMu.Unlock()
 }
 
 // SessionPath returns where the Proton session is stored, so main can wire the
@@ -551,9 +571,14 @@ func (e *Engine) applyCachedLoads(listFetchedAt time.Time) {
 		return // the list itself is at least as fresh
 	}
 
-	e.latestLoads = cached.Loads
-	updated := e.applyLoads(cached.Loads)
-	e.rerank()
+	e.setLatestLoads(cached.Loads)
+	updated := len(cached.Loads)
+	if e.logicalsInUse != nil {
+		e.applyLogicals(e.logicalsInUse, true)
+	} else {
+		updated = e.applyLoads(cached.Loads)
+		e.rerank()
+	}
 
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Proton.LastLoadRefresh = cached.UpdatedAt
@@ -565,6 +590,17 @@ func (e *Engine) applyCachedLoads(listFetchedAt time.Time) {
 
 // applyLogicals rebuilds the catalog and ranking from a logical server list.
 func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) {
+	e.logicalsInUse = logicals
+	if !fromCache {
+		// A freshly fetched list carries the newest loads there are; figures
+		// from an earlier loads refresh would only drag it back in time.
+		e.setLatestLoads(nil)
+	}
+	raw := logicals
+	// Candidates are built from the list with the newest loads applied, so
+	// load and status filters see current figures, not the full fetch's.
+	logicals = catalog.OverlayLoads(raw, e.latestLoads)
+
 	candidates, stats := catalog.Build(logicals, e.catalogOptions())
 
 	// Requiring P2P because a forwarded port was *requested* is an inference, not a
@@ -575,7 +611,9 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 		e.logger.Warn("no port-forwarding server is available, so that preference is being ignored",
 			"reason", "VPN_PORT_FORWARDING is on, but no P2P server survives the other filters",
 			"consequence", "the tunnel will connect, but Proton will not forward a port")
+		e.filterMu.Lock()
 		e.requirements.PortForward = false
+		e.filterMu.Unlock()
 		e.portForwardReason = ""
 		e.portForwardInferenceAbandoned = true
 		candidates, stats = catalog.Build(logicals, e.catalogOptions())
@@ -583,15 +621,11 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 
 	e.candidates = candidates
 	e.stats = stats
-	e.fileCandidates, _ = catalog.Build(logicals, e.fileCatalogOptions())
+	// servers.json is built from the raw list: whether a server belongs in it
+	// does not depend on its load, and a briefly disabled server should not
+	// make the file flap on every loads refresh.
+	e.fileCandidates, _ = catalog.Build(raw, e.fileCatalogOptions())
 	e.blocked = e.buildBlocked(logicals)
-
-	// Re-apply the newest utilisation figures over the freshly built candidates:
-	// the list they came from can be hours older than the last loads refresh.
-	if len(e.latestLoads) > 0 {
-		updated := e.applyLoads(e.latestLoads)
-		e.logger.Debug("re-applied the latest loads after rebuilding", "updated", updated)
-	}
 	e.rerank()
 
 	if len(stats.UnknownCountries) > 0 {
@@ -607,7 +641,7 @@ func (e *Engine) applyLogicals(logicals []proton.LogicalServer, fromCache bool) 
 	// A fresh list is the only authority on which servers still exist, so it is also
 	// the only moment a retired server's measurements may be discarded.
 	if !fromCache {
-		e.forgetRetiredServers(logicals)
+		e.forgetRetiredServers(raw)
 	}
 }
 
@@ -654,6 +688,8 @@ func (e *Engine) buildBlocked(logicals []proton.LogicalServer) (blocked []catalo
 
 // catalogOptions maps the configuration onto catalog filters.
 func (e *Engine) catalogOptions() catalog.Options {
+	e.filterMu.RLock()
+	defer e.filterMu.RUnlock()
 	return catalog.Options{
 		Countries:        e.cfg.Filter.Countries,
 		ExcludeCountries: e.cfg.Filter.ExcludeCountries,

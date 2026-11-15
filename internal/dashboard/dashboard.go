@@ -16,8 +16,11 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -168,8 +171,59 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("POST /api/gluetun/dns", s.lifecycle("dns", s.controller.SetDNS))
 	protected.HandleFunc("POST /api/totp", s.handleTOTP)
 
-	mux.Handle("/", s.withAuth(protected))
+	mux.Handle("/", securityHeaders(s.withAuth(rejectCrossSite(protected))))
 	return mux
+}
+
+// rejectCrossSite blocks cross-site request forgery against the command
+// endpoints. Auth is optional, and even with basic auth on the browser
+// replays cached credentials on a cross-site form POST, so without this any
+// web page a LAN user opens could stop the VPN or pin a server.
+//
+// The dashboard's own fetch calls always send JSON, which a cross-site form
+// cannot do without a CORS preflight (never granted here). Origin and
+// Sec-Fetch-Site are checked as well where the browser sends them.
+func rejectCrossSite(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			parsed, err := url.Parse(origin)
+			if err != nil || !strings.EqualFold(parsed.Host, r.Host) {
+				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+				return
+			}
+		}
+		mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if mediaType != "application/json" {
+			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeaders stops the dashboard being framed (clickjacking its
+// buttons) and confines the page to its own embedded assets. Inline styles
+// stay allowed because the load bars set their width with a style attribute.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("X-Frame-Options", "DENY")
+		header.Set("X-Content-Type-Options", "nosniff")
+		header.Set("Referrer-Policy", "no-referrer")
+		header.Set("Content-Security-Policy",
+			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; "+
+				"connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withAuth applies HTTP basic auth when credentials are configured.
@@ -424,6 +478,10 @@ func decodeJSON(r *http.Request, value any) (err error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		return fmt.Errorf("invalid request body: %w", err)
+	}
+	// Reject trailing data: a body is exactly one JSON value.
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("invalid request body: unexpected data after the JSON value")
 	}
 	return nil
 }

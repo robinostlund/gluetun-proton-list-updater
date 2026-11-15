@@ -80,8 +80,14 @@ func Explain(logicals []proton.LogicalServer, opts Options, query string) (expla
 	// machine won an entry IP is only knowable by running the same selection.
 	candidates, _ := Build(logicals, opts)
 	byEntryIP := make(map[string]Candidate, len(candidates))
+	// Secure Core candidates are never deduplicated, so several logicals can
+	// share one entry IP; inclusion is therefore keyed on (logical, entry IP)
+	// rather than read off byEntryIP, which only holds one per address.
+	type candidateKey struct{ logicalID, entryIP string }
+	included := make(map[candidateKey]bool, len(candidates))
 	for _, candidate := range candidates {
 		byEntryIP[candidate.EntryIP.String()] = candidate
+		included[candidateKey{candidate.LogicalID, candidate.EntryIP.String()}] = true
 	}
 
 	allowedCountries := toSet(opts.Countries)
@@ -172,7 +178,7 @@ func Explain(logicals []proton.LogicalServer, opts Options, query string) (expla
 			default:
 				kept, present := byEntryIP[physical.EntryIP.String()]
 				switch {
-				case present && kept.LogicalID == logical.ID:
+				case included[candidateKey{logical.ID, physical.EntryIP.String()}]:
 					entry.Included = true
 				case present && kept.Hostname == physical.Domain:
 					// The same machine, reached under a sibling logical name.

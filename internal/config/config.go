@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -82,7 +83,9 @@ type Proton struct {
 	// APIBaseURL defaults to Proton's VPN API host.
 	APIBaseURL string
 	// AppVersion is sent as x-pm-appversion. Proton rejects versions it
-	// considers too old, so this may need bumping over time.
+	// considers too old (code 5003) and every linux-vpn-cli@ version, so the
+	// default mirrors the official Linux GUI app. On a 5003 the client looks
+	// up the newest GUI release and switches to it automatically.
 	AppVersion string
 	UserAgent  string
 	// RefreshInterval is how often the full logical server list is fetched.
@@ -342,8 +345,8 @@ func Load() (cfg Config, err error) {
 		Password:            r.required("PROTON_PASSWORD"),
 		TOTPSecret:          strings.ReplaceAll(r.str("PROTON_TOTP_SECRET", ""), " ", ""),
 		APIBaseURL:          strings.TrimSuffix(r.str("PROTON_API_URL", "https://vpn-api.proton.me"), "/"),
-		AppVersion:          r.str("PROTON_APP_VERSION", "linux-vpn-cli@4.15.2"),
-		UserAgent:           r.str("PROTON_USER_AGENT", "ProtonVPN/4.15.2 (Linux)"),
+		AppVersion:          r.str("PROTON_APP_VERSION", "linux-vpn-gui@4.19.0"),
+		UserAgent:           r.str("PROTON_USER_AGENT", "ProtonVPN/4.19.0 (Linux)"),
 		RefreshInterval:     r.duration("PROTON_REFRESH_INTERVAL", 12*time.Hour),
 		LoadRefreshInterval: r.duration("PROTON_LOAD_REFRESH_INTERVAL", 15*time.Minute),
 		RequestTimeout:      r.duration("PROTON_REQUEST_TIMEOUT", 30*time.Second),
@@ -367,7 +370,7 @@ func Load() (cfg Config, err error) {
 		DirPath:              r.str("GLUETUN_SERVERS_DIR", "/gluetun/servers"),
 		Preferred:            r.boolean("GLUETUN_SERVERS_PREFERRED", true),
 		WriteMode:            r.choice("GLUETUN_SERVERS_WRITE_MODE", WriteModeUpdate, WriteModeUpdate, WriteModeReplace, WriteModeNone),
-		SchemaVersion:        uint16(r.integer("GLUETUN_SERVERS_SCHEMA_VERSION", 0)), //nolint:gosec // range checked below
+		SchemaVersion:        narrowSchemaVersion(r.integer("GLUETUN_SERVERS_SCHEMA_VERSION", 0)),
 		OnlyAllowedCountries: r.boolean("GLUETUN_SERVERS_ONLY_ALLOWED_COUNTRIES", false),
 		IncludeIPv6:          r.boolean("GLUETUN_SERVERS_INCLUDE_IPV6", false),
 	}
@@ -514,7 +517,9 @@ func (cfg *Config) normalizeAndValidate(r *reader) {
 	if cfg.Switch.LoadTrigger < 0 || cfg.Switch.LoadTrigger > 100 {
 		r.errorf("SWITCHING_LOAD_TRIGGER: must be between 0 and 100")
 	}
-	if cfg.Servers.SchemaVersion > 0 && cfg.Servers.SchemaVersion > 1000 {
+	if cfg.Servers.SchemaVersion == schemaVersionOutOfRange {
+		r.errorf("GLUETUN_SERVERS_SCHEMA_VERSION: must be between 0 and 1000")
+	} else if cfg.Servers.SchemaVersion > 1000 {
 		r.errorf("GLUETUN_SERVERS_SCHEMA_VERSION: %d looks implausible", cfg.Servers.SchemaVersion)
 	}
 	if (cfg.Dashboard.Username == "") != (cfg.Dashboard.Password == "") {
@@ -588,4 +593,16 @@ func errorStrings(errs []error) (strs []string) {
 		strs[i] = err.Error()
 	}
 	return strs
+}
+
+// schemaVersionOutOfRange marks a configured schema version that does not fit
+// a uint16 or is negative, so validation reports it instead of the value
+// silently wrapping (65536 would otherwise become 0, meaning auto-detect).
+const schemaVersionOutOfRange = math.MaxUint16
+
+func narrowSchemaVersion(value int) uint16 {
+	if value < 0 || value >= schemaVersionOutOfRange {
+		return schemaVersionOutOfRange
+	}
+	return uint16(value)
 }

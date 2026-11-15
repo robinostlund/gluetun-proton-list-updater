@@ -142,7 +142,8 @@ func unixOrZero(seconds int64) time.Time {
 // observeLoad folds a load reading in, maintaining the extremes.
 func (s *ServerStats) observeLoad(load uint8, at time.Time) {
 	s.LoadLast = load
-	if s.LoadLowest == 0 || load < s.LoadLowest {
+	// Samples, not LoadLowest == 0, marks "unset": 0% is a real Proton load.
+	if s.Samples == 0 || load < s.LoadLowest {
 		s.LoadLowest = load
 	}
 	if load > s.LoadHighest {
@@ -202,6 +203,11 @@ type persistedState struct {
 	// process has been running the whole time. Held only in memory, every restart would
 	// look like a fresh arrival and discard the stay's measured rates.
 	MeasuringHost string `json:"measuring_host,omitempty"`
+	// VisitedHost is the server whose current stay has already been counted in
+	// Visits. It is separate from MeasuringHost, which is only set once a stay
+	// has a non-zero rate: keying visits on that counted the same stay again on
+	// every poll where bytes moved but the instantaneous rate read zero.
+	VisitedHost string `json:"visited_host,omitempty"`
 	// Stats is what has been observed about each server, keyed by hostname.
 	//
 	// One record per server, fixed size. Load, latency and Proton's own score describe a

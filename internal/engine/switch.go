@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -94,7 +95,8 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 	current, haveCurrent := scoring.Find(e.ranked, currentHostname)
 	best := e.ranked[0]
 
-	verdict := e.decide(current, haveCurrent, best, force)
+	crashed := gluetun.Status == gluetunapi.StatusCrashed
+	verdict := e.decide(current, haveCurrent, best, force, crashed)
 	e.mutateSnapshot(func(snapshot *Snapshot) { snapshot.Selection.LastError = "" })
 
 	if !verdict.shouldSwitch {
@@ -139,8 +141,21 @@ func (e *Engine) evaluate(ctx context.Context, trigger string, force bool) {
 // decide applies the hysteresis rules. The goal is to switch when it clearly
 // helps and to stay put otherwise: a VPN that reconnects every few minutes is
 // worse than one on a slightly busier server.
-func (e *Engine) decide(current scoring.Scored, haveCurrent bool, best scoring.Scored, force bool) decision {
+//
+// crashed means Gluetun reports the tunnel as crashed on its current
+// selection. Staying put then keeps the tunnel down, so the "already on the
+// best server", cooldown and improvement rules do not apply; only the transfer
+// guard and the hard minimum-interval floor still do.
+func (e *Engine) decide(current scoring.Scored, haveCurrent bool, best scoring.Scored,
+	force, crashed bool,
+) decision {
 	if force {
+		// "Reconnect to best" while already on the best server would otherwise
+		// reach tryCandidates, which skips the current host and so moved the
+		// tunnel to the second-best server - the opposite of what was asked.
+		if !crashed && haveCurrent && current.Candidate.Hostname == best.Candidate.Hostname {
+			return decision{explanation: "already on the best server"}
+		}
 		return decision{shouldSwitch: true, reason: "manual"}
 	}
 	if !e.autoSwitchEnabled() {
@@ -165,7 +180,7 @@ func (e *Engine) decide(current scoring.Scored, haveCurrent bool, best scoring.S
 
 	// Checked before the floor below, because it is the more useful thing to say when both
 	// are true: "already on the best server" is the answer, and the floor is incidental.
-	if haveCurrent && current.Candidate.Hostname == best.Candidate.Hostname {
+	if !crashed && haveCurrent && current.Candidate.Hostname == best.Candidate.Hostname {
 		return decision{explanation: "already on the best server"}
 	}
 
@@ -184,6 +199,12 @@ func (e *Engine) decide(current scoring.Scored, haveCurrent bool, best scoring.S
 		return decision{explanation: fmt.Sprintf(
 			"minimum interval between switches not elapsed, %s to go",
 			remaining.Truncate(time.Second))}
+	}
+
+	if crashed {
+		// tryCandidates skips the current hostname, so this moves the tunnel
+		// off the server it cannot connect to, even when that is the best one.
+		return decision{shouldSwitch: true, reason: "tunnel crashed on the current server"}
 	}
 
 	if !haveCurrent {
@@ -361,16 +382,7 @@ func (e *Engine) tryCandidates(ctx context.Context, candidates []scoring.Scored,
 			snapshot.Selection.NeedsGluetunRestart = false
 			snapshot.Selection.LastError = ""
 			snapshot.Gluetun.Exit.IP = publicIP
-			// Gluetun's selection now names this hostname, because this is what was just
-			// applied and Gluetun accepted it. Recording it here rather than waiting for the
-			// next health check closes a window that produced a real double switch: the
-			// snapshot still held the pre-switch selection, so the very next evaluation saw
-			// readable settings naming no hostname, took that as proof the remembered pin
-			// was stale - which it is, in general - and switched again four seconds later.
-			if snapshot.Gluetun.Selection == nil {
-				snapshot.Gluetun.Selection = map[string][]string{}
-			}
-			snapshot.Gluetun.Selection["hostnames"] = []string{target.Candidate.Hostname}
+			noteAppliedSelection(snapshot, target.Candidate.Hostname)
 		})
 		e.logger.Info("switched server",
 			"hostname", target.Candidate.Hostname,
@@ -485,13 +497,20 @@ func (e *Engine) applyTarget(ctx context.Context, target scoring.Scored) (outcom
 			Country:  target.Candidate.Country,
 			City:     target.Candidate.City,
 		})
-		if err != nil {
+		if err != nil && !errors.Is(err, gluetunapi.ErrTimedOut) {
 			return "", err
 		}
+		// A timeout usually means "applied, still restarting", and the caller
+		// goes on to verify it - so the pin is remembered either way. Leaving
+		// the old one would make the next health check see Gluetun's selection
+		// differ from it, wrongly conclude Gluetun restarted, and drop the pin.
 		if updateErr := e.state.update(func(state *persistedState) {
 			state.PinnedHostname = target.Candidate.Hostname
 		}); updateErr != nil {
 			e.logger.Warn("could not persist pinned hostname", "error", updateErr)
+		}
+		if err != nil {
+			return "", err
 		}
 
 		// Gluetun stores the new selection but only restarts the VPN loop if it
@@ -514,13 +533,16 @@ func (e *Engine) applyTarget(ctx context.Context, target scoring.Scored) (outcom
 		// Gluetun chooses the server itself in this mode, so the pin is
 		// meaningless and must not be remembered as if it were honoured.
 		outcome, err = e.gluetun.Reconnect(ctx)
-		if err != nil {
+		if err != nil && !errors.Is(err, gluetunapi.ErrTimedOut) {
 			return "", err
 		}
 		if updateErr := e.state.update(func(state *persistedState) {
 			state.PinnedHostname = ""
 		}); updateErr != nil {
 			e.logger.Warn("could not persist state", "error", updateErr)
+		}
+		if err != nil {
+			return "", err
 		}
 		return outcome, nil
 
@@ -647,6 +669,12 @@ func (e *Engine) bestEffortPublicIP(ctx context.Context) (publicIP string) {
 func (e *Engine) recordSwitch(previousHostname string, previous scoring.Scored, havePrevious bool,
 	target scoring.Scored, reason, publicIP string, switchErr error,
 ) {
+	// The MaxDefer safety valve grants one switch after an overly long hold,
+	// not a licence to switch for the rest of the transfer: restart the clock
+	// so a transfer that resumes on the new server is protected again.
+	if switchErr == nil && !e.transferBusySince.IsZero() {
+		e.transferBusySince = time.Now()
+	}
 	record := SwitchRecord{
 		At:          time.Now(),
 		To:          target.Candidate.Hostname,
@@ -729,11 +757,21 @@ func (e *Engine) switchTo(ctx context.Context, hostname string) (err error) {
 			return fmt.Errorf("%w%s", err, e.knownAlternativeHint())
 		}
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, gluetunapi.ErrTimedOut):
+		// As in tryCandidates: Gluetun answers only once the VPN loop has
+		// restarted, so a timeout means "still working". Verify what actually
+		// happened instead of reporting a switch that may well have succeeded
+		// as a failure - which also left LastSwitchAt unset, so the cooldown
+		// did not count this reconnect.
+		e.logger.Warn("gluetun has not confirmed the change yet, verifying",
+			"hostname", hostname, "error", err)
+	case err != nil:
 		e.recordSwitch(currentHostname, current, haveCurrent, target, "manual", "", err)
 		return err
+	default:
+		e.logger.Info("gluetun accepted the requested server", "hostname", hostname, "outcome", outcome)
 	}
-	e.logger.Info("gluetun accepted the requested server", "hostname", hostname, "outcome", outcome)
 
 	publicIP, err := e.verifyTunnel(ctx, target, previousIP)
 	e.recordSwitch(currentHostname, current, haveCurrent, target, "manual", publicIP, err)
@@ -745,9 +783,29 @@ func (e *Engine) switchTo(ctx context.Context, hostname string) (err error) {
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Gluetun.Exit.IP = publicIP
 		snapshot.Selection.LastError = ""
+		noteAppliedSelection(snapshot, hostname)
 	})
 	e.logger.Info("switched to requested server", "hostname", hostname, "public_ip", publicIP)
 	return nil
+}
+
+// noteAppliedSelection records, inside a mutateSnapshot callback, that Gluetun's
+// selection now names hostname.
+func noteAppliedSelection(snapshot *Snapshot, hostname string) {
+	// Gluetun's selection now names this hostname, because this is what was just
+	// applied and Gluetun accepted it. Recording it here rather than waiting for the
+	// next health check closes a window that produced a real double switch: the
+	// snapshot still held the pre-switch selection, so the very next evaluation saw
+	// readable settings naming no hostname, took that as proof the remembered pin
+	// was stale - which it is, in general - and switched again four seconds later.
+	//
+	// Copy-on-write: Snapshot() hands out shallow copies that share this
+	// map, so writing into it in place races the dashboard's json.Marshal
+	// - a fatal "concurrent map read and map write", not a recoverable panic.
+	selection := make(map[string][]string, len(snapshot.Gluetun.Selection)+1)
+	maps.Copy(selection, snapshot.Gluetun.Selection)
+	selection["hostnames"] = []string{hostname}
+	snapshot.Gluetun.Selection = selection
 }
 
 // learnGluetunHostnames records the server list Gluetun revealed in a rejection.

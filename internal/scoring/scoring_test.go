@@ -1,6 +1,7 @@
 package scoring
 
 import (
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -198,5 +199,21 @@ func TestFindAndTopN(t *testing.T) {
 	}
 	if got := len(TopN(ranked, 0)); got != 3 {
 		t.Errorf("TopN(0) should return everything, got %d", got)
+	}
+}
+
+// After one failed sweep the prober keeps the last good RTT next to the error.
+// Scoring must use it: treating the server as unknown would inflate its
+// penalty and could trigger a switch on a single flaky probe.
+func TestRankUsesRTTKeptAfterOneFailedProbe(t *testing.T) {
+	t.Parallel()
+
+	candidates := []catalog.Candidate{candidate("flaky", 10, "10.0.0.1")}
+	latencies := map[string]latency.Result{
+		"10.0.0.1": {RTT: 10 * time.Millisecond, Err: errors.New("timeout")},
+	}
+	ranked := Rank(candidates, latencies, testScore())
+	if !ranked[0].LatencyKnown || ranked[0].RTT != 10*time.Millisecond {
+		t.Errorf("kept RTT ignored: known=%v rtt=%v", ranked[0].LatencyKnown, ranked[0].RTT)
 	}
 }

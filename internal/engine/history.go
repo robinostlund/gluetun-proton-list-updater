@@ -139,7 +139,15 @@ func (e *Engine) recordTransfer(reading rateReading) {
 	// A stay is defined by where the tunnel is, so this comes from persisted state rather
 	// than from memory: otherwise a restart would look like a fresh arrival and throw away
 	// the rates measured so far on the server the tunnel never left.
-	newStay := hostname != e.state.snapshot().MeasuringHost
+	persisted := e.state.snapshot()
+	newStay := hostname != persisted.MeasuringHost
+	visited := persisted.VisitedHost
+	if visited == "" {
+		// State written before VisitedHost existed: the measuring host is the
+		// stay that was already counted.
+		visited = persisted.MeasuringHost
+	}
+	newVisit := hostname != visited
 	now := time.Now()
 
 	// Deliberately mutate rather than update: this runs on every qBittorrent poll, and
@@ -154,8 +162,9 @@ func (e *Engine) recordTransfer(reading rateReading) {
 		// Visits counts stays during which this server actually carried something, which is
 		// the useful reading of "how often have I used this one": a stay that moved nothing
 		// tells you about your torrents, not about the server.
-		if newStay {
+		if newVisit {
 			stats.Visits++
+			state.VisitedHost = hostname
 		}
 		if stats.FirstSeenUnix == 0 {
 			stats.FirstSeenUnix = now.Unix()

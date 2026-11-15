@@ -33,7 +33,7 @@ func (e *Engine) refreshServerList(ctx context.Context, trigger string) {
 
 	// Ask what the account may actually use before applying the list, so the tier
 	// limit is in place when candidates are built.
-	e.refreshAccountInfo(ctx)
+	tierChanged := e.refreshAccountInfo(ctx)
 
 	logicals, lastModified, err := e.proton.Logicals(ctx, previousModified)
 	switch {
@@ -43,6 +43,11 @@ func (e *Engine) refreshServerList(ctx context.Context, trigger string) {
 			snapshot.Proton.LastFetch = time.Now()
 			snapshot.Proton.LastFetchError = ""
 		})
+		// The list is unchanged, but a plan change alters which servers the
+		// account may use, so the candidates must be rebuilt regardless.
+		if tierChanged {
+			e.rebuildFromCache("proton account tier changed")
+		}
 		// The list is unchanged but servers.json may never have been written
 		// (first run after a crash), so still make sure it is on disk.
 		e.writeServersFile()
@@ -116,18 +121,24 @@ func (e *Engine) refreshServerList(ctx context.Context, trigger string) {
 // Proton's list contains servers above the account's entitlement, and they are
 // indistinguishable from usable ones until the connection is refused. Knowing the
 // tier turns that into a filter rather than a failed reconnect.
-func (e *Engine) refreshAccountInfo(ctx context.Context) {
+//
+// tierChanged reports a change from a previously known tier, which means the
+// candidate list built under the old tier is stale.
+func (e *Engine) refreshAccountInfo(ctx context.Context) (tierChanged bool) {
 	info, err := e.proton.Account(ctx)
 	if err != nil {
 		// Not fatal: without it nothing is filtered by tier, which is how this
 		// worked before the account was consulted at all.
 		e.logger.Warn("could not read the proton account details", "error", err)
-		return
+		return false
 	}
 
 	tier := info.Tier
 	changed := e.accountTier == nil || *e.accountTier != tier
+	tierChanged = e.accountTier != nil && *e.accountTier != tier
+	e.filterMu.Lock()
 	e.accountTier = &tier
+	e.filterMu.Unlock()
 
 	e.mutateSnapshot(func(snapshot *Snapshot) {
 		snapshot.Proton.AccountTier = &tier
@@ -154,12 +165,15 @@ func (e *Engine) refreshAccountInfo(ctx context.Context) {
 	if info.Delinquent != 0 {
 		e.logger.Warn("proton reports the account as delinquent, which can cause connections to be refused")
 	}
+	return tierChanged
 }
 
 // refreshLoads updates utilisation from the cheap loads endpoint. This is what
 // makes "lowest utilised" mean "right now" rather than "twelve hours ago".
 func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
-	if len(e.candidates) == 0 {
+	// Not gated on having candidates: FILTER_MAX_LOAD can empty the list on a
+	// busy evening, and only a loads refresh can bring servers back.
+	if len(e.candidates) == 0 && len(e.logicalsInUse) == 0 {
 		return
 	}
 
@@ -176,11 +190,14 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 		return
 	}
 
-	e.latestLoads = loads
+	e.setLatestLoads(loads)
 	before := len(e.candidates)
-	updated := e.applyLoads(loads)
-	dropped := before - len(e.candidates)
-	e.rerank()
+	if e.logicalsInUse != nil {
+		e.applyLogicals(e.logicalsInUse, true)
+	} else {
+		e.applyLoads(loads)
+		e.rerank()
+	}
 	e.recordSamples()
 
 	// Persisted separately from the server list: a few kilobytes rewritten every
@@ -200,8 +217,8 @@ func (e *Engine) refreshLoads(ctx context.Context, trigger string) {
 	// indistinguishable from a stalled one. Ninety-six lines a day is a price worth paying
 	// for that.
 	e.logger.Info("refreshed server loads",
-		"trigger", trigger, "updated", updated, "disabled", dropped,
-		"candidates", len(e.candidates))
+		"trigger", trigger, "loads", len(loads),
+		"candidates_before", before, "candidates", len(e.candidates))
 }
 
 // applyLoads refreshes utilisation across every set the dashboard shows.
@@ -607,7 +624,9 @@ func (e *Engine) updateRequirements(from gluetunapi.Requirements) {
 			"multi_hop_only", from.MultiHop, "owned_only", from.Owned)
 	}
 
+	e.filterMu.Lock()
 	e.requirements = requirements
+	e.filterMu.Unlock()
 	e.rebuildFromCache("gluetun requirements changed")
 	e.publish()
 }
@@ -631,7 +650,9 @@ func (e *Engine) updateVPNType(vpnType string) {
 		return
 	}
 	previous := e.effectiveVPNType()
+	e.filterMu.Lock()
 	e.vpnType = vpnType
+	e.filterMu.Unlock()
 	if e.cfg.Filter.VPNType != "auto" || e.effectiveVPNType() == previous {
 		return
 	}

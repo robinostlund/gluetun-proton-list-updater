@@ -161,6 +161,7 @@ func TestDetectSchemaVersion(t *testing.T) {
 			[]byte(`{"version":7,"timestamp":1,"servers":[]}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		writeManifest(t, serversDir)
 
 		version, source, err := DetectSchemaVersion(Paths{
 			Directory: serversDir, LegacyFile: filepath.Join(dir, "servers.json"),
@@ -207,6 +208,7 @@ func TestDetectSchemaVersion(t *testing.T) {
 			[]byte(`{"version":9,"timestamp":1,"servers":[]}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		writeManifest(t, serversDir)
 		legacy := filepath.Join(dir, "servers.json")
 		if err := os.WriteFile(legacy,
 			[]byte(`{"version":1,"protonvpn":{"version":3,"timestamp":1}}`), 0o644); err != nil {
@@ -219,6 +221,33 @@ func TestDetectSchemaVersion(t *testing.T) {
 		}
 		if version != 9 {
 			t.Errorf("version = %d, want 9 from the per-provider file", version)
+		}
+	})
+
+	// Without Gluetun's manifest the per-provider file can only be this
+	// tool's own earlier output ("both" layout), so it must not be trusted.
+	t.Run("own per-provider file ignored without a manifest", func(t *testing.T) {
+		dir := t.TempDir()
+		serversDir := filepath.Join(dir, "servers")
+		if err := os.MkdirAll(serversDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(serversDir, "protonvpn.json"),
+			[]byte(`{"version":4,"timestamp":1,"servers":[]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		legacy := filepath.Join(dir, "servers.json")
+		if err := os.WriteFile(legacy,
+			[]byte(`{"version":1,"protonvpn":{"version":3,"timestamp":1}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		version, _, err := DetectSchemaVersion(Paths{Directory: serversDir, LegacyFile: legacy})
+		if err != nil {
+			t.Fatalf("DetectSchemaVersion: %v", err)
+		}
+		if version != 3 {
+			t.Errorf("version = %d, want 3 from Gluetun's legacy file", version)
 		}
 	})
 
@@ -641,5 +670,12 @@ func TestAmbiguousLayoutWritesTheLegacyFileToo(t *testing.T) {
 	}
 	if !wroteDirectory {
 		t.Error("the directory file was not written, so a current Gluetun would see nothing")
+	}
+}
+
+func writeManifest(t *testing.T, serversDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(serversDir, manifestFilename), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

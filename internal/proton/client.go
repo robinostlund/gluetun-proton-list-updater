@@ -73,19 +73,23 @@ type Options struct {
 	Logger       *slog.Logger
 	// HTTPClient overrides the default client. Used by tests.
 	HTTPClient *http.Client
+	// ResolveAppVersion, when set, is consulted after Proton rejects
+	// AppVersion as too old (code 5003); the client then switches to the
+	// returned release and retries once. Nil disables the self-healing.
+	ResolveAppVersion AppVersionResolver
 }
 
 // Client talks to the Proton API. It is safe for concurrent use.
 type Client struct {
-	baseURL    string
-	appVersion string
-	userAgent  string
-	username   string
-	password   string
-	codes      CodeProvider
-	store      SessionStore
-	logger     *slog.Logger
-	httpClient *http.Client
+	baseURL        string
+	identity       *identity
+	resolveVersion AppVersionResolver
+	username       string
+	password       string
+	codes          CodeProvider
+	store          SessionStore
+	logger         *slog.Logger
+	httpClient     *http.Client
 
 	session *sessionHolder
 }
@@ -114,16 +118,16 @@ func New(opts Options) (client *Client, err error) {
 	}
 
 	client = &Client{
-		baseURL:    opts.BaseURL,
-		appVersion: opts.AppVersion,
-		userAgent:  opts.UserAgent,
-		username:   opts.Username,
-		password:   opts.Password,
-		codes:      opts.CodeProvider,
-		store:      opts.SessionStore,
-		logger:     logger,
-		httpClient: httpClient,
-		session:    &sessionHolder{},
+		baseURL:        opts.BaseURL,
+		identity:       &identity{appVersion: opts.AppVersion, userAgent: opts.UserAgent},
+		resolveVersion: opts.ResolveAppVersion,
+		username:       opts.Username,
+		password:       opts.Password,
+		codes:          opts.CodeProvider,
+		store:          opts.SessionStore,
+		logger:         logger,
+		httpClient:     httpClient,
+		session:        &sessionHolder{},
 	}
 
 	if client.store != nil {
@@ -267,7 +271,8 @@ func (c *Client) attempt(ctx context.Context, method, path string,
 		return nil, err
 	}
 
-	responseHeader, status, err := c.do(ctx, method, path, body, headers, c.session.get(), out)
+	used := c.session.get()
+	responseHeader, status, err := c.do(ctx, method, path, body, headers, used, out)
 	if err == nil {
 		return responseHeader, nil
 	}
@@ -276,15 +281,8 @@ func (c *Client) attempt(ctx context.Context, method, path string,
 	case status == http.StatusNotModified:
 		return responseHeader, ErrNotModified
 	case status == http.StatusUnauthorized:
-		// Access token expired: refresh and retry exactly once. If the refresh
-		// token is dead too, fall back to a full login.
-		c.logger.Debug("proton access token rejected, refreshing session")
-		if refreshErr := c.refresh(ctx); refreshErr != nil {
-			c.logger.Debug("proton refresh failed, logging in again", "error", refreshErr)
-			c.session.clear()
-			if loginErr := c.login(ctx); loginErr != nil {
-				return nil, loginErr
-			}
+		if err := c.renewSession(ctx, used); err != nil {
+			return nil, err
 		}
 		responseHeader, status, err = c.do(ctx, method, path, body, headers, c.session.get(), out)
 		if status == http.StatusNotModified {
@@ -296,11 +294,55 @@ func (c *Client) attempt(ctx context.Context, method, path string,
 	}
 }
 
+// renewSession replaces a session whose access token was rejected: refresh
+// first, and log in again only if the refresh token is dead too.
+//
+// It holds loginMutex, and skips the work when another goroutine has already
+// replaced the rejected session. Without that, concurrent 401s would each
+// spend the same single-use refresh token; every refresh after the first
+// would fail and trigger a needless full SRP login.
+func (c *Client) renewSession(ctx context.Context, rejected Session) (err error) {
+	loginMutex.Lock()
+	defer loginMutex.Unlock()
+
+	if current := c.session.get(); current.valid() && current.AccessToken != rejected.AccessToken {
+		return nil
+	}
+	c.logger.Debug("proton access token rejected, refreshing session")
+	if refreshErr := c.refresh(ctx); refreshErr != nil {
+		c.logger.Debug("proton refresh failed, logging in again", "error", refreshErr)
+		c.session.clear()
+		return c.login(ctx)
+	}
+	return nil
+}
+
 // do performs a single HTTP request, decoding the body into out on success.
 // It returns the HTTP status code so callers can branch on it even when err is
-// non-nil.
+// non-nil. When Proton rejects the app version as too old it upgrades the
+// version (if a resolver is configured) and retries once.
 func (c *Client) do(ctx context.Context, method, path string, body any,
 	headers http.Header, session Session, out any,
+) (responseHeader http.Header, status int, err error) {
+	appVersion, userAgent := c.identity.get()
+	responseHeader, status, err = c.doOnce(ctx, method, path, body, headers, session, out, appVersion, userAgent)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == codeAppVersionUnsupported &&
+		c.upgradeAppVersion(ctx, appVersion) {
+		appVersion, userAgent = c.identity.get()
+		return c.doOnce(ctx, method, path, body, headers, session, out, appVersion, userAgent)
+	}
+	return responseHeader, status, err
+}
+
+// AppVersion returns the x-pm-appversion currently sent.
+func (c *Client) AppVersion() string {
+	appVersion, _ := c.identity.get()
+	return appVersion
+}
+
+func (c *Client) doOnce(ctx context.Context, method, path string, body any,
+	headers http.Header, session Session, out any, appVersion, userAgent string,
 ) (responseHeader http.Header, status int, err error) {
 	var bodyReader io.Reader
 	if body != nil {
@@ -316,8 +358,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any,
 		return nil, 0, fmt.Errorf("creating request: %w", err)
 	}
 
-	request.Header.Set("x-pm-appversion", c.appVersion)
-	request.Header.Set("User-Agent", c.userAgent)
+	request.Header.Set("x-pm-appversion", appVersion)
+	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Accept", "application/vnd.protonmail.v1+json")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")

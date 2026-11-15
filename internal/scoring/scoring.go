@@ -67,7 +67,10 @@ func Rank(candidates []catalog.Candidate, latencies map[string]latency.Result, c
 		scored.LoadPenalty = cfg.LoadWeight * clamp01(float64(candidate.Load)/100)
 
 		normalisedLatency := cfg.UnknownLatencyPenalty
-		if result, ok := latencies[candidate.EntryIP.String()]; ok && result.OK() {
+		// RTT > 0 rather than OK(): after one failed sweep the prober keeps the
+		// last good RTT alongside the error, precisely so a single flaky probe
+		// does not make the current server look unknown and trigger a switch.
+		if result, ok := latencies[candidate.EntryIP.String()]; ok && result.RTT > 0 {
 			scored.RTT = result.RTT
 			scored.LatencyKnown = true
 			normalisedLatency = clamp01(float64(result.RTT) / ceiling)
